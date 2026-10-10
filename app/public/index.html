@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nexo</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- Tela de login / cadastro -->
+  <main id="auth" class="auth" hidden>
+    <div class="auth-card">
+      <div class="brand"><span class="brand-mark">N</span> Nexo</div>
+      <h1 id="auth-title">Bem-vindo de volta</h1>
+      <p class="muted" id="auth-subtitle">Entre para continuar a conversa.</p>
+      <form id="auth-form" autocomplete="on">
+        <label>Usuário
+          <input name="username" required minlength="3" maxlength="32" autocomplete="username" autocapitalize="none" spellcheck="false" />
+        </label>
+        <label id="display-name-field" hidden>Nome de exibição
+          <input name="displayName" maxlength="32" autocomplete="nickname" />
+        </label>
+        <label>Senha
+          <input name="password" type="password" required minlength="6" maxlength="128" autocomplete="current-password" />
+        </label>
+        <p class="form-error" id="auth-error" role="alert"></p>
+        <button class="btn primary" type="submit" id="auth-submit">Entrar</button>
+      </form>
+      <p class="switch">
+        <span id="auth-switch-text">Não tem conta?</span>
+        <button class="link" type="button" id="auth-switch">Cadastre-se</button>
+      </p>
+    </div>
+  </main>
+
+  <!-- App principal -->
+  <div id="app" class="app" hidden>
+    <nav class="rail" aria-label="Servidores">
+      <div id="server-list" class="server-list"></div>
+      <div class="rail-sep"></div>
+      <button class="rail-btn add" id="btn-create-server" title="Criar servidor">+</button>
+      <button class="rail-btn join" id="btn-join-server" title="Entrar com convite">↪</button>
+    </nav>
+
+    <aside class="sidebar">
+      <header class="sidebar-header">
+        <span id="server-name" class="truncate">Nenhum servidor</span>
+        <button class="icon-btn" id="btn-invite" title="Copiar código de convite" hidden>Convidar</button>
+      </header>
+      <div class="channels">
+        <div class="section-title">
+          <span>Canais de texto</span>
+          <button class="icon-btn small" id="btn-create-channel" title="Criar canal" hidden>+</button>
+        </div>
+        <ul id="channel-list"></ul>
+      </div>
+      <footer class="user-panel">
+        <div class="avatar" id="me-avatar"></div>
+        <div class="user-meta">
+          <strong id="me-name" class="truncate"></strong>
+          <span id="me-username" class="muted truncate"></span>
+        </div>
+        <button class="icon-btn" id="btn-logout" title="Sair">Sair</button>
+      </footer>
+    </aside>
+
+    <section class="chat">
+      <header class="chat-header">
+        <button class="icon-btn mobile-only" id="btn-toggle-sidebar" title="Canais">☰</button>
+        <span class="hash">#</span>
+        <span id="channel-name" class="truncate"></span>
+        <span class="conn-status" id="conn-status" hidden>Reconectando…</span>
+        <button class="icon-btn mobile-hide" id="btn-toggle-members" title="Membros">Membros</button>
+      </header>
+      <div class="messages" id="messages">
+        <div class="empty" id="empty-state">
+          <h2>Crie ou entre em um servidor</h2>
+          <p class="muted">Use o <strong>+</strong> à esquerda para criar um servidor, ou <strong>↪</strong> para entrar com um código de convite.</p>
+        </div>
+      </div>
+      <div class="typing" id="typing" aria-live="polite"></div>
+      <form class="composer" id="composer" hidden>
+        <textarea id="composer-input" rows="1" maxlength="4000" placeholder="Mensagem"></textarea>
+        <button class="btn primary send" type="submit">Enviar</button>
+      </form>
+    </section>
+
+    <aside class="members" id="members-panel">
+      <div id="member-list"></div>
+    </aside>
+  </div>
+
+  <!-- Janela genérica para criar/entrar -->
+  <dialog id="dialog">
+    <form method="dialog" id="dialog-form">
+      <h2 id="dialog-title"></h2>
+      <p class="muted" id="dialog-text"></p>
+      <input id="dialog-input" maxlength="100" />
+      <p class="form-error" id="dialog-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel" formnovalidate>Cancelar</button>
+        <button class="btn primary" value="ok" id="dialog-ok">OK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status"></div>
+
+  <!-- Cliente do Socket.IO é servido pelo próprio backend -->
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
