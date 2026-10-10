@@ -23,16 +23,48 @@ Chat em tempo real no estilo de servidores e canais. Projeto pessoal, construíd
 - **Mensagens diretas (DMs)** entre amigos ou pessoas do mesmo servidor
 - Expulsar membros, sair do servidor, perfil com cargos ao clicar no nome
 
+**Fase 3**
+- **Canais de voz** 🔊: microfone, mutar, ensurdecer e borda verde em quem está falando
+- **Câmera** 📹 e **compartilhar tela** 🖥️ dentro dos canais de voz
+- Dá para continuar na voz enquanto navega pelos canais de texto e DMs
+- Novas permissões: *Entrar em canais de voz*, *Falar* e *Vídeo e tela*
+- **API para bots** 🤖: contas de bot com token, envio pela API REST e eventos em tempo real
+- **Bot de exemplo** pronto (`!ajuda`, `!ping`, `!dado`, `!eco`, `!uptime`)
+- **HTTPS** com o Caddy (o navegador exige HTTPS para microfone e câmera)
+
 ## Como rodar (no servidor Ubuntu com Docker)
 
 ```bash
 cd ~/nexo
 cp .env.example .env
-nano .env          # troque DB_PASSWORD e JWT_SECRET (use: openssl rand -hex 32)
+nano .env                      # troque DB_PASSWORD e JWT_SECRET (use: openssl rand -hex 32)
+bash infra/completar-env.sh    # gera NEXO_HOST e as chaves do LiveKit
 docker compose up -d --build
 ```
 
-Abra `http://IP-DO-SERVIDOR:3000` no navegador.
+Abra **`https://IP-DO-SERVIDOR`** no navegador (o `http://IP:3000` continua funcionando, mas sem voz).
+
+### Certificado HTTPS (rede local)
+
+O Caddy cria o próprio certificado. Na primeira visita o navegador avisa "conexão não particular":
+clique em **Avançado → Continuar**. Para o aviso sumir de vez, instale o certificado raiz no Windows:
+
+```bash
+docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ~/nexo-ca.crt
+```
+
+Baixe o `nexo-ca.crt` (VS Code: botão direito → Download), dê dois cliques nele →
+**Instalar Certificado** → *Usuário Atual* → *Colocar todos os certificados no repositório a seguir* →
+**Autoridades de Certificação Raiz Confiáveis** → Concluir. Feche e abra o navegador.
+
+### Portas usadas
+
+| Porta | Para quê |
+|---|---|
+| 443 / 80 | Nexo em HTTPS (Caddy) |
+| 3000 | Nexo direto, sem HTTPS |
+| 7881/tcp e 7882/udp | Áudio e vídeo (LiveKit) |
+| 8080 | Jenkins |
 
 O banco é atualizado sozinho ao iniciar (pasta `app/src/migrations`), sem perder dados.
 
@@ -44,6 +76,36 @@ docker compose logs -f app     # ver os logs do app
 docker compose up -d --build   # atualizar depois de mudar o código
 docker compose down            # parar (os dados ficam salvos)
 ```
+
+## Bots
+
+1. No Nexo, clique no seu nome (embaixo, à esquerda) → **Desenvolvedor (bots)** → **Criar bot**. Copie o token.
+2. Na mesma tela, **Adicionar a um servidor** (precisa da permissão *Gerenciar servidor*).
+3. Para rodar o bot de exemplo, coloque no `.env` `BOT_TOKEN=<token>` e rode:
+
+```bash
+docker compose --profile bots up -d --build bot-exemplo
+docker compose logs -f bot-exemplo
+```
+
+Para programar o seu: edite `examples/bot-exemplo/index.js` (cada comando é uma entrada em `COMMANDS`).
+
+**API para bots** — sempre com o cabeçalho `Authorization: Bot <token>`:
+
+| Método | Rota | O que faz |
+|---|---|---|
+| GET | `/api/me` | Dados do bot |
+| GET | `/api/servers` | Servidores onde o bot está |
+| GET | `/api/servers/:id` | Canais e membros |
+| GET | `/api/channels/:id/messages` | Histórico |
+| POST | `/api/channels/:id/messages` | Envia `{ content }` |
+| PATCH/DELETE | `/api/messages/:id` | Edita/apaga as próprias mensagens |
+| PUT/DELETE | `/api/messages/:id/reactions/:emoji` | Reage |
+
+Tempo real: conecte no Socket.IO com `auth: { token: "Bot <token>" }` e escute `message:new`,
+`message:updated`, `message:deleted`, `message:reactions`, `presence`.
+Bots não podem criar servidores, entrar por convite, ter amigos ou entrar em canais de voz.
+Limite: 5 mensagens a cada 5 segundos (acima disso a API responde 429).
 
 ## Deploy automático (Jenkins)
 
@@ -57,9 +119,14 @@ A imagem do Jenkins com Docker fica em `infra/jenkins/` (`bash infra/jenkins/rec
 
 ```
 nexo/
-├── docker-compose.yml       # app + banco Postgres + volume dos anexos
+├── docker-compose.yml       # app, Postgres, Caddy (HTTPS), LiveKit (voz) e bot de exemplo
 ├── Jenkinsfile              # pipeline de deploy
-├── infra/jenkins/           # imagem do Jenkins com acesso ao Docker
+├── infra/
+│   ├── caddy/               # HTTPS na frente do app
+│   ├── livekit/             # servidor de voz e vídeo
+│   ├── jenkins/             # imagem do Jenkins com acesso ao Docker
+│   └── completar-env.sh     # gera as configurações novas no .env
+├── examples/bot-exemplo/    # bot pronto para usar e modificar
 └── app/
     ├── src/
     │   ├── server.js        # inicia Express + Socket.IO
@@ -67,6 +134,7 @@ nexo/
     │   ├── realtime.js      # tempo real: enviar mensagem, digitando, lido, presença
     │   ├── messages.js      # criar/editar/apagar mensagens, menções, reações
     │   ├── permissions.js   # permissões e hierarquia de cargos
+    │   ├── voice.js         # quem está na voz + tokens do LiveKit
     │   ├── files.js         # upload/download de anexos e faxina
     │   ├── events.js        # avisos em tempo real para os navegadores
     │   ├── migrations/      # mudanças no banco, em ordem
@@ -74,7 +142,7 @@ nexo/
     └── public/              # frontend (HTML, CSS e JS puro, sem build)
         ├── index.html
         ├── styles.css
-        └── js/              # main.js, home.js (amigos), settings.js, emoji.js, state.js, util.js
+        └── js/              # main.js, voice.js, developer.js (bots), home.js (amigos), settings.js, ...
 ```
 
 ## Segurança (bom saber)
@@ -86,6 +154,8 @@ nexo/
   (igual ao Discord).
 - O Jenkins tem controle do Docker do servidor: use senha forte e não exponha o Jenkins na internet.
 
-## Próxima fase
+## Limitações conhecidas
 
-- **Fase 3:** canais de voz, vídeo e compartilhamento de tela (LiveKit), API para bots.
+- A voz funciona na sua rede. Para amigos de fora, o servidor precisa ficar acessível pela internet
+  (domínio + HTTPS de verdade + portas do LiveKit liberadas).
+- Se alguém perder a permissão de voz enquanto já está num canal, só sai na próxima vez que entrar.

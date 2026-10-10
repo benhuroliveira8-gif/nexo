@@ -5,6 +5,8 @@ const S = require('../serializers');
 const presence = require('../presence');
 const events = require('../events');
 const files = require('../files');
+const voice = require('../voice');
+const { humansOnly } = require('../auth');
 const { P, ALL, DEFAULT_EVERYONE, memberContext } = require('../permissions');
 const { wrap, fail, parseId, channelStates, markServerRead } = require('./util');
 
@@ -63,7 +65,7 @@ async function serverDetail(serverId, userId) {
     db.query('SELECT * FROM servers WHERE id = $1', [serverId]),
     db.query('SELECT * FROM channels WHERE server_id = $1 ORDER BY position, id', [serverId]),
     db.query(
-      `SELECT u.id, u.username, u.display_name FROM users u
+      `SELECT u.id, u.username, u.display_name, u.is_bot FROM users u
        JOIN server_members m ON m.user_id = u.id
        WHERE m.server_id = $1 ORDER BY lower(u.display_name)`,
       [serverId],
@@ -82,6 +84,7 @@ async function serverDetail(serverId, userId) {
     channels: channels.rows.map((c) => ({ ...S.channel(c), ...(states.get(c.id) || { unread: false, mentions: 0 }) })),
     members: members.rows.map((m) => ({ ...S.user(m), online: presence.isOnline(m.id), roleIds: rolesByUser.get(m.id) || [] })),
     roles: roles.rows.map(S.role),
+    voice: voice.statesForChannels(channels.rows.filter((c) => c.kind === 'voice').map((c) => c.id)),
     me: { permissions: ctx.perms, isOwner: ctx.isOwner, top: ctx.isOwner ? null : ctx.top },
   };
 }
@@ -95,6 +98,7 @@ async function removeMember(serverId, userId, reason) {
       [userId, serverId],
     );
   });
+  voice.leaveServer(userId, serverId);
   const io = events.getIo();
   if (io) io.in(`user:${userId}`).socketsLeave(`server:${serverId}`);
   events.emitTo([`user:${userId}`], 'server:removed', { serverId, reason });
@@ -129,7 +133,7 @@ module.exports = function serverRoutes(r) {
     });
   }));
 
-  r.post('/servers', wrap(async (req, res) => {
+  r.post('/servers', humansOnly, wrap(async (req, res) => {
     const name = String(req.body.name || '').trim().slice(0, 100);
     if (!name) fail(400, 'Dê um nome ao servidor.');
 
@@ -176,6 +180,8 @@ module.exports = function serverRoutes(r) {
        JOIN channels c ON c.id = m.channel_id WHERE c.server_id = $1`,
       [ctx.serverId],
     );
+    const vc = await db.query("SELECT id FROM channels WHERE server_id = $1 AND kind = 'voice'", [ctx.serverId]);
+    vc.rows.forEach((c) => voice.clearChannel(c.id));
     await db.query('DELETE FROM servers WHERE id = $1', [ctx.serverId]);
     att.rows.forEach((a) => files.removeFile(a.id));
     events.emitTo([`server:${ctx.serverId}`], 'server:removed', { serverId: ctx.serverId, reason: 'deleted' });
@@ -198,7 +204,7 @@ module.exports = function serverRoutes(r) {
 
   const codeFrom = (raw) => String(raw || '').trim().split('/').filter(Boolean).pop() || '';
 
-  r.get('/invites/:code', wrap(async (req, res) => {
+  r.get('/invites/:code', humansOnly, wrap(async (req, res) => {
     const { rows } = await db.query(
       `SELECT s.id, s.name,
          (SELECT count(*)::int FROM server_members WHERE server_id = s.id) AS member_count,
@@ -210,7 +216,7 @@ module.exports = function serverRoutes(r) {
     res.json({ server: { id: rows[0].id, name: rows[0].name }, memberCount: rows[0].member_count, isMember: rows[0].is_member });
   }));
 
-  r.post('/servers/join', wrap(async (req, res) => {
+  r.post('/servers/join', humansOnly, wrap(async (req, res) => {
     const { rows } = await db.query('SELECT * FROM servers WHERE invite_code = $1', [codeFrom(req.body.code)]);
     const server = rows[0];
     if (!server) fail(404, 'Convite inválido ou expirado.');
@@ -235,11 +241,12 @@ module.exports = function serverRoutes(r) {
     const ctx = await requireMember(req, P.MANAGE_CHANNELS);
     const name = normalizeChannelName(req.body.name);
     if (!name) fail(400, 'Dê um nome ao canal.');
+    const kind = req.body.kind === 'voice' ? 'voice' : 'text';
     const { rows } = await db.query(
-      `INSERT INTO channels (server_id, name, position)
-       VALUES ($1, $2, (SELECT COALESCE(MAX(position), -1) + 1 FROM channels WHERE server_id = $1))
+      `INSERT INTO channels (server_id, name, kind, position)
+       VALUES ($1, $2, $3, (SELECT COALESCE(MAX(position), -1) + 1 FROM channels WHERE server_id = $1))
        RETURNING *`,
-      [ctx.serverId, name],
+      [ctx.serverId, name, kind],
     );
     events.serverChanged(ctx.serverId);
     res.status(201).json({ channel: S.channel(rows[0]) });
@@ -248,7 +255,7 @@ module.exports = function serverRoutes(r) {
   async function channelForManage(req) {
     const channelId = parseId(req.params.channelId);
     const { rows } = channelId
-      ? await db.query("SELECT * FROM channels WHERE id = $1 AND kind = 'text'", [channelId])
+      ? await db.query("SELECT * FROM channels WHERE id = $1 AND kind <> 'dm'", [channelId])
       : { rows: [] };
     if (!rows[0]) fail(404, 'Canal não encontrado.');
     const ctx = await memberContext(rows[0].server_id, req.userId);
@@ -268,8 +275,11 @@ module.exports = function serverRoutes(r) {
 
   r.delete('/channels/:channelId', wrap(async (req, res) => {
     const { channel } = await channelForManage(req);
-    const count = await db.query('SELECT count(*)::int AS n FROM channels WHERE server_id = $1', [channel.server_id]);
-    if (count.rows[0].n <= 1) fail(400, 'O servidor precisa ter pelo menos um canal.');
+    if (channel.kind === 'text') {
+      const count = await db.query("SELECT count(*)::int AS n FROM channels WHERE server_id = $1 AND kind = 'text'", [channel.server_id]);
+      if (count.rows[0].n <= 1) fail(400, 'O servidor precisa ter pelo menos um canal de texto.');
+    }
+    voice.clearChannel(channel.id);
     const att = await db.query(
       'SELECT a.id FROM attachments a JOIN messages m ON m.id = a.message_id WHERE m.channel_id = $1',
       [channel.id],
@@ -359,6 +369,27 @@ module.exports = function serverRoutes(r) {
     });
     events.serverChanged(ctx.serverId);
     res.json({ ok: true });
+  }));
+
+  // ---------- Bots no servidor (quem pode gerenciar o servidor adiciona)
+  r.post('/servers/:id/bots', humansOnly, wrap(async (req, res) => {
+    const ctx = await requireMember(req, P.MANAGE_SERVER);
+    const username = String(req.body.username || '').trim().toLowerCase().replace(/^@/, '');
+    const { rows } = await db.query('SELECT id, username, display_name, is_bot FROM users WHERE username = $1 AND is_bot', [username]);
+    const bot = rows[0];
+    if (!bot) fail(404, 'Não existe bot com esse nome de usuário.');
+    const added = await db.transaction(async (c) => {
+      const ins = await c.query(
+        'INSERT INTO server_members (server_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [ctx.serverId, bot.id],
+      );
+      if (ins.rowCount > 0) await markServerRead(c, ctx.serverId, bot.id);
+      return ins.rowCount > 0;
+    });
+    if (!added) fail(409, 'Esse bot já está no servidor.');
+    events.getIo().in(`user:${bot.id}`).socketsJoin(`server:${ctx.serverId}`);
+    events.serverChanged(ctx.serverId);
+    res.status(201).json({ bot: S.user(bot) });
   }));
 
   // ---------- Membros

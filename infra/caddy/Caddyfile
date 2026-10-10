@@ -1,0 +1,26 @@
+# Caddy: dá HTTPS ao Nexo (o navegador só libera microfone/câmera com HTTPS).
+# Como é uma rede local, o certificado é gerado pelo próprio Caddy ("tls internal").
+{
+	local_certs
+	skip_install_trust
+	# Navegadores não mandam o nome do site quando se acessa por IP; isto resolve.
+	default_sni {$NEXO_HOST}
+}
+
+https://{$NEXO_HOST}, https://localhost {
+	tls internal
+	encode gzip
+
+	# Sinalização do LiveKit (voz/vídeo) passa pelo mesmo endereço.
+	handle /rtc* {
+		reverse_proxy livekit:7880
+	}
+
+	handle {
+		reverse_proxy app:3000
+	}
+}
+
+http:// {
+	redir https://{host}{uri} permanent
+}

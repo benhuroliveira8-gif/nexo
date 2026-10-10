@@ -232,7 +232,9 @@ export function closePopover() {
 export function openPopover(anchor, content, { align = 'start', className = '' } = {}) {
   closePopover();
   const pop = h('div', { class: `popover ${className}` }, content);
-  document.body.append(pop);
+  // Dentro de uma janela (dialog), o popover precisa ficar dentro dela para ser clicável.
+  const host = (anchor instanceof Element && anchor.closest('dialog[open]')) || document.body;
+  host.append(pop);
   activePopover = pop;
 
   const r = anchor instanceof Element ? anchor.getBoundingClientRect() : { left: anchor.x, right: anchor.x, top: anchor.y, bottom: anchor.y };

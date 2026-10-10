@@ -14,10 +14,14 @@ const P = {
   ADD_REACTIONS:    1 << 8,
   MENTION_EVERYONE: 1 << 9,  // usar @everyone
   MANAGE_MESSAGES:  1 << 10, // apagar mensagens dos outros
+  CONNECT:          1 << 11, // entrar em canais de voz
+  SPEAK:            1 << 12, // falar nos canais de voz
+  VIDEO:            1 << 13, // câmera e compartilhar tela
 };
 
 const ALL = Object.values(P).reduce((a, b) => a | b, 0);
-const DEFAULT_EVERYONE = P.CREATE_INVITE | P.SEND_MESSAGES | P.ATTACH_FILES | P.ADD_REACTIONS;
+const DEFAULT_EVERYONE = P.CREATE_INVITE | P.SEND_MESSAGES | P.ATTACH_FILES | P.ADD_REACTIONS
+  | P.CONNECT | P.SPEAK | P.VIDEO;
 const DM_PERMS = P.SEND_MESSAGES | P.ATTACH_FILES | P.ADD_REACTIONS;
 
 const has = (perms, flag) => (perms & P.ADMINISTRATOR) !== 0 || (perms & flag) === flag;
@@ -71,7 +75,7 @@ async function channelAccess(channelId, userId) {
 
   const ctx = await memberContext(channel.server_id, userId);
   if (!ctx) return null;
-  return { ...ctx, channel, kind: 'text', serverId: channel.server_id, rooms: [`server:${channel.server_id}`] };
+  return { ...ctx, channel, kind: channel.kind, serverId: channel.server_id, rooms: [`server:${channel.server_id}`] };
 }
 
 module.exports = { P, ALL, DEFAULT_EVERYONE, DM_PERMS, has, memberContext, channelAccess };

@@ -1,0 +1,13 @@
+{
+  "name": "nexo-bot-exemplo",
+  "version": "1.0.0",
+  "description": "Bot de exemplo para o Nexo",
+  "main": "index.js",
+  "private": true,
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.8.1"
+  }
+}

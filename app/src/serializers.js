@@ -4,6 +4,7 @@ const user = (row) => ({
   id: row.id,
   username: row.username,
   displayName: row.display_name,
+  isBot: !!row.is_bot,
 });
 
 const server = (row, { showInvite = true } = {}) => ({
@@ -59,7 +60,7 @@ const message = (row, extras = {}) => ({
   attachments: (extras.attachments || []).map(attachment),
   reactions: extras.reactions || [],
   author: row.author_id
-    ? { id: row.author_id, username: row.author_username, displayName: row.author_display_name }
+    ? { id: row.author_id, username: row.author_username, displayName: row.author_display_name, isBot: !!row.author_is_bot }
     : { id: null, username: 'deletado', displayName: 'Usuário removido' },
 });
 

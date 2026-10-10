@@ -13,6 +13,9 @@ export const P = {
   ADD_REACTIONS: 1 << 8,
   MENTION_EVERYONE: 1 << 9,
   MANAGE_MESSAGES: 1 << 10,
+  CONNECT: 1 << 11,
+  SPEAK: 1 << 12,
+  VIDEO: 1 << 13,
 };
 
 export const PERMISSION_INFO = [
@@ -27,6 +30,9 @@ export const PERMISSION_INFO = [
   [P.SEND_MESSAGES, 'Enviar mensagens', 'Escrever nos canais de texto.'],
   [P.ATTACH_FILES, 'Anexar arquivos', 'Enviar imagens, vídeos e arquivos.'],
   [P.ADD_REACTIONS, 'Adicionar reações', 'Reagir às mensagens com emojis.'],
+  [P.CONNECT, 'Entrar em canais de voz', 'Ouvir e entrar nos canais de voz.'],
+  [P.SPEAK, 'Falar', 'Usar o microfone nos canais de voz.'],
+  [P.VIDEO, 'Vídeo e tela', 'Ligar a câmera e compartilhar a tela nos canais de voz.'],
 ];
 
 const DM_PERMS = P.SEND_MESSAGES | P.ATTACH_FILES | P.ADD_REACTIONS;

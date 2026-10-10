@@ -1,15 +1,12 @@
-// Eventos em tempo real: enviar mensagens, "digitando...", leitura e presença.
+// Eventos em tempo real: mensagens, "digitando...", leitura, presença e voz.
 const db = require('./db');
 const auth = require('./auth');
 const presence = require('./presence');
 const events = require('./events');
 const S = require('./serializers');
 const M = require('./messages');
+const voice = require('./voice');
 const { P, channelAccess } = require('./permissions');
-
-// Anti-spam simples: no máximo 5 mensagens a cada 5 segundos por conexão.
-const RATE_WINDOW_MS = 5000;
-const RATE_MAX = 5;
 
 const validId = (v) => Number.isInteger(v) && v > 0 && v < 2 ** 31;
 
@@ -29,9 +26,10 @@ module.exports = function setupRealtime(io) {
   // Só aceita conexões com token válido.
   io.use(async (socket, next) => {
     try {
-      const userId = auth.verifyToken(socket.handshake.auth && socket.handshake.auth.token);
-      if (!userId) return next(new Error('unauthorized'));
-      const { rows } = await db.query('SELECT id, username, display_name FROM users WHERE id = $1', [userId]);
+      // Pessoas mandam o token de login; bots mandam "Bot <token do bot>".
+      const who = await auth.authenticate(socket.handshake.auth && socket.handshake.auth.token);
+      if (!who) return next(new Error('unauthorized'));
+      const { rows } = await db.query('SELECT id, username, display_name, is_bot FROM users WHERE id = $1', [who.userId]);
       if (!rows[0]) return next(new Error('unauthorized'));
       socket.data.user = S.user(rows[0]);
       next();
@@ -42,7 +40,6 @@ module.exports = function setupRealtime(io) {
 
   io.on('connection', (socket) => {
     const user = socket.data.user;
-    socket.data.sent = [];
     const becameOnline = presence.connect(user.id);
 
     // Cada usuário tem uma sala própria e entra na sala de cada servidor seu.
@@ -61,17 +58,9 @@ module.exports = function setupRealtime(io) {
         const channelId = Number(payload && payload.channelId);
         if (!validId(channelId)) return reply({ ok: false, error: 'Canal inválido.' });
 
-        const now = Date.now();
-        socket.data.sent = socket.data.sent.filter((t) => now - t < RATE_WINDOW_MS);
-        if (socket.data.sent.length >= RATE_MAX) {
-          return reply({ ok: false, error: 'Calma! Você está enviando rápido demais.' });
-        }
-
         const access = await channelAccess(channelId, user.id);
         if (!access) return reply({ ok: false, error: 'Canal não encontrado.' });
-        if (!access.can(P.SEND_MESSAGES)) return reply({ ok: false, error: 'Você não tem permissão para enviar mensagens aqui.' });
 
-        socket.data.sent.push(now);
         const message = await M.createMessage({
           access,
           userId: user.id,
@@ -122,7 +111,32 @@ module.exports = function setupRealtime(io) {
       }
     });
 
+    // ---------- Voz
+    // O navegador entra no LiveKit e avisa aqui, para todos verem quem está no canal.
+    socket.on('voice:join', async (payload, ack) => {
+      const reply = typeof ack === 'function' ? ack : () => {};
+      try {
+        const channelId = Number(payload && payload.channelId);
+        if (!validId(channelId) || user.isBot) return reply({ ok: false, error: 'Canal inválido.' });
+        const access = await channelAccess(channelId, user.id);
+        if (!access || access.kind !== 'voice') return reply({ ok: false, error: 'Canal de voz não encontrado.' });
+        if (!access.can(P.CONNECT)) return reply({ ok: false, error: 'Você não pode entrar neste canal de voz.' });
+        voice.join({ userId: user.id, serverId: access.serverId, channelId, socketId: socket.id, flags: payload || {} });
+        reply({ ok: true });
+      } catch (err) {
+        console.error('Erro ao entrar na voz:', err);
+        reply({ ok: false, error: 'Não foi possível entrar na voz.' });
+      }
+    });
+
+    socket.on('voice:state', (flags) => {
+      if (flags && typeof flags === 'object') voice.update(user.id, socket.id, flags);
+    });
+
+    socket.on('voice:leave', () => voice.disconnect(user.id, socket.id));
+
     socket.on('disconnect', () => {
+      voice.disconnect(user.id, socket.id);
       if (!presence.disconnect(user.id)) return;
       broadcastPresence(user.id, false).catch(() => {});
     });

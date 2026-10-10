@@ -51,8 +51,9 @@
     <aside class="sidebar">
       <header class="sidebar-header" id="sidebar-header"></header>
       <div class="sidebar-body" id="sidebar-body"></div>
+      <div class="voice-panel" id="voice-panel" hidden></div>
       <footer class="user-panel">
-        <button class="me-info" id="me-info" title="Mudar nome de exibição">
+        <button class="me-info" id="me-info" title="Opções da conta">
           <span id="me-avatar"></span>
           <span class="user-meta">
             <strong id="me-name" class="truncate"></strong>
@@ -60,7 +61,7 @@
           </span>
         </button>
         <button class="icon-btn" id="btn-sound" title="Som de notificação">🔔</button>
-        <button class="icon-btn" id="btn-logout" title="Sair">Sair</button>
+        <button class="icon-btn" id="btn-logout" title="Sair da conta">Sair</button>
       </footer>
     </aside>
 
@@ -75,6 +76,7 @@
       <div class="main-body">
         <div class="messages" id="messages"></div>
         <div class="friends-page" id="friends-page" hidden></div>
+        <div class="voice-stage" id="voice-stage" hidden></div>
         <div class="drop-overlay" id="drop-overlay" hidden><div>📎 Solte para anexar</div></div>
       </div>
 
@@ -98,6 +100,8 @@
   </div>
 
   <div class="toast" id="toast" role="status"></div>
+  <!-- O áudio de quem está na voz toca por aqui (invisível). -->
+  <div id="voice-audio" hidden></div>
 
   <!-- Cliente do Socket.IO é servido pelo próprio backend -->
   <script src="/socket.io/socket.io.js"></script>

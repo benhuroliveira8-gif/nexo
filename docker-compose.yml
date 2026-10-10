@@ -30,11 +30,54 @@ services:
       PORT: 3000
       UPLOAD_DIR: /data/uploads
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-8}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:?Defina LIVEKIT_API_KEY no .env (rode infra/completar-env.sh)}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:?Defina LIVEKIT_API_SECRET no .env (rode infra/completar-env.sh)}
     volumes:
       - nexo_uploads:/data/uploads
     ports:
       - "${APP_PORT:-3000}:3000"
 
+  # HTTPS na frente do app (o navegador exige HTTPS para microfone e câmera).
+  caddy:
+    build: ./infra/caddy
+    restart: unless-stopped
+    depends_on:
+      - app
+      - livekit
+    environment:
+      NEXO_HOST: ${NEXO_HOST:?Defina NEXO_HOST no .env (rode infra/completar-env.sh)}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # Servidor de voz e vídeo.
+  livekit:
+    build: ./infra/livekit
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml", "--node-ip", "${NEXO_HOST}"]
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    ports:
+      - "7881:7881/tcp"
+      - "7882:7882/udp"
+
+  # Bot de exemplo. Só sobe se você pedir:
+  #   docker compose --profile bots up -d --build bot-exemplo
+  bot-exemplo:
+    build: ./examples/bot-exemplo
+    profiles: ["bots"]
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      NEXO_URL: http://app:3000
+      BOT_TOKEN: ${BOT_TOKEN:-}
+
 volumes:
   nexo_db:
   nexo_uploads:
+  caddy_data:
+  caddy_config:

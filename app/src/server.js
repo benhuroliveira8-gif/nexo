@@ -1,3 +1,4 @@
+const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const express = require('express');
@@ -23,6 +24,31 @@ app.use('/api', buildApi());
 // Anexos (imagens, vídeos, arquivos).
 app.get('/files/:id', files.serveFile);
 app.get('/files/:id/:name', files.serveFile);
+
+// Biblioteca de voz/vídeo do navegador (livekit-client), servida daqui mesmo.
+function findLivekitClient() {
+  const dirs = [];
+  try { dirs.push(path.dirname(require.resolve('livekit-client/package.json'))); } catch { /* "exports" pode bloquear */ }
+  dirs.push(path.join(__dirname, '..', 'node_modules', 'livekit-client'));
+  for (const dir of dirs) {
+    let pkg = {};
+    try { pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')); } catch { continue; }
+    const candidates = ['dist/livekit-client.umd.js', pkg.unpkg, pkg.jsdelivr, pkg.main].filter(Boolean);
+    for (const rel of candidates) {
+      const file = path.join(dir, rel);
+      if (/\.c?js$/.test(file) && fs.existsSync(file)) return file;
+    }
+  }
+  return null;
+}
+const livekitClientFile = findLivekitClient();
+if (!livekitClientFile) console.warn('Aviso: livekit-client não encontrado; a voz não vai funcionar no navegador.');
+app.get('/vendor/livekit-client.js', (req, res) => {
+  if (!livekitClientFile) return res.status(404).type('text/plain').send('livekit-client não instalado');
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.type('text/javascript');
+  res.sendFile(livekitClientFile);
+});
 
 // Frontend (arquivos estáticos). Qualquer outra rota devolve o index.html
 // (assim links como /convite/abc123 funcionam).

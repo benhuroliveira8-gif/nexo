@@ -31,6 +31,7 @@ module.exports = function messageRoutes(r) {
     const channelId = parseId(req.params.id);
     const access = channelId && await channelAccess(channelId, req.userId);
     if (!access) fail(404, 'Canal não encontrado.');
+    if (access.kind === 'voice') return res.json({ messages: [], hasMore: false });
 
     const before = parseBigId(req.query.before || '');
     const { rows } = await db.query(
@@ -42,6 +43,24 @@ module.exports = function messageRoutes(r) {
     );
     const messages = await M.hydrate(rows.reverse());
     res.json({ messages, hasMore: rows.length === PAGE_SIZE });
+  }));
+
+  // Enviar mensagem pela API (usado principalmente por bots).
+  // Corpo: { content, attachmentIds? }
+  r.post('/channels/:id/messages', wrap(async (req, res) => {
+    const channelId = parseId(req.params.id);
+    const access = channelId && await channelAccess(channelId, req.userId);
+    if (!access) fail(404, 'Canal não encontrado.');
+    try {
+      const message = await M.createMessage({
+        access, userId: req.userId, content: req.body.content, attachmentIds: req.body.attachmentIds,
+      });
+      events.emitTo(access.rooms, 'message:new', message);
+      res.status(201).json({ message });
+    } catch (err) {
+      if (err instanceof M.MessageError) fail(/rápido/.test(err.message) ? 429 : 400, err.message);
+      throw err;
+    }
   }));
 
   r.patch('/messages/:messageId', wrap(async (req, res) => {

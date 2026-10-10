@@ -11,6 +11,10 @@ import {
 } from './state.js';
 import { renderFriendsPage } from './home.js';
 import { openServerSettings, refreshSettings, closeServerSettings } from './settings.js';
+import {
+  initVoice, voiceState, inVoice, joinVoice, leaveVoice, resyncAfterReconnect, renderVoicePanel, renderStage,
+} from './voice.js';
+import { openDeveloper } from './developer.js';
 
 const isVisible = () => document.visibilityState === 'visible';
 let tempSeq = 0;
@@ -69,6 +73,7 @@ $('#auth-form').addEventListener('submit', async (e) => {
 });
 
 function logout() {
+  if (inVoice()) leaveVoice();
   storage('nexo.token', null);
   if (state.socket) state.socket.disconnect();
   closeServerSettings();
@@ -157,22 +162,49 @@ async function loadFriends() {
 async function refreshDetail() {
   if (state.view === 'home') return;
   const serverId = state.view;
-  let detail;
+  let fetched;
   try {
-    detail = await api(`/servers/${serverId}`);
+    fetched = await fetchDetail(serverId);
   } catch {
     return; // provavelmente fomos removidos; o evento server:removed cuida disso
   }
   if (state.view !== serverId) return;
-  state.detail = detail;
-  state.detailVersion++;
-  syncServerFromDetail();
+  const { detail } = fetched;
+  setDetail(detail, fetched.replay);
   if (!detail.channels.some((c) => c.id === state.channelId)) {
     const first = detail.channels[0];
     if (first) return selectChannel(first.id);
   }
   renderAll();
   refreshSettings();
+}
+
+// Eventos que chegam ENQUANTO os detalhes do servidor estão sendo baixados seriam
+// apagados pela resposta (que é de um instante anterior). Por isso eles ficam
+// guardados e são aplicados de novo por cima da resposta.
+const inflight = new Set();
+
+function applyLive(fn) {
+  fn();
+  for (const replay of inflight) replay.push(fn);
+}
+
+async function fetchDetail(serverId) {
+  const replay = [];
+  inflight.add(replay);
+  try {
+    const detail = await api(`/servers/${serverId}`);
+    return { detail, replay };
+  } finally {
+    inflight.delete(replay);
+  }
+}
+
+function setDetail(detail, replay) {
+  state.detail = detail;
+  replay.forEach((fn) => fn());
+  state.detailVersion++;
+  syncServerFromDetail();
 }
 
 const refreshDetailSoon = debounce(refreshDetail, 150);
@@ -228,7 +260,20 @@ function connectSocket() {
     loadServersSoon();
   });
 
+  socket.on('voice:update', ({ serverId, channelId, states }) => {
+    applyLive(() => {
+      if (!state.detail || state.detail.server.id !== serverId) return;
+      if (!state.detail.voice) state.detail.voice = {};
+      if (states.length) state.detail.voice[channelId] = states;
+      else delete state.detail.voice[channelId];
+    });
+    if (!state.detail || serverId !== state.view) return;
+    renderSidebar();
+    if (currentChannel() && currentChannel().kind === 'voice') renderMain();
+  });
+
   socket.on('server:removed', ({ serverId, reason }) => {
+    if (voiceState().serverId === serverId) leaveVoice({ silent: true });
     const s = state.servers.find((x) => x.id === serverId);
     state.servers = state.servers.filter((x) => x.id !== serverId);
     if (s && reason === 'kicked') toast(`Você foi expulso de "${s.name}".`);
@@ -243,8 +288,10 @@ function connectSocket() {
   socket.on('friends:changed', () => { loadFriendsSoon(); loadDmsSoon(); });
 
   socket.on('presence', ({ userId, online }) => {
-    const m = memberById(userId);
-    if (m) m.online = online;
+    applyLive(() => {
+      const m = memberById(userId);
+      if (m) m.online = online;
+    });
     for (const list of Object.values(state.friends)) list.forEach((f) => { if (f.id === userId) f.online = online; });
     state.dms.forEach((d) => { if (d.user.id === userId) d.user.online = online; });
     if (state.view === 'home') {
@@ -272,7 +319,16 @@ const loadDmsSoon = debounce(() => loadDms().catch(() => {}), 200);
 
 async function refreshAfterReconnect() {
   // Durante a queda podemos ter perdido mensagens: recarrega tudo que está aberto.
-  state.messages.clear();
+  resyncAfterReconnect();
+  // Recarrega o histórico, mas mantém as mensagens que ainda estão "enviando…"
+  // (o socket.io reenvia quando a conexão volta, e a confirmação substitui a temporária).
+  for (const bucket of state.messages.values()) {
+    bucket.items = bucket.items.filter((m) => m.pending || m.failed);
+    bucket.nodes.clear();
+    bucket.hasMore = true;
+    bucket.loaded = false;
+    bucket.loading = false;
+  }
   await Promise.all([loadServers(), loadDms(), loadFriends()]).catch(() => {});
   if (state.view !== 'home') {
     if (state.servers.some((s) => s.id === state.view)) await selectServer(state.view, state.channelId);
@@ -401,20 +457,19 @@ async function selectServer(serverId, preferredChannelId) {
   state.view = serverId;
   storage('nexo.view', String(serverId));
   renderRail();
-  let detail;
+  let fetched;
   try {
-    detail = await api(`/servers/${serverId}`);
+    fetched = await fetchDetail(serverId);
   } catch (err) {
     toast(err.message);
     return goHome();
   }
   if (state.view !== serverId) return; // clicou em outro no meio do caminho
-  state.detail = detail;
-  state.detailVersion++;
-  syncServerFromDetail();
+  const { detail } = fetched;
+  setDetail(detail, fetched.replay);
 
   const saved = preferredChannelId || Number(storage(`nexo.channel.${serverId}`));
-  const channel = detail.channels.find((c) => c.id === saved) || detail.channels[0];
+  const channel = detail.channels.find((c) => c.id === saved) || detail.channels.find((c) => c.kind !== 'voice') || detail.channels[0];
   if (channel) await selectChannel(channel.id);
   else { state.channelId = null; renderAll(); }
 }
@@ -429,6 +484,7 @@ async function selectChannel(channelId) {
   else storage(`nexo.channel.${state.view}`, String(channelId));
   $('#app').classList.remove('sidebar-open');
   renderAll();
+  if (currentChannel() && currentChannel().kind === 'voice') return;
 
   const bucket = bucketFor(channelId);
   if (!bucket.loaded) {
@@ -543,18 +599,64 @@ function renderSidebar() {
 
   const manage = can(P.MANAGE_CHANNELS);
   const channels = [...state.detail.channels].sort((a, b) => a.position - b.position || a.id - b.id);
-  body.replaceChildren(
+  const text = channels.filter((c) => c.kind !== 'voice');
+  const voiceChannels = channels.filter((c) => c.kind === 'voice');
+  const gear = (c) => (manage ? h('button', { class: 'icon-btn small channel-gear', title: 'Editar canal', onclick: () => editChannelDialog(c) }, '⚙') : null);
+  const vs = voiceState();
+
+  body.replaceChildren(...[
     h('div', { class: 'section-title' },
       h('span', {}, 'Canais de texto'),
-      manage ? h('button', { class: 'icon-btn small', title: 'Criar canal', onclick: createChannelDialog }, '+') : null),
-    h('ul', { class: 'side-list' }, channels.map((c) => h('li', { class: 'channel-row' },
+      manage ? h('button', { class: 'icon-btn small', title: 'Criar canal', onclick: () => createChannelDialog('text') }, '+') : null),
+    h('ul', { class: 'side-list' }, text.map((c) => h('li', { class: 'channel-row' },
       h('button', {
         class: `side-item channel${c.id === state.channelId ? ' active' : ''}${c.unread ? ' unread' : ''}`,
         onclick: () => selectChannel(c.id),
       }, h('span', { class: 'hash' }, '#'), h('span', { class: 'truncate' }, c.name), badge(c.mentions)),
-      manage ? h('button', { class: 'icon-btn small channel-gear', title: 'Editar canal', onclick: () => editChannelDialog(c) }, '⚙') : null,
-    ))),
-  );
+      gear(c)))),
+    voiceChannels.length || manage ? h('div', { class: 'section-title' },
+      h('span', {}, 'Canais de voz'),
+      manage ? h('button', { class: 'icon-btn small', title: 'Criar canal de voz', onclick: () => createChannelDialog('voice') }, '+') : null) : null,
+    h('ul', { class: 'side-list' }, voiceChannels.map((c) => {
+      const people = (state.detail.voice && state.detail.voice[c.id]) || [];
+      const connectedHere = vs.channelId === c.id;
+      return h('li', { class: 'channel-row voice' },
+        h('button', {
+          class: `side-item channel voice${c.id === state.channelId ? ' active' : ''}${connectedHere ? ' connected' : ''}`,
+          title: connectedHere ? 'Você está aqui' : 'Clique para entrar',
+          onclick: () => openVoiceChannel(c),
+        }, h('span', { class: 'hash' }, '🔊'), h('span', { class: 'truncate' }, c.name)),
+        gear(c),
+        people.length ? h('ul', { class: 'voice-people' }, people.map((p) => {
+          const m = memberById(p.userId);
+          if (!m) return null;
+          return h('li', { class: 'voice-person' },
+            avatar(m, { size: 'xs' }),
+            h('span', { class: 'truncate' }, m.displayName),
+            h('span', { class: 'vp-icons' },
+              p.screen ? h('span', { title: 'Compartilhando a tela', class: 'live' }, 'AO VIVO') : null,
+              p.video ? h('span', { title: 'Câmera ligada' }, '📹') : null,
+              p.deafened ? h('span', { title: 'Ensurdecido' }, '🙉') : p.muted ? h('span', { title: 'Mutado' }, '🔇') : null));
+        })) : null);
+    })),
+  ].filter(Boolean));
+}
+
+// Clicar num canal de voz: abre a tela dele e entra (se ainda não estiver nele).
+function openVoiceChannel(channel) {
+  selectChannel(channel.id);
+  if (voiceState().channelId !== channel.id) {
+    joinVoice({ channelId: channel.id, channelName: channel.name, serverId: state.view, serverName: state.detail.server.name });
+  }
+}
+
+function onVoiceChange() {
+  renderVoicePanel($('#voice-panel'));
+  if (state.view !== 'home' && state.detail) {
+    renderSidebar();
+    const c = currentChannel();
+    if (c && c.kind === 'voice') renderMain();
+  }
 }
 
 // ---------------------------------------------------------------- Cabeçalho
@@ -571,18 +673,29 @@ function renderHeader() {
         avatar(dm.user, { size: 'xs', online: dm.user.online }), h('span', { class: 'truncate' }, dm.user.displayName)),
     );
   } else {
-    title.replaceChildren(h('span', { class: 'hash' }, '#'), h('span', { class: 'truncate' }, channel ? channel.name : ''));
+    title.replaceChildren(h('span', { class: 'hash' }, channel && channel.kind === 'voice' ? '🔊' : '#'), h('span', { class: 'truncate' }, channel ? channel.name : ''));
   }
   $('#btn-toggle-members').hidden = state.view === 'home';
 }
 
 function renderMain() {
   const friendsPage = state.view === 'home' && !state.channelId;
+  const channel = currentChannel();
+  const voicePage = !!channel && channel.kind === 'voice';
   $('#friends-page').hidden = !friendsPage;
-  $('#messages').hidden = friendsPage;
+  $('#voice-stage').hidden = !voicePage;
+  $('#messages').hidden = friendsPage || voicePage;
   $('#app').classList.toggle('home-view', state.view === 'home');
   if (friendsPage) renderFriendsPage($('#friends-page'));
-  else renderMessages(); // cores/permissões podem ter mudado
+  else if (voicePage) {
+    renderStage($('#voice-stage'), {
+      channel,
+      serverId: state.view,
+      serverName: state.detail.server.name,
+      others: (state.detail.voice && state.detail.voice[channel.id]) || [],
+      members: state.detail.members,
+    });
+  } else renderMessages(); // cores/permissões podem ter mudado
 }
 
 // ---------------------------------------------------------------- Membros
@@ -601,6 +714,7 @@ function renderMembers() {
         return h('button', { class: `member${isOnline ? '' : ' off'}`, title: `@${m.username}`, onclick: (e) => openProfile(e.currentTarget, m) },
           avatar(m, { size: 'sm', online: isOnline }),
           h('span', { class: 'name truncate', style: color ? `color:${color}` : null }, m.displayName),
+          m.isBot ? botTag() : null,
           m.id === ownerId ? h('span', { class: 'owner-badge', title: 'Dono do servidor' }, '👑') : null);
       })));
   panel.replaceChildren(...[group('Online', online, true), group('Offline', offline, false)].filter(Boolean));
@@ -627,6 +741,11 @@ async function loadOlder(channelId) {
     const known = new Set(bucket.items.map((m) => m.id));
     bucket.items.unshift(...messages.filter((m) => !known.has(m.id)));
     bucket.hasMore = hasMore;
+    // Uma mensagem "enviando…" que já está no histórico (a confirmação se perdeu numa queda):
+    // fica só a verdadeira.
+    bucket.items = bucket.items.filter((t) => !(t.pending || t.failed) || !messages.some((m) =>
+      m.author.id === state.me.id && m.content === t.content
+      && Math.abs(new Date(m.createdAt) - new Date(t.createdAt)) < 2 * 60 * 1000));
   } catch (err) {
     bucket.hasMore = false;
     toast(err.message);
@@ -752,6 +871,7 @@ function buildMessage(m, grouped) {
     const color = roleColor(m.author.id) || `hsl(${hueFor(m.author.id)} 75% 72%)`;
     body.append(h('div', { class: 'msg-head' },
       h('button', { class: 'msg-author', style: `color:${color}`, onclick: (e) => openProfile(e.currentTarget, authorUser) }, m.author.displayName),
+      m.author.isBot ? botTag() : null,
       h('span', { class: 'msg-time', title: fullTime(date) }, fullTime(date))));
   }
 
@@ -950,7 +1070,8 @@ let lastTypingSent = 0;
 state.uploads = [];
 
 function renderComposerState() {
-  const show = !!state.channelId;
+  const ch = currentChannel();
+  const show = !!state.channelId && !(ch && ch.kind === 'voice');
   $('#composer-area').hidden = !show;
   if (!show) return;
   const allowed = can(P.SEND_MESSAGES);
@@ -1238,7 +1359,9 @@ export function openProfile(anchor, user) {
   const actions = [];
   if (!isMe) {
     actions.push(h('button', { class: 'btn primary', onclick: () => openDm(user.id) }, 'Enviar mensagem'));
-    if (!status) {
+    if (user.isBot) {
+      // bots não fazem amizade
+    } else if (!status) {
       actions.push(h('button', {
         class: 'btn', onclick: async (e) => {
           e.currentTarget.disabled = true;
@@ -1266,7 +1389,7 @@ export function openProfile(anchor, user) {
     h('div', { class: 'profile-banner', style: `--hue:${hueFor(user.id)}` }),
     h('div', { class: 'profile-avatar' }, avatar(user, { size: 'xl', online: online === undefined ? undefined : !!online })),
     h('div', { class: 'profile-body' },
-      h('h3', { style: color ? `color:${color}` : null }, user.displayName),
+      h('h3', { style: color ? `color:${color}` : null }, user.displayName, user.isBot ? botTag() : null),
       h('div', { class: 'muted' }, `@${user.username}`),
       member && member.id === state.detail.server.ownerId ? h('div', { class: 'owner-line' }, '👑 Dono do servidor') : null,
       roles.length ? h('div', { class: 'role-chips' }, roles.map((r) => h('span', { class: 'role-chip' },
@@ -1293,7 +1416,7 @@ function openServerMenu(anchor) {
   openMenu(anchor, [
     { label: '✉️  Convidar pessoas', hidden: !d.server.inviteCode, onClick: inviteDialog },
     { label: '⚙️  Configurações do servidor', hidden: !manageSomething, onClick: () => openServerSettings() },
-    { label: '➕  Criar canal', hidden: !can(P.MANAGE_CHANNELS), onClick: createChannelDialog },
+    { label: '➕  Criar canal', hidden: !can(P.MANAGE_CHANNELS), onClick: () => createChannelDialog('text') },
     { separator: true, hidden: isOwner() },
     { label: '🚪  Sair do servidor', danger: true, hidden: isOwner(), onClick: leaveServerDialog },
   ], { className: 'popover-menu' });
@@ -1333,17 +1456,32 @@ function inviteDialog() {
   });
 }
 
-function createChannelDialog() {
-  ask({
-    title: 'Criar canal de texto',
-    placeholder: 'novo-canal',
-    okLabel: 'Criar',
-    onSubmit: async (name) => {
-      if (!name) throw new Error('Dê um nome ao canal.');
-      const { channel } = await api(`/servers/${state.view}/channels`, { method: 'POST', body: { name } });
-      await refreshDetail();
-      await selectChannel(channel.id);
-    },
+function createChannelDialog(kind = 'text') {
+  let chosen = kind === 'voice' ? 'voice' : 'text';
+  const name = h('input', { placeholder: 'novo-canal', maxlength: '100' });
+  const option = (value, icon, label, desc) => h('label', { class: 'kind-option' },
+    h('input', { type: 'radio', name: 'kind', value, checked: chosen === value, onchange: () => { chosen = value; } }),
+    h('span', { class: 'kind-icon' }, icon),
+    h('span', { class: 'kind-text' }, h('strong', {}, label), h('span', { class: 'muted small' }, desc)));
+  openDialog({
+    title: 'Criar canal',
+    body: h('div', {},
+      h('div', { class: 'kind-options' },
+        option('text', '#', 'Texto', 'Mensagens, imagens, emojis e arquivos'),
+        option('voice', '🔊', 'Voz', 'Conversa por voz, câmera e tela')),
+      h('label', { class: 'field' }, 'Nome do canal', name)),
+    actions: [
+      { label: 'Cancelar' },
+      {
+        label: 'Criar canal', kind: 'primary', submit: true,
+        onClick: async () => {
+          if (!name.value.trim()) throw new Error('Dê um nome ao canal.');
+          const { channel } = await api(`/servers/${state.view}/channels`, { method: 'POST', body: { name: name.value.trim(), kind: chosen } });
+          await refreshDetail();
+          await selectChannel(channel.id);
+        },
+      },
+    ],
   });
 }
 
@@ -1477,7 +1615,14 @@ $('#btn-sound').addEventListener('click', () => {
   }
 });
 
-$('#me-info').addEventListener('click', () => ask({
+$('#me-info').addEventListener('click', (e) => openMenu(e.currentTarget, [
+  { label: '✏️  Mudar nome de exibição', onClick: editDisplayName },
+  { label: '🤖  Desenvolvedor (bots)', onClick: () => openDeveloper() },
+  { separator: true },
+  { label: '🚪  Sair da conta', danger: true, onClick: logout },
+]));
+
+const editDisplayName = () => ask({
   title: 'Seu nome de exibição',
   text: 'É o nome que aparece nas mensagens. O @usuário continua o mesmo.',
   value: state.me.displayName,
@@ -1488,7 +1633,7 @@ $('#me-info').addEventListener('click', () => ask({
     state.me = user;
     renderUserPanel();
   },
-}));
+});
 
 $('#btn-logout').addEventListener('click', logout);
 $('#home-btn').addEventListener('click', () => goHome());
@@ -1499,7 +1644,13 @@ $('#btn-toggle-members').addEventListener('click', () => {
 });
 $('#btn-toggle-sidebar').addEventListener('click', () => $('#app').classList.toggle('sidebar-open'));
 
+function botTag() {
+  return h('span', { class: 'bot-tag', title: 'Conta automática (bot)' }, 'BOT');
+}
+
+initVoice({ getSocket: () => state.socket, onChange: onVoiceChange });
+
 // Funções usadas pelas outras telas (amigos, configurações).
-export { openDm, goHome, refreshDetail, loadFriends, renderAll, selectChannel };
+export { openDm, goHome, refreshDetail, loadFriends, renderAll, selectChannel, botTag };
 
 boot();

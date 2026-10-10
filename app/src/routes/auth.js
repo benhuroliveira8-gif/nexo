@@ -28,7 +28,7 @@ function publicRoutes(r) {
       const hash = await auth.hashPassword(password);
       const { rows } = await db.query(
         `INSERT INTO users (username, display_name, password_hash)
-         VALUES ($1, $2, $3) RETURNING id, username, display_name`,
+         VALUES ($1, $2, $3) RETURNING id, username, display_name, is_bot`,
         [username, displayName, hash],
       );
       res.status(201).json({ token: auth.signToken(rows[0]), user: S.user(rows[0]) });
@@ -42,7 +42,7 @@ function publicRoutes(r) {
     const username = String(req.body.username || '').trim().toLowerCase();
     const password = String(req.body.password || '');
     const { rows } = await db.query(
-      'SELECT id, username, display_name, password_hash FROM users WHERE username = $1',
+      'SELECT id, username, display_name, password_hash FROM users WHERE username = $1 AND NOT is_bot',
       [username],
     );
     const user = rows[0];
@@ -56,7 +56,7 @@ function publicRoutes(r) {
 // Rotas do usuário logado.
 function meRoutes(r) {
   r.get('/me', wrap(async (req, res) => {
-    const { rows } = await db.query('SELECT id, username, display_name FROM users WHERE id = $1', [req.userId]);
+    const { rows } = await db.query('SELECT id, username, display_name, is_bot FROM users WHERE id = $1', [req.userId]);
     if (!rows[0]) fail(401, 'Usuário não encontrado.');
     res.json({ user: S.user(rows[0]) });
   }));
@@ -66,7 +66,7 @@ function meRoutes(r) {
     const { rows: cur } = await db.query('SELECT username FROM users WHERE id = $1', [req.userId]);
     const displayName = cleanDisplayName(req.body.displayName, cur[0].username);
     const { rows } = await db.query(
-      'UPDATE users SET display_name = $2 WHERE id = $1 RETURNING id, username, display_name',
+      'UPDATE users SET display_name = $2 WHERE id = $1 RETURNING id, username, display_name, is_bot',
       [req.userId, displayName],
     );
     const servers = await db.query('SELECT server_id FROM server_members WHERE user_id = $1', [req.userId]);

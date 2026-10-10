@@ -1,0 +1,14 @@
+# LiveKit: servidor de áudio/vídeo (WebRTC) dos canais de voz.
+# As chaves vêm da variável LIVEKIT_KEYS e o IP do servidor do parâmetro --node-ip.
+port: 7880
+rtc:
+  # Mídia (áudio/vídeo) passa por estas portas, direto do navegador para o servidor.
+  tcp_port: 7881
+  udp_port: 7882
+  # Rede local: anuncia o IP do servidor, sem tentar descobrir IP público.
+  use_external_ip: false
+room:
+  auto_create: true
+  empty_timeout: 300
+logging:
+  level: info

@@ -1,5 +1,7 @@
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const db = require('./db');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET || JWT_SECRET.length < 16) {
@@ -23,14 +25,48 @@ function verifyToken(token) {
   }
 }
 
-// Middleware do Express: exige "Authorization: Bearer <token>".
-function requireAuth(req, res, next) {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+// ---------- Tokens de bot
+// Formato: nexo.<id do bot>.<parte aleatória>. No banco guardamos só o hash.
+const hashBotToken = (token) => crypto.createHash('sha256').update(token).digest('hex');
+const newBotToken = (botId) => `nexo.${botId}.${crypto.randomBytes(24).toString('base64url')}`;
+
+// Aceita "Bearer <jwt>" (pessoas) ou "Bot <token>" (bots).
+// Devolve { userId, isBot } ou null.
+async function authenticate(value) {
+  const raw = String(value || '').trim();
+  if (raw.startsWith('Bot ')) {
+    const token = raw.slice(4).trim();
+    if (!/^nexo\.\d+\.[\w-]{20,}$/.test(token)) return null;
+    const { rows } = await db.query(
+      'SELECT id FROM users WHERE bot_token_hash = $1 AND is_bot',
+      [hashBotToken(token)],
+    );
+    return rows[0] ? { userId: rows[0].id, isBot: true } : null;
+  }
+  const token = raw.startsWith('Bearer ') ? raw.slice(7) : raw;
   const userId = token && verifyToken(token);
-  if (!userId) return res.status(401).json({ error: 'Faça login para continuar.' });
-  req.userId = userId;
+  return userId ? { userId, isBot: false } : null;
+}
+
+// Middleware do Express: exige login (pessoa ou bot).
+function requireAuth(req, res, next) {
+  authenticate(req.headers.authorization)
+    .then((who) => {
+      if (!who) return res.status(401).json({ error: 'Faça login para continuar.' });
+      req.userId = who.userId;
+      req.isBot = who.isBot;
+      next();
+    })
+    .catch(next);
+}
+
+// Middleware: só pessoas (bots não criam servidores, não têm amigos etc.).
+function humansOnly(req, res, next) {
+  if (req.isBot) return res.status(403).json({ error: 'Bots não podem usar essa função.' });
   next();
 }
 
-module.exports = { hashPassword, checkPassword, signToken, verifyToken, requireAuth };
+module.exports = {
+  hashPassword, checkPassword, signToken, verifyToken,
+  hashBotToken, newBotToken, authenticate, requireAuth, humansOnly,
+};

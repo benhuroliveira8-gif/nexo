@@ -9,7 +9,8 @@ const MAX_LENGTH = 4000;
 const MAX_ATTACHMENTS = 5;
 
 const SELECT_MESSAGE = `
-  SELECT msg.*, c.server_id, u.username AS author_username, u.display_name AS author_display_name
+  SELECT msg.*, c.server_id, u.username AS author_username, u.display_name AS author_display_name,
+         u.is_bot AS author_is_bot
   FROM messages msg
   JOIN channels c ON c.id = msg.channel_id
   LEFT JOIN users u ON u.id = msg.author_id`;
@@ -95,6 +96,26 @@ async function parseMentions(client, content, access) {
 
 class MessageError extends Error {}
 
+// Anti-spam: no máximo 5 mensagens a cada 5 segundos por usuário (pessoa ou bot).
+const RATE_WINDOW_MS = 5000;
+const RATE_MAX = 5;
+const recent = new Map(); // userId -> [timestamps]
+
+function checkRate(userId) {
+  const now = Date.now();
+  const list = (recent.get(userId) || []).filter((t) => now - t < RATE_WINDOW_MS);
+  if (list.length >= RATE_MAX) {
+    recent.set(userId, list);
+    throw new MessageError('Calma! Você está enviando rápido demais.');
+  }
+  list.push(now);
+  recent.set(userId, list);
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, list] of recent) if (list.every((t) => now - t >= RATE_WINDOW_MS)) recent.delete(k);
+}, 60 * 1000).unref();
+
 function validateContent(content, hasAttachments) {
   if (!content && !hasAttachments) throw new MessageError('Mensagem vazia.');
   if (content.length > MAX_LENGTH) throw new MessageError(`Máximo de ${MAX_LENGTH} caracteres.`);
@@ -102,11 +123,14 @@ function validateContent(content, hasAttachments) {
 
 // Cria uma mensagem (com anexos já enviados por /api/uploads) numa transação.
 async function createMessage({ access, userId, content, attachmentIds }) {
+  if (access.kind === 'voice') throw new MessageError('Canais de voz não têm mensagens de texto.');
+  if (!access.can(P.SEND_MESSAGES)) throw new MessageError('Você não tem permissão para enviar mensagens aqui.');
   content = String(content || '').trim();
   const ids = [...new Set((Array.isArray(attachmentIds) ? attachmentIds : []).map(String))];
   if (ids.length > MAX_ATTACHMENTS) throw new MessageError(`No máximo ${MAX_ATTACHMENTS} anexos por mensagem.`);
   if (ids.length && !access.can(P.ATTACH_FILES)) throw new MessageError('Você não pode enviar arquivos aqui.');
   validateContent(content, ids.length > 0);
+  checkRate(userId);
 
   const id = await db.transaction(async (c) => {
     const mentions = await parseMentions(c, content, access);
@@ -164,6 +188,6 @@ async function deleteMessage(messageId) {
 }
 
 module.exports = {
-  SELECT_MESSAGE, MAX_LENGTH, MessageError,
+  SELECT_MESSAGE, MAX_LENGTH, MessageError, checkRate,
   hydrate, getMessage, reactionsOf, createMessage, editMessage, deleteMessage,
 };
