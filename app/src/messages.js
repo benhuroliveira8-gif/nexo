@@ -4,11 +4,16 @@ const db = require('./db');
 const S = require('./serializers');
 const files = require('./files');
 const events = require('./events');
-const { P } = require('./permissions');
+const presence = require('./presence');
+const webpush = require('./webpush');
+const linkpreview = require('./linkpreview');
+const { P, channelRooms } = require('./permissions');
 
 const MAX_LENGTH = 4000;
 const MAX_ATTACHMENTS = 5;
 const MAX_PINS = 50;
+const POLL_MAX_OPTIONS = 10;
+const POLL_DURATIONS = [1, 4, 8, 24, 72, 168]; // horas
 
 // Canais onde há conversa de servidor (para @everyone, apagar dos outros, fixar...).
 const isServerText = (kind) => kind === 'text' || kind === 'thread';
@@ -57,6 +62,7 @@ async function hydrate(rows) {
       [ids],
     ),
   ]);
+  const polls = await pollsFor(ids);
   const replyMap = new Map(replies.rows.map((r) => [String(r.id), {
     id: String(r.id),
     content: r.content,
@@ -86,7 +92,63 @@ async function hydrate(rows) {
     mentions: (M.get(String(row.id)) || []).map((x) => x.user_id),
     replyTo: row.reply_to_id ? (replyMap.get(String(row.reply_to_id)) || null) : null,
     thread: threadMap.get(String(row.id)) || null,
+    poll: polls.get(String(row.id)) || null,
   }));
+}
+
+// ---------------------------------------------------------------- Enquetes
+
+async function pollsFor(ids) {
+  const map = new Map();
+  if (!ids.length) return map;
+  const [polls, options, votes] = await Promise.all([
+    db.query('SELECT * FROM polls WHERE message_id = ANY($1::bigint[])', [ids]),
+    db.query('SELECT * FROM poll_options WHERE message_id = ANY($1::bigint[]) ORDER BY position', [ids]),
+    db.query('SELECT option_id, message_id, user_id FROM poll_votes WHERE message_id = ANY($1::bigint[]) ORDER BY created_at', [ids]),
+  ]);
+  if (!polls.rows.length) return map;
+  const byOption = new Map();
+  const voters = new Map();
+  for (const v of votes.rows) {
+    if (!byOption.has(v.option_id)) byOption.set(v.option_id, []);
+    byOption.get(v.option_id).push(v.user_id);
+    const k = String(v.message_id);
+    if (!voters.has(k)) voters.set(k, new Set());
+    voters.get(k).add(v.user_id);
+  }
+  for (const p of polls.rows) {
+    const k = String(p.message_id);
+    map.set(k, {
+      question: p.question,
+      multi: p.multi,
+      endsAt: p.ends_at,
+      ended: new Date(p.ends_at) <= new Date(),
+      totalVoters: (voters.get(k) || new Set()).size,
+      options: options.rows.filter((o) => String(o.message_id) === k).map((o) => ({
+        id: o.id, text: o.text, users: byOption.get(o.id) || [],
+      })),
+    });
+  }
+  return map;
+}
+
+async function pollOf(messageId) {
+  return (await pollsFor([String(messageId)])).get(String(messageId)) || null;
+}
+
+function validatePoll(poll) {
+  if (!poll || typeof poll !== 'object') return null;
+  const question = String(poll.question || '').replace(/\s+/g, ' ').trim();
+  if (!question) throw new MessageError('Escreva a pergunta da enquete.');
+  if (question.length > 300) throw new MessageError('A pergunta pode ter no máximo 300 caracteres.');
+  const options = (Array.isArray(poll.options) ? poll.options : []).map((o) => String(o || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  if (options.length < 2) throw new MessageError('A enquete precisa de pelo menos 2 opções.');
+  if (options.length > POLL_MAX_OPTIONS) throw new MessageError(`No máximo ${POLL_MAX_OPTIONS} opções.`);
+  if (options.some((o) => o.length > 80)) throw new MessageError('Cada opção pode ter no máximo 80 caracteres.');
+  if (new Set(options.map((o) => o.toLowerCase())).size !== options.length) throw new MessageError('Há opções repetidas.');
+  const hours = Number(poll.durationHours) || 24;
+  if (!POLL_DURATIONS.includes(hours)) throw new MessageError('Duração inválida.');
+  return { question, options, multi: !!poll.multi, hours };
 }
 
 async function getMessage(id) {
@@ -156,14 +218,16 @@ function validateContent(content, hasAttachments) {
 }
 
 // Cria uma mensagem (com anexos já enviados por /api/uploads) numa transação.
-async function createMessage({ access, userId, content, attachmentIds, replyToId }) {
+async function createMessage({ access, userId, content, attachmentIds, replyToId, poll }) {
   if (access.kind === 'voice') throw new MessageError('Canais de voz não têm mensagens de texto.');
   if (!access.can(P.SEND_MESSAGES)) throw new MessageError('Você não tem permissão para enviar mensagens aqui.');
   content = String(content || '').trim();
   const ids = [...new Set((Array.isArray(attachmentIds) ? attachmentIds : []).map(String))];
   if (ids.length > MAX_ATTACHMENTS) throw new MessageError(`No máximo ${MAX_ATTACHMENTS} anexos por mensagem.`);
   if (ids.length && !access.can(P.ATTACH_FILES)) throw new MessageError('Você não pode enviar arquivos aqui.');
-  validateContent(content, ids.length > 0);
+  const pollData = validatePoll(poll);
+  if (pollData && ids.length) throw new MessageError('Enquete não pode ter anexos.');
+  validateContent(content, ids.length > 0 || !!pollData);
   let replyTo = null;
   if (replyToId !== undefined && replyToId !== null && replyToId !== '') {
     replyTo = /^\d{1,18}$/.test(String(replyToId)) ? String(replyToId) : null;
@@ -197,6 +261,15 @@ async function createMessage({ access, userId, content, attachmentIds, replyToId
     for (const uid of mentions.userIds) {
       await c.query('INSERT INTO message_mentions (message_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [messageId, uid]);
     }
+    if (pollData) {
+      await c.query(
+        `INSERT INTO polls (message_id, question, multi, ends_at) VALUES ($1, $2, $3, now() + make_interval(hours => $4::int))`,
+        [messageId, pollData.question, pollData.multi, pollData.hours],
+      );
+      for (const [i, text] of pollData.options.entries()) {
+        await c.query('INSERT INTO poll_options (message_id, position, text) VALUES ($1, $2, $3)', [messageId, i, text]);
+      }
+    }
     // Quem envia já leu até aqui.
     await c.query(
       `INSERT INTO channel_reads (user_id, channel_id, last_read_id) VALUES ($1, $2, $3)
@@ -224,6 +297,9 @@ async function editMessage({ access, messageRow, content }) {
       await c.query('INSERT INTO message_mentions (message_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [messageRow.id, uid]);
     }
   });
+  // Links mudaram? Refaz as prévias.
+  const before = linkpreview.urlsIn(messageRow.content).join(' ');
+  if (before !== linkpreview.urlsIn(content).join(' ')) refreshEmbeds(messageRow.id, content);
   return getMessage(messageRow.id);
 }
 
@@ -231,8 +307,7 @@ async function editMessage({ access, messageRow, content }) {
 async function emitUpdated(messageId) {
   const message = messageId && await getMessage(messageId);
   if (!message) return;
-  const rooms = message.serverId ? [`server:${message.serverId}`] : null;
-  if (rooms) events.emitTo(rooms, 'message:updated', message);
+  events.emitTo(await channelRooms(message.channelId), 'message:updated', message);
 }
 
 // Uma thread mudou (mensagem nova/apagada, renomeada, apagada): atualiza o "chip"
@@ -245,6 +320,65 @@ async function refreshThreadParent(channel) {
 function announceNew(access, message, nonce) {
   events.emitTo(access.rooms, 'message:new', nonce ? { ...message, nonce } : message);
   refreshThreadParent(access.channel).catch(() => {});
+  if (linkpreview.urlsIn(message.content).length) refreshEmbeds(message.id, message.content);
+  pushNotify(access, message).catch((err) => console.warn('push:', err.message));
+}
+
+// Gera as prévias de link em segundo plano e atualiza a mensagem para todos.
+function refreshEmbeds(messageId, content) {
+  linkpreview.embedsFor(content)
+    .then(async (embeds) => {
+      const r = await db.query(
+        `UPDATE messages SET embeds = $2::jsonb
+         WHERE id = $1 AND content = $3 AND COALESCE(embeds, '[]'::jsonb) IS DISTINCT FROM $2::jsonb`,
+        [messageId, JSON.stringify(embeds), content],
+      );
+      if (r.rowCount) await emitUpdated(messageId);
+    })
+    .catch((err) => console.warn('Prévia de link falhou:', err.message));
+}
+
+// ---------------------------------------------------------------- Notificações push
+
+function previewText(message) {
+  if (message.poll) return `📊 Enquete: ${message.poll.question}`;
+  if (message.attachments.some((a) => a.voice)) return '🎤 Mensagem de voz';
+  const text = String(message.content || '').replace(/\s+/g, ' ').trim();
+  if (text) return text.length > 140 ? `${text.slice(0, 139)}…` : text;
+  return message.attachments.length ? '📎 Anexo' : '';
+}
+
+// Quem precisa ser avisado: DM = o(s) outro(s); servidor = mencionados (ou todos no @everyone).
+// Só recebe push quem não está com o Nexo aberto na tela e não está em "Não perturbe".
+async function pushNotify(access, message) {
+  const authorId = message.author.id;
+  let targets;
+  if (access.kind === 'dm') targets = access.memberIds;
+  else if (message.mentionEveryone) {
+    const m = await db.query('SELECT user_id FROM server_members WHERE server_id = $1', [access.serverId]);
+    targets = m.rows.map((r) => r.user_id);
+  } else targets = message.mentions;
+  targets = [...new Set(targets)].filter((id) => id !== authorId && !presence.isActive(id));
+  if (!targets.length) return;
+  const { rows } = await db.query(
+    `SELECT id FROM users WHERE id = ANY($1::int[]) AND NOT is_bot AND status <> 'dnd'
+       AND EXISTS (SELECT 1 FROM push_subscriptions p WHERE p.user_id = users.id)`,
+    [targets],
+  );
+  if (!rows.length) return;
+  let title = message.author.displayName;
+  if (access.kind !== 'dm') {
+    const s = await db.query('SELECT name FROM servers WHERE id = $1', [access.serverId]);
+    const where = access.kind === 'thread' ? `🧵 ${access.channel.name}` : `#${access.channel.name}`;
+    title = `${message.author.displayName} em ${where} (${s.rows[0] ? s.rows[0].name : 'servidor'})`;
+  }
+  await webpush.sendToUsers(rows.map((r) => r.id), {
+    title,
+    body: previewText(message),
+    tag: `ch${message.channelId}`,
+    url: `/?canal=${message.channelId}${message.serverId ? `&servidor=${message.serverId}` : ''}&msg=${message.id}`,
+    icon: message.author.avatarUrl || '/icons/icon-192.png',
+  });
 }
 
 async function deleteMessage(messageId) {
@@ -254,7 +388,7 @@ async function deleteMessage(messageId) {
 }
 
 module.exports = {
-  SELECT_MESSAGE, MAX_LENGTH, MAX_PINS, MessageError, checkRate, isServerText,
+  SELECT_MESSAGE, MAX_LENGTH, MAX_PINS, MessageError, checkRate, isServerText, pollOf,
   hydrate, getMessage, reactionsOf, createMessage, editMessage, deleteMessage,
   emitUpdated, refreshThreadParent, announceNew,
 };

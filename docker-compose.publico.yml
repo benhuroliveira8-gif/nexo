@@ -19,7 +19,6 @@ services:
     depends_on:
       - caddy
 
-  
-  # Voz: em modo local (CGNAT). Para voz pela internet, tire o # das 2 linhas abaixo.
-  # livekit:
-  #   command: ["--config", "/etc/livekit-publico.yaml"]
+  # Voz: anuncia o IP público (descoberto sozinho) em vez do IP da rede local.
+  livekit:
+    command: ["--config", "/etc/livekit-publico.yaml"]

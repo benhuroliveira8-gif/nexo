@@ -12,14 +12,17 @@ if (!JWT_SECRET || JWT_SECRET.length < 16) {
 const hashPassword = (password) => bcrypt.hash(password, 10);
 const checkPassword = (password, hash) => bcrypt.compare(password, hash);
 
+// "tv" é a versão do token: quando a pessoa troca a senha ou clica em
+// "sair de todos os aparelhos", a versão sobe e os tokens antigos param de valer.
 const signToken = (user) =>
-  jwt.sign({ sub: user.id }, JWT_SECRET, { expiresIn: '7d' });
+  jwt.sign({ sub: user.id, tv: user.token_version || 0 }, JWT_SECRET, { expiresIn: '7d' });
 
-// Devolve o id do usuário, ou null se o token for inválido/expirado.
+// Devolve { userId, tv }, ou null se o token for inválido/expirado.
 function verifyToken(token) {
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    return Number(payload.sub) || null;
+    const userId = Number(payload.sub) || null;
+    return userId ? { userId, tv: Number(payload.tv) || 0 } : null;
   } catch {
     return null;
   }
@@ -44,8 +47,11 @@ async function authenticate(value) {
     return rows[0] ? { userId: rows[0].id, isBot: true } : null;
   }
   const token = raw.startsWith('Bearer ') ? raw.slice(7) : raw;
-  const userId = token && verifyToken(token);
-  return userId ? { userId, isBot: false } : null;
+  const v = token && verifyToken(token);
+  if (!v) return null;
+  const { rows } = await db.query('SELECT token_version FROM users WHERE id = $1 AND NOT is_bot', [v.userId]);
+  if (!rows[0] || rows[0].token_version !== v.tv) return null;
+  return { userId: v.userId, isBot: false };
 }
 
 // Middleware do Express: exige login (pessoa ou bot).

@@ -74,6 +74,7 @@ module.exports = function setupRealtime(io) {
           content: payload.content,
           attachmentIds: payload.attachmentIds,
           replyToId: payload.replyToId,
+          poll: payload.poll,
         });
         // "nonce" é um id temporário criado pelo navegador para casar a mensagem
         // "enviando..." com a confirmada.
@@ -86,6 +87,10 @@ module.exports = function setupRealtime(io) {
         reply({ ok: false, error: 'Não foi possível enviar.' });
       }
     });
+
+    // O navegador avisa se o Nexo está na tela (para decidir se manda notificação push).
+    presence.setVisible(user.id, socket.id, true);
+    socket.on('visibility', (visible) => presence.setVisible(user.id, socket.id, !!visible));
 
     // "Fulano está digitando..."
     socket.on('typing', async (payload) => {
@@ -144,6 +149,7 @@ module.exports = function setupRealtime(io) {
     socket.on('voice:leave', () => voice.disconnect(user.id, socket.id));
 
     socket.on('disconnect', () => {
+      presence.setVisible(user.id, socket.id, false);
       voice.disconnect(user.id, socket.id);
       if (!presence.disconnect(user.id)) return;
       broadcastPresence(user.id).catch(() => {});

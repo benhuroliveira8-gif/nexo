@@ -11,7 +11,12 @@ const user = (row) => ({
 });
 
 // O próprio usuário vê o status que escolheu (inclusive "invisível").
-const me = (row) => ({ ...user(row), status: row.status || 'online', statusText: row.status_text || null });
+const me = (row) => ({
+  ...user(row),
+  status: row.status || 'online',
+  statusText: row.status_text || null,
+  twoFactor: !!row.two_factor,
+});
 
 const server = (row, { showInvite = true } = {}) => ({
   id: row.id,
@@ -41,7 +46,8 @@ const role = (row) => ({
 });
 
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
-const MEDIA_TYPES = new Set([...IMAGE_TYPES, 'video/mp4', 'video/webm', 'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm']);
+const MEDIA_TYPES = new Set([...IMAGE_TYPES, 'video/mp4', 'video/webm', 'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm',
+  'audio/mp4', 'audio/aac', 'audio/x-m4a']);
 
 const attachment = (row) => ({
   id: row.id,
@@ -53,6 +59,8 @@ const attachment = (row) => ({
     : row.content_type.startsWith('video/') && MEDIA_TYPES.has(row.content_type) ? 'video'
     : row.content_type.startsWith('audio/') && MEDIA_TYPES.has(row.content_type) ? 'audio'
     : 'file',
+  // Mensagem de voz: duração e a "ondinha" (64 barrinhas de 0 a 255, em base64).
+  voice: row.duration_ms != null ? { durationMs: row.duration_ms, waveform: row.waveform || null } : null,
 });
 
 // Espera colunas da mensagem + author_username/author_display_name (via JOIN).
@@ -68,6 +76,8 @@ const message = (row, extras = {}) => ({
   pinnedAt: row.pinned_at || null,
   replyTo: extras.replyTo || null,
   thread: extras.thread || null,
+  poll: extras.poll || null,
+  embeds: Array.isArray(row.embeds) ? row.embeds : [],
   mentions: extras.mentions || [],
   attachments: (extras.attachments || []).map(attachment),
   reactions: extras.reactions || [],

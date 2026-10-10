@@ -63,6 +63,7 @@ module.exports = function messageRoutes(r) {
         content: req.body.content,
         attachmentIds: req.body.attachmentIds,
         replyToId: req.body.replyToId,
+        poll: req.body.poll,
       });
       M.announceNew(access, message);
       res.status(201).json({ message });
@@ -95,6 +96,41 @@ module.exports = function messageRoutes(r) {
     events.emitTo(access.rooms, 'message:deleted', { id: String(row.id), channelId: row.channel_id });
     M.refreshThreadParent(access.channel).catch(() => {});
     res.json({ ok: true });
+  }));
+
+  // ---------- Enquetes
+  // Votar: manda a lista de opções escolhidas (lista vazia = tirar o voto).
+  r.put('/messages/:messageId/poll', wrap(async (req, res) => {
+    const { row, access } = await messageWithAccess(req);
+    const poll = await M.pollOf(row.id);
+    if (!poll) fail(404, 'Essa mensagem não tem enquete.');
+    if (poll.ended) fail(400, 'Essa enquete já terminou.');
+    const valid = new Set(poll.options.map((o) => o.id));
+    const chosen = [...new Set((Array.isArray(req.body.optionIds) ? req.body.optionIds : []).map(Number))];
+    if (chosen.some((id) => !valid.has(id))) fail(400, 'Opção inválida.');
+    if (!poll.multi && chosen.length > 1) fail(400, 'Essa enquete aceita só uma resposta.');
+    await db.transaction(async (c) => {
+      await c.query('DELETE FROM poll_votes WHERE message_id = $1 AND user_id = $2', [row.id, req.userId]);
+      for (const id of chosen) {
+        await c.query('INSERT INTO poll_votes (option_id, message_id, user_id) VALUES ($1, $2, $3)', [id, row.id, req.userId]);
+      }
+    });
+    const updated = await M.pollOf(row.id);
+    events.emitTo(access.rooms, 'message:poll', { id: String(row.id), channelId: row.channel_id, poll: updated });
+    res.json({ poll: updated });
+  }));
+
+  // Encerrar antes da hora: quem criou ou quem gerencia mensagens.
+  r.post('/messages/:messageId/poll/end', wrap(async (req, res) => {
+    const { row, access } = await messageWithAccess(req);
+    const poll = await M.pollOf(row.id);
+    if (!poll) fail(404, 'Essa mensagem não tem enquete.');
+    const allowed = row.author_id === req.userId || (M.isServerText(access.kind) && access.can(P.MANAGE_MESSAGES));
+    if (!allowed) fail(403, 'Só quem criou a enquete pode encerrá-la.');
+    if (!poll.ended) await db.query('UPDATE polls SET ends_at = now() WHERE message_id = $1', [row.id]);
+    const updated = await M.pollOf(row.id);
+    events.emitTo(access.rooms, 'message:poll', { id: String(row.id), channelId: row.channel_id, poll: updated });
+    res.json({ poll: updated });
   }));
 
   // ---------- Mensagens fixadas

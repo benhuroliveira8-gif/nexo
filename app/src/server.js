@@ -25,6 +25,10 @@ app.use('/api', buildApi());
 app.get('/files/:id', files.serveFile);
 app.get('/files/:id/:name', files.serveFile);
 app.get('/avatars/:file', files.serveAvatar);
+// Imagens das prévias de link passam pelo servidor (o site do link não vê o IP de quem lê).
+app.get('/embed-img', require('./linkpreview').serveImage);
+// O "service worker" precisa sempre da versão mais nova (notificações e app no celular).
+app.get('/sw.js', (req, res, next) => { res.set('Cache-Control', 'no-cache'); next(); });
 
 // Biblioteca de voz/vídeo do navegador (livekit-client), servida daqui mesmo.
 function findLivekitClient() {

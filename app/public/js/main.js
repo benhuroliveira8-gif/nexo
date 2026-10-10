@@ -1,4 +1,4 @@
-// Nexo — frontend (Fase 4). JavaScript puro em módulos, sem etapa de build.
+// Nexo — frontend (Fase 5). JavaScript puro em módulos, sem etapa de build.
 import {
   $, h, storage, api, setToken, setUnauthorizedHandler, uploadFile, formatTime, dayLabel, fullTime,
   formatSize, avatar, badge, toast, copyText, openDialog, ask, confirmDialog, openPopover,
@@ -15,6 +15,19 @@ import {
   initVoice, voiceState, inVoice, joinVoice, leaveVoice, resyncAfterReconnect, renderVoicePanel, renderStage,
 } from './voice.js';
 import { openDeveloper } from './developer.js';
+import { renderMarkdown, isJumboEmoji } from './markdown.js';
+import { openUserSettings, closeUserSettings, refreshUserSettings } from './usersettings.js';
+import { registerServiceWorker, resyncPush, disablePush } from './push.js';
+import { applyTheme } from './theme.js';
+import { canRecord, startRecording, formatDuration, voicePlayer, MAX_VOICE_MS } from './voicemsg.js';
+
+applyTheme();
+
+// "Instalar app" (Chrome/Edge/Android): guardamos o convite para mostrar nas Configurações.
+let deferredInstall = null;
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferredInstall = e; });
+window.addEventListener('appinstalled', () => { deferredInstall = null; });
+const installPrompt = () => deferredInstall;
 
 const isVisible = () => document.visibilityState === 'visible';
 let tempSeq = 0;
@@ -56,6 +69,50 @@ function showAuth(mode = 'login') {
 
 $('#auth-switch').addEventListener('click', () => showAuth(authMode === 'login' ? 'register' : 'login'));
 
+// Segunda etapa do login: a senha estava certa, falta o código do app autenticador.
+let pendingLogin = null;
+function showCodeStep(body) {
+  pendingLogin = body;
+  $('#auth-form').hidden = true;
+  $('#auth-code-form').hidden = false;
+  $('.auth-switch').hidden = true;
+  $('#auth-title').textContent = 'Verificação em duas etapas';
+  $('#auth-subtitle').textContent = 'Digite o código de 6 dígitos do seu app autenticador.';
+  $('#auth-code-error').textContent = '';
+  $('#auth-code-form [name=code]').value = '';
+  $('#auth-code-form [name=code]').focus();
+}
+function hideCodeStep() {
+  pendingLogin = null;
+  $('#auth-form').hidden = false;
+  $('#auth-code-form').hidden = true;
+  $('.auth-switch').hidden = false;
+}
+$('#auth-code-back').addEventListener('click', () => { hideCodeStep(); showAuth('login'); });
+$('#auth-code-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = $('#auth-code-submit');
+  btn.disabled = true;
+  $('#auth-code-error').textContent = '';
+  try {
+    const data = await api('/auth/login', { method: 'POST', body: { ...pendingLogin, code: e.currentTarget.code.value.trim() } });
+    hideCodeStep();
+    finishLogin(data);
+  } catch (err) {
+    $('#auth-code-error').textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function finishLogin(data) {
+  state.token = data.token;
+  setToken(data.token);
+  storage('nexo.token', data.token);
+  $('#auth-form').reset();
+  start(data.user);
+}
+
 $('#auth-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.currentTarget;
@@ -69,11 +126,8 @@ $('#auth-form').addEventListener('submit', async (e) => {
   $('#auth-error').textContent = '';
   try {
     const data = await api(`/auth/${authMode}`, { method: 'POST', body });
-    state.token = data.token;
-    setToken(data.token);
-    storage('nexo.token', data.token);
-    form.reset();
-    start(data.user);
+    if (data.twoFactorRequired) return showCodeStep(body);
+    finishLogin(data);
   } catch (err) {
     $('#auth-error').textContent = err.message;
   } finally {
@@ -81,8 +135,12 @@ $('#auth-form').addEventListener('submit', async (e) => {
   }
 });
 
-function logout() {
+function logout({ skipServer = false } = {}) {
   if (inVoice()) leaveVoice();
+  // Este aparelho para de receber notificações desta conta.
+  if (!skipServer && state.token) disablePush().catch(() => {});
+  closeUserSettings();
+  stopRecording(false);
   storage('nexo.token', null);
   if (state.socket) state.socket.disconnect();
   closeServerSettings();
@@ -100,7 +158,7 @@ function logout() {
   showAuth('login');
 }
 
-setUnauthorizedHandler(logout);
+setUnauthorizedHandler(() => logout({ skipServer: true }));
 
 // ================================================================ Início
 
@@ -108,7 +166,9 @@ async function boot() {
   // Link de convite: /convite/CODIGO
   const m = /^\/convite\/([\w-]{4,32})\/?$/.exec(location.pathname);
   if (m) sessionStorage.setItem('nexo.pendingInvite', m[1]);
-  if (m || location.pathname !== '/') history.replaceState(null, '', '/');
+  pendingOpen = parseOpenUrl(location.href);
+  if (m || location.pathname !== '/' || location.search) history.replaceState(null, '', '/');
+  registerServiceWorker();
 
   if (!state.token) return showAuth('login');
   setToken(state.token);
@@ -118,6 +178,35 @@ async function boot() {
   } catch {
     logout();
   }
+}
+
+// Notificação clicada: /?canal=ID&servidor=ID&msg=ID
+let pendingOpen = null;
+function parseOpenUrl(href) {
+  try {
+    const u = new URL(href, location.origin);
+    const channelId = Number(u.searchParams.get('canal'));
+    if (!channelId) return null;
+    return { channelId, serverId: Number(u.searchParams.get('servidor')) || null, messageId: u.searchParams.get('msg') || null };
+  } catch {
+    return null;
+  }
+}
+async function openFromNotification(target) {
+  if (!target) return;
+  if (target.serverId) {
+    if (!state.servers.some((s) => s.id === target.serverId)) return;
+    if (state.view !== target.serverId) await selectServer(target.serverId, target.channelId);
+    else await selectChannel(target.channelId);
+  } else if (state.dms.some((d) => d.channelId === target.channelId)) {
+    await goHome(target.channelId);
+  } else return;
+  if (target.messageId) jumpToMessage(target.channelId, target.messageId);
+}
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data && e.data.type === 'open' && state.me) openFromNotification(parseOpenUrl(e.data.url));
+  });
 }
 
 async function start(user) {
@@ -132,7 +221,8 @@ async function start(user) {
 
   const savedView = storage('nexo.view');
   const savedServer = state.servers.find((s) => String(s.id) === savedView);
-  if (savedServer) await selectServer(savedServer.id);
+  if (pendingOpen && pendingOpen.serverId && state.servers.some((s) => s.id === pendingOpen.serverId)) await selectServer(pendingOpen.serverId, pendingOpen.channelId);
+  else if (savedServer) await selectServer(savedServer.id);
   else {
     const homeChannel = Number(storage('nexo.homeChannel'));
     await goHome(state.dms.some((d) => d.channelId === homeChannel) ? homeChannel : null);
@@ -143,6 +233,8 @@ async function start(user) {
     sessionStorage.removeItem('nexo.pendingInvite');
     showInvitePreview(invite);
   }
+  if (pendingOpen) { const t = pendingOpen; pendingOpen = null; openFromNotification(t); }
+  resyncPush();
 }
 
 // ================================================================ Carregar dados
@@ -240,6 +332,7 @@ function connectSocket() {
 
   socket.on('connect', () => {
     $('#conn-status').hidden = true;
+    socket.emit('visibility', isVisible());
     if (connectedBefore) refreshAfterReconnect();
     connectedBefore = true;
   });
@@ -257,6 +350,7 @@ function connectSocket() {
   });
   socket.on('channel:pins', ({ channelId }) => { if (pinsOpenFor === channelId) openPins(); });
   socket.on('message:reactions', ({ id, channelId, reactions }) => updateMessage(channelId, id, { reactions }));
+  socket.on('message:poll', ({ id, channelId, poll }) => updateMessage(channelId, id, { poll }));
   socket.on('message:deleted', ({ id, channelId }) => {
     const bucket = state.messages.get(channelId);
     if (!bucket) return;
@@ -453,6 +547,7 @@ function markReadNow() {
 }
 
 document.addEventListener('visibilitychange', () => {
+  if (state.socket) state.socket.emit('visibility', isVisible());
   if (isVisible() && state.me) scheduleMarkRead();
 });
 
@@ -501,6 +596,7 @@ async function selectChannel(channelId) {
     clearUploads();
     setReply(null, { render: false });
     pinsOpenFor = null;
+    if (state.recording) stopRecording(false);
   }
   state.channelId = channelId;
   if (state.view === 'home') storage('nexo.homeChannel', String(channelId));
@@ -989,12 +1085,14 @@ function buildMessage(m, grouped) {
 
   if (editing) body.append(buildEditor(m));
   else if (m.content) {
-    body.append(h('div', { class: `msg-text${m.pending ? ' pending' : ''}${m.failed ? ' failed' : ''}` },
-      renderContent(m.content),
+    body.append(h('div', { class: `msg-text${m.pending ? ' pending' : ''}${m.failed ? ' failed' : ''}${isJumboEmoji(m.content) ? ' jumbo' : ''}` },
+      renderMarkdown(m.content, renderContent),
       m.editedAt ? h('span', { class: 'edited', title: fullTime(new Date(m.editedAt)) }, ' (editado)') : null));
   }
 
+  if (m.poll) body.append(buildPoll(m));
   if (m.attachments.length) body.append(h('div', { class: 'attachments' }, m.attachments.map((a) => buildAttachment(a, m.pending))));
+  if (m.embeds && m.embeds.length && !editing) body.append(h('div', { class: 'embeds' }, m.embeds.map(buildEmbed)));
   if (m.failed) body.append(h('div', { class: 'msg-failed' }, 'Não foi enviada.'));
   if (m.reactions.length) body.append(buildReactions(m));
   if (m.thread) body.append(buildThreadChip(m));
@@ -1060,6 +1158,7 @@ function renderContent(text) {
 }
 
 function buildAttachment(a, pending) {
+  if (a.voice && !pending && !a.local) return voicePlayer(a);
   if (pending || a.local) {
     return h('div', { class: 'att-file' }, h('span', { class: 'att-icon' }, '📎'), h('span', { class: 'truncate' }, a.filename));
   }
@@ -1078,6 +1177,147 @@ function buildAttachment(a, pending) {
     h('div', { class: 'att-info' },
       h('a', { href: a.url, download: a.filename, class: 'truncate' }, a.filename),
       h('span', { class: 'muted' }, formatSize(a.size))));
+}
+
+// ---------------------------------------------------------------- Prévia de links
+
+function buildEmbed(e) {
+  const scroll = () => { if (stickToBottom) $('#messages').scrollTop = $('#messages').scrollHeight; };
+  if (e.type === 'image') {
+    const img = h('img', { src: e.image, alt: '', loading: 'lazy', class: 'embed-only-img' });
+    img.addEventListener('load', scroll);
+    return h('a', { href: e.url, target: '_blank', rel: 'noopener noreferrer nofollow', class: 'embed-image-link' }, img);
+  }
+  const image = e.image ? h('img', { src: e.image, alt: '', loading: 'lazy' }) : null;
+  if (image) image.addEventListener('load', scroll);
+  let media = null;
+  if (e.youtubeId && image) {
+    media = h('button', { class: 'embed-video', type: 'button', title: 'Assistir aqui' }, image, h('span', { class: 'play' }, '▶'));
+    media.addEventListener('click', () => {
+      media.replaceWith(h('iframe', {
+        class: 'embed-iframe',
+        src: `https://www.youtube-nocookie.com/embed/${encodeURIComponent(e.youtubeId)}?autoplay=1`,
+        allow: 'autoplay; encrypted-media; picture-in-picture; fullscreen',
+        allowfullscreen: true,
+        referrerpolicy: 'strict-origin-when-cross-origin',
+        title: e.title || 'YouTube',
+      }));
+    });
+  } else if (image && e.largeImage) {
+    media = h('a', { href: e.url, target: '_blank', rel: 'noopener noreferrer nofollow', class: 'embed-large' }, image);
+  }
+  return h('div', { class: `embed${!media && image ? ' with-thumb' : ''}`, style: e.color ? `--embed-color:${e.color}` : null },
+    h('div', { class: 'embed-body' },
+      e.siteName ? h('div', { class: 'embed-site' }, e.siteName) : null,
+      e.title ? h('a', { class: 'embed-title', href: e.url, target: '_blank', rel: 'noopener noreferrer nofollow' }, e.title) : null,
+      e.description ? h('div', { class: 'embed-desc' }, e.description) : null,
+      media),
+    !media && image ? h('a', { class: 'embed-thumb', href: e.url, target: '_blank', rel: 'noopener noreferrer nofollow' }, image) : null);
+}
+
+// ---------------------------------------------------------------- Enquetes
+
+function timeLeft(date) {
+  const ms = new Date(date) - Date.now();
+  if (ms <= 0) return null;
+  const min = Math.ceil(ms / 60000);
+  if (min < 60) return `${min} min`;
+  const hours = Math.round(min / 60);
+  if (hours < 48) return `${hours} h`;
+  return `${Math.round(hours / 24)} dias`;
+}
+
+function buildPoll(m) {
+  const p = m.poll;
+  const ended = p.ended || new Date(p.endsAt) <= new Date();
+  const mine = new Set(p.options.filter((o) => o.users.includes(state.me.id)).map((o) => o.id));
+  const voted = mine.size > 0;
+  const showResults = voted || ended;
+  const maxVotes = Math.max(0, ...p.options.map((o) => o.users.length));
+  const canEnd = !ended && (m.author.id === state.me.id || (state.view !== 'home' && can(P.MANAGE_MESSAGES)));
+  const users = new Map([...knownUsers().values()].map((u) => [u.id, u]));
+  const vote = async (optionId) => {
+    let next;
+    if (p.multi) next = mine.has(optionId) ? [...mine].filter((id) => id !== optionId) : [...mine, optionId];
+    else next = mine.has(optionId) ? [] : [optionId];
+    try { await api(`/messages/${m.id}/poll`, { method: 'PUT', body: { optionIds: next } }); } catch (err) { toast(err.message); }
+  };
+  const left = timeLeft(p.endsAt);
+  return h('div', { class: `poll${ended ? ' ended' : ''}` },
+    h('div', { class: 'poll-q' }, p.question),
+    h('div', { class: 'poll-sub muted' }, ended ? 'Enquete encerrada' : p.multi ? 'Escolha uma ou mais opções' : 'Escolha uma opção'),
+    h('div', { class: 'poll-options' }, p.options.map((o) => {
+      const n = o.users.length;
+      const pct = p.totalVoters ? Math.round((n / p.totalVoters) * 100) : 0;
+      const winner = ended && n > 0 && n === maxVotes;
+      const names = o.users.map((id) => (users.get(id) || {}).displayName).filter(Boolean);
+      return h('button', {
+        type: 'button',
+        class: `poll-opt${mine.has(o.id) ? ' mine' : ''}${winner ? ' winner' : ''}${showResults ? ' results' : ''}`,
+        disabled: ended || m.pending,
+        title: showResults && names.length ? names.join(', ') : null,
+        onclick: () => vote(o.id),
+      },
+      showResults ? h('span', { class: 'poll-bar', style: `width:${pct}%` }) : null,
+      h('span', { class: `poll-check${p.multi ? ' square' : ''}` }, mine.has(o.id) ? '✓' : ''),
+      h('span', { class: 'poll-text' }, o.text, winner ? ' 🏆' : ''),
+      showResults ? h('span', { class: 'poll-count' }, `${n} · ${pct}%`) : null);
+    })),
+    h('div', { class: 'poll-foot muted' },
+      `${p.totalVoters} ${p.totalVoters === 1 ? 'voto' : 'votos'}`,
+      ended ? ' · encerrada' : left ? ` · termina em ${left}` : '',
+      voted && !ended ? ' · clique de novo para tirar o voto' : '',
+      canEnd ? h('button', {
+        class: 'link small', type: 'button',
+        onclick: () => confirmDialog({
+          title: 'Encerrar enquete', text: 'Ninguém mais vai poder votar.', okLabel: 'Encerrar',
+          onConfirm: () => api(`/messages/${m.id}/poll/end`, { method: 'POST' }),
+        }),
+      }, ' Encerrar agora') : null));
+}
+
+function createPollDialog() {
+  if (!state.channelId) return;
+  const question = h('input', { maxlength: '300', placeholder: 'Ex.: Que horas a gente joga?' });
+  const list = h('div', { class: 'poll-edit-options' });
+  const addOption = (value = '') => {
+    if (list.children.length >= 10) return toast('No máximo 10 opções.');
+    const input = h('input', { maxlength: '80', placeholder: `Opção ${list.children.length + 1}`, value });
+    const row = h('div', { class: 'poll-edit-row' }, input,
+      h('button', { class: 'icon-btn small', type: 'button', title: 'Remover', onclick: () => { if (list.children.length > 2) row.remove(); } }, '✕'));
+    list.append(row);
+    return input;
+  };
+  addOption(); addOption();
+  const duration = h('select', {},
+    [[1, '1 hora'], [4, '4 horas'], [8, '8 horas'], [24, '1 dia'], [72, '3 dias'], [168, '1 semana']]
+      .map(([v, label]) => h('option', { value: String(v), selected: v === 24 }, label)));
+  const multi = h('input', { type: 'checkbox', class: 'switch' });
+  openDialog({
+    title: '📊 Criar enquete',
+    body: h('div', { class: 'poll-editor' },
+      h('label', { class: 'field' }, 'Pergunta', question),
+      h('div', { class: 'field' }, 'Opções', list,
+        h('button', { class: 'btn small', type: 'button', onclick: () => { const i = addOption(); if (i) i.focus(); } }, '+ Adicionar opção')),
+      h('div', { class: 'poll-edit-bottom' },
+        h('label', { class: 'field' }, 'Duração', duration),
+        h('label', { class: 'switch-row' }, multi, h('span', {}, 'Permitir várias respostas')))),
+    actions: [
+      { label: 'Cancelar' },
+      {
+        label: 'Publicar', kind: 'primary', submit: true,
+        onClick: async () => {
+          const options = [...list.querySelectorAll('input')].map((i) => i.value.trim()).filter(Boolean);
+          if (!question.value.trim()) throw new Error('Escreva a pergunta.');
+          if (options.length < 2) throw new Error('Preencha pelo menos 2 opções.');
+          await api(`/channels/${state.channelId}/messages`, {
+            method: 'POST',
+            body: { content: '', poll: { question: question.value.trim(), options, multi: multi.checked, durationHours: Number(duration.value) } },
+          });
+        },
+      },
+    ],
+  });
 }
 
 function buildReactions(m) {
@@ -1198,7 +1438,8 @@ function renderComposerState() {
   const allowed = can(P.SEND_MESSAGES);
   input.disabled = !allowed;
   $('#composer').classList.toggle('disabled', !allowed);
-  $('#btn-attach').hidden = !allowed || !can(P.ATTACH_FILES);
+  $('#btn-attach').hidden = !allowed;
+  $('#btn-voice').hidden = !allowed || !can(P.ATTACH_FILES) || !canRecord() || !!state.recording;
   const dm = currentDm();
   const channel = currentChannel();
   input.placeholder = !allowed
@@ -1299,7 +1540,11 @@ function sendMessage() {
 
 const MAX_ATTACHMENTS = 5;
 
-$('#btn-attach').addEventListener('click', () => $('#file-input').click());
+$('#btn-attach').addEventListener('click', (e) => openMenu(e.currentTarget, [
+  { label: '📎  Enviar arquivo', hidden: !can(P.ATTACH_FILES), onClick: () => $('#file-input').click() },
+  { label: '📊  Criar enquete', onClick: createPollDialog },
+  { label: '🎤  Mensagem de voz', hidden: !can(P.ATTACH_FILES) || !canRecord(), onClick: beginRecording },
+]));
 $('#file-input').addEventListener('change', (e) => {
   addFiles([...e.target.files]);
   e.target.value = '';
@@ -1366,6 +1611,74 @@ main.addEventListener('drop', (e) => {
   $('#drop-overlay').hidden = true;
   const files = [...(e.dataTransfer ? e.dataTransfer.files : [])];
   if (files.length) addFiles(files);
+});
+
+// ---------------------------------------------------------------- Mensagem de voz
+
+state.recording = null; // { rec, channelId, timer }
+
+$('#btn-voice').addEventListener('click', () => beginRecording());
+
+async function beginRecording() {
+  if (state.recording || !state.channelId) return;
+  if (!can(P.ATTACH_FILES) || !can(P.SEND_MESSAGES)) return toast('Você não pode enviar áudio aqui.');
+  const channelId = state.channelId;
+  const time = h('span', { class: 'rec-time' }, '0:00');
+  const bars = h('div', { class: 'rec-wave' });
+  const bar = $('#recorder');
+  bar.replaceChildren(
+    h('button', { class: 'icon-btn rec-cancel', type: 'button', title: 'Cancelar (Esc)', onclick: () => stopRecording(false) }, '🗑️'),
+    h('span', { class: 'rec-dot' }), time, bars,
+    h('button', { class: 'btn primary rec-send', type: 'button', title: 'Enviar (Enter)', onclick: () => stopRecording(true) }, 'Enviar ➤'));
+  try {
+    const rec = await startRecording({
+      onTick: (elapsed, levels) => {
+        time.textContent = formatDuration(elapsed);
+        const last = levels.slice(-40);
+        const peak = Math.max(0.02, ...levels);
+        bars.replaceChildren(...last.map((v) => h('i', { style: `height:${Math.max(8, Math.round(Math.sqrt(v / peak) * 100))}%` })));
+        if (elapsed > MAX_VOICE_MS - 10000) time.classList.add('warn');
+      },
+      onAutoStop: () => stopRecording(true),
+    });
+    state.recording = { rec, channelId };
+    $('#composer').hidden = true;
+    bar.hidden = false;
+    bar.querySelector('.rec-send').focus();
+    renderComposerState();
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+async function stopRecording(send) {
+  const cur = state.recording;
+  if (!cur) return;
+  state.recording = null;
+  $('#recorder').hidden = true;
+  $('#composer').hidden = false;
+  renderComposerState();
+  if (!send) { cur.rec.cancel(); return; }
+  const result = await cur.rec.stop();
+  if (!result || result.durationMs < 700 || !result.blob.size) return toast('Áudio curto demais.');
+  const ext = result.blob.type.includes('mp4') || result.blob.type.includes('aac') ? 'm4a' : result.blob.type.includes('ogg') ? 'ogg' : 'webm';
+  const file = new File([result.blob], `mensagem-de-voz.${ext}`, { type: result.blob.type });
+  toast('Enviando áudio…');
+  try {
+    const att = await uploadFile(file, () => {}, { 'X-Voice-Duration': String(result.durationMs), 'X-Voice-Waveform': result.waveform });
+    const res = await new Promise((resolve) => state.socket.timeout(15000).emit('message:send', {
+      channelId: cur.channelId, content: '', attachmentIds: [att.id], nonce: `v${Date.now().toString(36)}`,
+    }, (err, r) => resolve(err ? { ok: false } : r)));
+    if (!res || !res.ok) throw new Error((res && res.error) || 'Não foi possível enviar o áudio.');
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+document.addEventListener('keydown', (e) => {
+  if (!state.recording || document.querySelector('dialog[open]')) return;
+  if (e.key === 'Escape') { e.preventDefault(); stopRecording(false); }
+  if (e.key === 'Enter') { e.preventDefault(); stopRecording(true); }
 });
 
 // ---------------------------------------------------------------- Emojis no texto
@@ -1765,6 +2078,7 @@ $('#me-info').addEventListener('click', (e) => openMenu(e.currentTarget, [
   })),
   { label: state.me.statusText ? '💬  Editar status personalizado' : '💬  Definir status personalizado', onClick: editStatusText },
   { separator: true },
+  { label: '⚙️  Configurações', onClick: () => openUserSettings() },
   { label: '🖼️  Mudar foto de perfil', onClick: pickAvatar },
   { label: '🗑️  Remover foto de perfil', hidden: !state.me.avatarUrl, onClick: removeAvatar },
   { label: '✏️  Mudar nome de exibição', onClick: editDisplayName },
@@ -1777,6 +2091,7 @@ function applyMe(user) {
   state.me = user;
   renderUserPanel();
   if (state.channelId) renderMessages();
+  refreshUserSettings();
 }
 
 async function saveMe(changes) {
@@ -1801,7 +2116,7 @@ const editStatusText = () => ask({
   },
 });
 
-function pickAvatar() {
+function pickAvatar(after) {
   const picker = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp' });
   picker.addEventListener('change', async () => {
     const file = picker.files[0];
@@ -1810,6 +2125,7 @@ function pickAvatar() {
       toast('Enviando foto…');
       applyMe(await uploadAvatar(file));
       toast('Foto de perfil atualizada!');
+      if (after) after();
     } catch (err) {
       toast(err.message);
     }
@@ -1817,16 +2133,16 @@ function pickAvatar() {
   picker.click();
 }
 
-function removeAvatar() {
+function removeAvatar(after) {
   confirmDialog({
     title: 'Remover foto de perfil',
     text: 'Seu avatar volta a ser as iniciais do seu nome.',
     okLabel: 'Remover',
-    onConfirm: async () => applyMe((await api('/me/avatar', { method: 'DELETE' })).user),
+    onConfirm: async () => { applyMe((await api('/me/avatar', { method: 'DELETE' })).user); if (after) after(); },
   });
 }
 
-const editDisplayName = () => ask({
+const editDisplayName = (after) => ask({
   title: 'Seu nome de exibição',
   text: 'É o nome que aparece nas mensagens. O @usuário continua o mesmo.',
   value: state.me.displayName,
@@ -1835,10 +2151,11 @@ const editDisplayName = () => ask({
   onSubmit: async (displayName) => {
     const { user } = await api('/me', { method: 'PATCH', body: { displayName } });
     applyMe(user);
+    if (typeof after === 'function') after();
   },
 });
 
-$('#btn-logout').addEventListener('click', logout);
+$('#btn-logout').addEventListener('click', () => logout());
 $('#home-btn').addEventListener('click', () => goHome());
 
 $('#btn-toggle-members').addEventListener('click', () => {
@@ -1997,7 +2314,8 @@ function resultCard(m, { actions = [], channelLabel = null } = {}) {
         h('div', { class: 'msg-head' },
           h('strong', { style: roleColor(m.author.id) ? `color:${roleColor(m.author.id)}` : null }, author.displayName),
           h('span', { class: 'msg-time' }, fullTime(date))),
-        m.content ? h('div', { class: 'msg-text' }, renderContent(m.content)) : null,
+        m.content ? h('div', { class: 'msg-text' }, renderMarkdown(m.content, renderContent)) : null,
+        m.poll ? h('div', { class: 'muted small' }, `📊 ${m.poll.question}`) : null,
         m.attachments.length ? h('div', { class: 'muted small' }, `📎 ${m.attachments.length} anexo(s)`) : null),
       actions.length ? h('div', { class: 'result-actions' }, actions) : null));
 }
@@ -2111,6 +2429,9 @@ $('#search-input').addEventListener('search', (e) => { if (!e.currentTarget.valu
 initVoice({ getSocket: () => state.socket, onChange: onVoiceChange });
 
 // Funções usadas pelas outras telas (amigos, configurações).
-export { openDm, goHome, refreshDetail, loadFriends, renderAll, selectChannel, botTag };
+export {
+  openDm, goHome, refreshDetail, loadFriends, renderAll, selectChannel, botTag,
+  applyMe, logout, pickAvatar, removeAvatar, editDisplayName, installPrompt,
+};
 
 boot();

@@ -42,6 +42,16 @@ Chat em tempo real no estilo de servidores e canais. Projeto pessoal, construíd
 - **Backup diário** automático pelo Jenkins (banco + anexos), com restauração em um comando
 - **Acesso pela internet** com domínio + túnel da Cloudflare ([docs/acesso-externo.md](docs/acesso-externo.md)) e código de cadastro opcional
 
+**Fase 5A**
+- **App no celular e no PC** (PWA): ícone na tela inicial, abre em tela cheia
+- **Notificações push** com o Nexo fechado (DMs, menções e respostas), criptografadas de ponta a ponta até o aparelho
+- **Formatação**: `**negrito**`, `*itálico*`, `__sublinhado__`, `~~riscado~~`, `||spoiler||`, `` `código` ``, blocos de código, `> citação`, `# títulos` e listas
+- **Prévia de links** (título, descrição, imagem; vídeos do YouTube tocam na conversa). Imagens passam pelo servidor
+- **Mensagem de voz** 🎤 com ondinha e player
+- **Enquetes** 📊 com uma ou várias respostas, duração e resultado em tempo real
+- **Conta**: trocar senha, **verificação em duas etapas** (app autenticador + códigos de recuperação), sair de todos os aparelhos, excluir conta, transferir servidor
+- **Tema claro/escuro/automático** e cor de destaque
+
 ## Como rodar (no servidor Ubuntu com Docker)
 
 ```bash
@@ -182,7 +192,9 @@ nexo/
   O link de um anexo é um código aleatório impossível de adivinhar, mas quem tiver o link consegue abrir
   (igual ao Discord).
 - O Jenkins tem controle do Docker do servidor: use senha forte e não exponha o Jenkins na internet.
-- Login bloqueia por 15 minutos depois de 10 senhas erradas (por IP + usuário).
+- Login bloqueia por 15 minutos depois de 10 senhas erradas (por IP + usuário), contando também códigos de 2 etapas errados.
+- Prévia de links: o servidor só visita endereços públicos (recusa IPs da rede de casa/Docker), segue no máximo 4 redirecionamentos e lê no máximo 1 MB.
+- Notificações push: o conteúdo vai criptografado (RFC 8291); as chaves são geradas sozinhas e guardadas no banco.
 - Na internet, use `REGISTRATION_CODE` no `.env` para só quem tem o código conseguir criar conta.
 - Fotos de perfil: o servidor confere que o arquivo é mesmo PNG/JPG/GIF/WEBP (pelos bytes) e limita a 2 MB.
 

@@ -50,10 +50,20 @@ function uploadRouter(requireAuth) {
         try { name = decodeURIComponent(name); } catch { /* usa como veio */ }
 
         const id = crypto.randomBytes(16).toString('hex');
+        const type = cleanType(req.get('x-file-type'));
+        // Mensagem de voz: o navegador manda a duração e a "ondinha" junto.
+        let duration = null;
+        let waveform = null;
+        if (type.startsWith('audio/') && req.get('x-voice-duration')) {
+          const ms = Number(req.get('x-voice-duration'));
+          if (Number.isInteger(ms) && ms > 0 && ms <= 10 * 60 * 1000) duration = ms;
+          const wf = String(req.get('x-voice-waveform') || '');
+          if (/^[A-Za-z0-9_-]{1,200}$/.test(wf)) waveform = wf;
+        }
         const { rows } = await db.query(
-          `INSERT INTO attachments (id, uploader_id, filename, content_type, size)
-           VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-          [id, req.userId, cleanName(name), cleanType(req.get('x-file-type')), data.length],
+          `INSERT INTO attachments (id, uploader_id, filename, content_type, size, duration_ms, waveform)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+          [id, req.userId, cleanName(name), type, data.length, duration, duration ? waveform : null],
         );
         try {
           await fs.promises.writeFile(filePath(id), data);
@@ -83,7 +93,7 @@ function uploadRouter(requireAuth) {
           `UPDATE users u SET avatar_id = $2 FROM users old
            WHERE u.id = $1 AND old.id = u.id
            RETURNING old.avatar_id AS previous, u.id, u.username, u.display_name, u.is_bot,
-                     u.avatar_id, u.status, u.status_text`,
+                     u.avatar_id, u.status, u.status_text, (u.totp_secret IS NOT NULL) AS two_factor`,
           [req.userId, id],
         );
         if (rows[0]?.previous) removeAvatar(rows[0].previous);

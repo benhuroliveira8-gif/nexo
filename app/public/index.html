@@ -2,8 +2,25 @@
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Nexo</title>
+  <meta name="theme-color" content="#161920" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Nexo" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <script>
+    // Aplica tema e cor antes de desenhar (o resto fica em js/theme.js).
+    try {
+      var t = localStorage.getItem('nexo.theme') || 'dark';
+      if (t === 'auto') t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      document.documentElement.dataset.theme = t;
+      var a = localStorage.getItem('nexo.accent');
+      if (a && /^#[0-9a-f]{6}$/i.test(a)) document.documentElement.style.setProperty('--accent', a);
+    } catch (e) {}
+  </script>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23ff7a45'/%3E%3Ctext x='16' y='22' font-family='Arial' font-weight='800' font-size='17' text-anchor='middle' fill='%231a0d06'%3EN%3C/text%3E%3C/svg%3E" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -31,6 +48,14 @@
         </label>
         <p class="form-error" id="auth-error" role="alert"></p>
         <button class="btn primary" type="submit" id="auth-submit">Entrar</button>
+      </form>
+      <form id="auth-code-form" autocomplete="off" hidden>
+        <label>Código de 6 dígitos (ou de recuperação)
+          <input name="code" required maxlength="12" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" placeholder="123456" />
+        </label>
+        <p class="form-error" id="auth-code-error" role="alert"></p>
+        <button class="btn primary" type="submit" id="auth-code-submit">Confirmar</button>
+        <button class="link back-link" type="button" id="auth-code-back">← Voltar</button>
       </form>
       <p class="auth-switch">
         <span id="auth-switch-text">Não tem conta?</span>
@@ -92,11 +117,13 @@
         <div class="autocomplete" id="autocomplete" hidden></div>
         <div class="uploads" id="uploads" hidden></div>
         <div class="reply-bar" id="reply-bar" hidden></div>
+        <div class="recorder" id="recorder" hidden></div>
         <form class="composer" id="composer">
           <button type="button" class="composer-btn" id="btn-attach" title="Anexar arquivos">＋</button>
           <input type="file" id="file-input" multiple hidden />
           <textarea id="composer-input" rows="1" maxlength="4000" placeholder="Mensagem"></textarea>
           <button type="button" class="composer-btn" id="btn-emoji" title="Emojis">😊</button>
+          <button type="button" class="composer-btn" id="btn-voice" title="Gravar mensagem de voz">🎤</button>
           <button class="btn primary send" type="submit">Enviar</button>
         </form>
       </div>

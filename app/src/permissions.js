@@ -78,4 +78,15 @@ async function channelAccess(channelId, userId) {
   return { ...ctx, channel, kind: channel.kind, serverId: channel.server_id, rooms: [`server:${channel.server_id}`] };
 }
 
-module.exports = { P, ALL, DEFAULT_EVERYONE, DM_PERMS, has, memberContext, channelAccess };
+// Salas que recebem os eventos de um canal (sem precisar de um usuário).
+async function channelRooms(channelId) {
+  const { rows } = await db.query('SELECT server_id, kind FROM channels WHERE id = $1', [channelId]);
+  if (!rows[0]) return [];
+  if (rows[0].kind === 'dm') {
+    const m = await db.query('SELECT user_id FROM dm_members WHERE channel_id = $1', [channelId]);
+    return m.rows.map((r) => `user:${r.user_id}`);
+  }
+  return [`server:${rows[0].server_id}`];
+}
+
+module.exports = { P, ALL, DEFAULT_EVERYONE, DM_PERMS, has, memberContext, channelAccess, channelRooms };

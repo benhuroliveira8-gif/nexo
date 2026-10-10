@@ -6,7 +6,7 @@ const presence = require('../presence');
 const events = require('../events');
 const files = require('../files');
 const voice = require('../voice');
-const { humansOnly } = require('../auth');
+const { humansOnly, checkPassword } = require('../auth');
 const { P, ALL, DEFAULT_EVERYONE, memberContext } = require('../permissions');
 const { wrap, fail, parseId, channelStates, markServerRead } = require('./util');
 
@@ -199,6 +199,24 @@ module.exports = function serverRoutes(r) {
     att.rows.forEach((a) => files.removeFile(a.id));
     events.emitTo([`server:${ctx.serverId}`], 'server:removed', { serverId: ctx.serverId, reason: 'deleted' });
     events.getIo().in(`server:${ctx.serverId}`).socketsLeave(`server:${ctx.serverId}`);
+    res.json({ ok: true });
+  }));
+
+  // Passar o servidor para outra pessoa (o dono vira membro comum).
+  r.post('/servers/:id/transfer', humansOnly, wrap(async (req, res) => {
+    const ctx = await requireMember(req);
+    if (!ctx.isOwner) fail(403, 'Só o dono pode transferir o servidor.');
+    const me = await db.query('SELECT password_hash FROM users WHERE id = $1', [req.userId]);
+    if (!(await checkPassword(String(req.body.password || ''), me.rows[0].password_hash))) fail(403, 'Senha incorreta.');
+    const userId = parseId(req.body.userId);
+    const { rows } = userId ? await db.query(
+      `SELECT u.id, u.is_bot FROM users u JOIN server_members m ON m.user_id = u.id AND m.server_id = $1 WHERE u.id = $2`,
+      [ctx.serverId, userId],
+    ) : { rows: [] };
+    if (!rows[0] || rows[0].id === req.userId) fail(400, 'Escolha outro membro do servidor.');
+    if (rows[0].is_bot) fail(400, 'Um bot não pode ser dono de servidor.');
+    await db.query('UPDATE servers SET owner_id = $2 WHERE id = $1', [ctx.serverId, userId]);
+    events.serverChanged(ctx.serverId);
     res.json({ ok: true });
   }));
 

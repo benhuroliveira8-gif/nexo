@@ -57,7 +57,7 @@ export async function api(path, { method = 'GET', body } = {}) {
 }
 
 // Upload com barra de progresso (fetch não informa progresso de envio).
-export function uploadFile(file, onProgress) {
+export function uploadFile(file, onProgress, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/uploads');
@@ -65,6 +65,7 @@ export function uploadFile(file, onProgress) {
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name || 'arquivo'));
     xhr.setRequestHeader('X-File-Type', file.type || 'application/octet-stream');
+    for (const [k, v] of Object.entries(extraHeaders)) xhr.setRequestHeader(k, v);
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
     xhr.onload = () => {
       let data = {};
