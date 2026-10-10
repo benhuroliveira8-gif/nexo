@@ -31,7 +31,7 @@ pipeline {
       steps {
         sh 'docker compose build app'
         // Confere a sintaxe de todos os arquivos JavaScript dentro da imagem nova.
-        sh 'docker run --rm nexo-app sh -c "for f in src/*.js; do node --check \\$f || exit 1; done"'
+        sh 'docker run --rm nexo-app sh -c "for f in \\$(find src -name \'*.js\'); do node --check \\$f || exit 1; done"'
       }
     }
 
