@@ -2,6 +2,8 @@
 // pessoa pode estar com várias abas abertas.
 const connections = new Map();
 
+const STATUSES = ['online', 'idle', 'dnd', 'invisible'];
+
 function connect(userId) {
   const count = (connections.get(userId) || 0) + 1;
   connections.set(userId, count);
@@ -18,6 +20,19 @@ function disconnect(userId) {
   return false;
 }
 
-const isOnline = (userId) => connections.has(userId);
+const isConnected = (userId) => connections.has(userId);
 
-module.exports = { connect, disconnect, isOnline };
+// O que os OUTROS veem: invisível aparece como offline, e o texto
+// de status só aparece para quem está online.
+function publicPresence(row) {
+  const status = !isConnected(row.id) || row.status === 'invisible'
+    ? 'offline'
+    : (STATUSES.includes(row.status) ? row.status : 'online');
+  return {
+    online: status !== 'offline',
+    status,
+    statusText: status === 'offline' ? null : (row.status_text || null),
+  };
+}
+
+module.exports = { STATUSES, connect, disconnect, isConnected, publicPresence };

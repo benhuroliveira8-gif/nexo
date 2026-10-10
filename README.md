@@ -32,6 +32,16 @@ Chat em tempo real no estilo de servidores e canais. Projeto pessoal, construíd
 - **Bot de exemplo** pronto (`!ajuda`, `!ping`, `!dado`, `!eco`, `!uptime`)
 - **HTTPS** com o Caddy (o navegador exige HTTPS para microfone e câmera)
 
+**Fase 4**
+- **Responder mensagens** ↩️: a resposta mostra a mensagem original (clique para ir até ela) e avisa quem foi respondido
+- **Threads** 🧵: conversa paralela a partir de uma mensagem; aparece embaixo do canal na barra lateral
+- **Busca** 🔍: no servidor inteiro (canais e threads) ou nas DMs; `de:usuario` filtra por autor; clicar no resultado pula até a mensagem, mesmo antiga
+- **Fixar mensagens** 📌: lista de fixadas no topo do canal (em servidor precisa de *Gerenciar mensagens*; em DM qualquer um fixa)
+- **Status**: Online, Ausente, Não perturbe (sem sons) e Invisível, + **status personalizado** ("Jogando Minecraft")
+- **Foto de perfil**: recortada e reduzida no navegador (256×256)
+- **Backup diário** automático pelo Jenkins (banco + anexos), com restauração em um comando
+- **Acesso pela internet** com domínio + túnel da Cloudflare ([docs/acesso-externo.md](docs/acesso-externo.md)) e código de cadastro opcional
+
 ## Como rodar (no servidor Ubuntu com Docker)
 
 ```bash
@@ -115,6 +125,21 @@ O Jenkins verifica o GitHub a cada ~2 minutos. Ele precisa de duas credenciais:
 
 A imagem do Jenkins com Docker fica em `infra/jenkins/` (`bash infra/jenkins/recriar-jenkins.sh`).
 
+## Backup
+
+O job **nexo-backup** do Jenkins (arquivo `infra/backup/Jenkinsfile`) roda todo dia de madrugada e
+guarda em `/var/backups/nexo` (na VM) uma pasta por dia com o banco (`banco.dump`) e os anexos/fotos
+(`anexos.tar.gz`). Backups com mais de 14 dias são apagados (`BACKUP_KEEP_DAYS` no `.env`).
+
+```bash
+docker compose --profile backup run --rm --build backup     # fazer um backup agora
+docker compose --profile backup run --rm backup listar      # ver os backups
+bash infra/backup/restaurar.sh ultimo                       # voltar tudo para o último backup
+```
+
+O restaurar pede confirmação, faz antes um backup do estado atual e para/religa o app sozinho.
+Dica: de vez em quando, copie a pasta de backups para fora da VM (ex.: com `scp` para o Windows).
+
 ## Estrutura
 
 ```
@@ -125,7 +150,11 @@ nexo/
 │   ├── caddy/               # HTTPS na frente do app
 │   ├── livekit/             # servidor de voz e vídeo
 │   ├── jenkins/             # imagem do Jenkins com acesso ao Docker
+│   ├── backup/              # backup/restauração + Jenkinsfile do job diário
+│   ├── windows/             # script que abre as portas de voz no Windows
 │   └── completar-env.sh     # gera as configurações novas no .env
+├── docker-compose.publico.yml  # complemento: túnel da Cloudflare (acesso pela internet)
+├── docs/acesso-externo.md   # passo a passo do domínio + Cloudflare
 ├── examples/bot-exemplo/    # bot pronto para usar e modificar
 └── app/
     ├── src/
@@ -153,9 +182,14 @@ nexo/
   O link de um anexo é um código aleatório impossível de adivinhar, mas quem tiver o link consegue abrir
   (igual ao Discord).
 - O Jenkins tem controle do Docker do servidor: use senha forte e não exponha o Jenkins na internet.
+- Login bloqueia por 15 minutos depois de 10 senhas erradas (por IP + usuário).
+- Na internet, use `REGISTRATION_CODE` no `.env` para só quem tem o código conseguir criar conta.
+- Fotos de perfil: o servidor confere que o arquivo é mesmo PNG/JPG/GIF/WEBP (pelos bytes) e limita a 2 MB.
 
 ## Limitações conhecidas
 
-- A voz funciona na sua rede. Para amigos de fora, o servidor precisa ficar acessível pela internet
-  (domínio + HTTPS de verdade + portas do LiveKit liberadas).
+- Voz pela internet precisa das portas 7881/TCP e 7882/UDP abertas no roteador e de uma internet
+  sem CGNAT (veja [docs/acesso-externo.md](docs/acesso-externo.md)).
+- Threads sem mensagens há mais de 7 dias somem da barra lateral (continuam acessíveis pelo 🧵 na mensagem).
+- "Pular para mensagem" carrega até ~2000 mensagens para trás.
 - Se alguém perder a permissão de voz enquanto já está num canal, só sai na próxima vez que entrar.

@@ -3,14 +3,19 @@
 const db = require('./db');
 const S = require('./serializers');
 const files = require('./files');
+const events = require('./events');
 const { P } = require('./permissions');
 
 const MAX_LENGTH = 4000;
 const MAX_ATTACHMENTS = 5;
+const MAX_PINS = 50;
+
+// Canais onde há conversa de servidor (para @everyone, apagar dos outros, fixar...).
+const isServerText = (kind) => kind === 'text' || kind === 'thread';
 
 const SELECT_MESSAGE = `
   SELECT msg.*, c.server_id, u.username AS author_username, u.display_name AS author_display_name,
-         u.is_bot AS author_is_bot
+         u.is_bot AS author_is_bot, u.avatar_id AS author_avatar_id
   FROM messages msg
   JOIN channels c ON c.id = msg.channel_id
   LEFT JOIN users u ON u.id = msg.author_id`;
@@ -31,11 +36,38 @@ function summarizeReactions(rows) {
 async function hydrate(rows) {
   if (rows.length === 0) return [];
   const ids = rows.map((r) => String(r.id));
-  const [att, reac, ment] = await Promise.all([
+  const replyIds = [...new Set(rows.filter((r) => r.reply_to_id).map((r) => String(r.reply_to_id)))];
+  const [att, reac, ment, replies, threads] = await Promise.all([
     db.query('SELECT * FROM attachments WHERE message_id = ANY($1::bigint[]) ORDER BY created_at, id', [ids]),
     db.query('SELECT message_id, emoji, user_id FROM reactions WHERE message_id = ANY($1::bigint[]) ORDER BY created_at, emoji', [ids]),
     db.query('SELECT message_id, user_id FROM message_mentions WHERE message_id = ANY($1::bigint[])', [ids]),
+    replyIds.length
+      ? db.query(
+        `SELECT m.id, left(m.content, 120) AS content, m.author_id, u.username, u.display_name, u.is_bot, u.avatar_id,
+                EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id) AS has_attachments
+         FROM messages m LEFT JOIN users u ON u.id = m.author_id WHERE m.id = ANY($1::bigint[])`,
+        [replyIds],
+      )
+      : { rows: [] },
+    db.query(
+      `SELECT c.id, c.name, c.parent_message_id,
+              (SELECT count(*)::int FROM messages WHERE channel_id = c.id) AS message_count,
+              (SELECT max(created_at) FROM messages WHERE channel_id = c.id) AS last_at
+       FROM channels c WHERE c.kind = 'thread' AND c.parent_message_id = ANY($1::bigint[])`,
+      [ids],
+    ),
   ]);
+  const replyMap = new Map(replies.rows.map((r) => [String(r.id), {
+    id: String(r.id),
+    content: r.content,
+    hasAttachments: r.has_attachments,
+    author: r.author_id
+      ? { id: r.author_id, username: r.username, displayName: r.display_name, isBot: !!r.is_bot, avatarUrl: S.avatarUrl(r.avatar_id) }
+      : { id: null, username: 'deletado', displayName: 'Usuário removido' },
+  }]));
+  const threadMap = new Map(threads.rows.map((t) => [String(t.parent_message_id), {
+    id: t.id, name: t.name, messageCount: t.message_count, lastAt: t.last_at,
+  }]));
   const group = (list) => {
     const m = new Map();
     for (const r of list) {
@@ -52,6 +84,8 @@ async function hydrate(rows) {
     attachments: A.get(String(row.id)) || [],
     reactions: summarizeReactions(R.get(String(row.id)) || []),
     mentions: (M.get(String(row.id)) || []).map((x) => x.user_id),
+    replyTo: row.reply_to_id ? (replyMap.get(String(row.reply_to_id)) || null) : null,
+    thread: threadMap.get(String(row.id)) || null,
   }));
 }
 
@@ -76,7 +110,7 @@ async function parseMentions(client, content, access) {
   let m;
   while ((m = re.exec(content))) names.add(m[2].toLowerCase().replace(/\.+$/, ''));
 
-  const everyone = names.has('everyone') && access.can(P.MENTION_EVERYONE) && access.kind === 'text';
+  const everyone = names.has('everyone') && access.can(P.MENTION_EVERYONE) && isServerText(access.kind);
   names.delete('everyone');
   if (names.size === 0) return { userIds: [], everyone };
 
@@ -122,7 +156,7 @@ function validateContent(content, hasAttachments) {
 }
 
 // Cria uma mensagem (com anexos já enviados por /api/uploads) numa transação.
-async function createMessage({ access, userId, content, attachmentIds }) {
+async function createMessage({ access, userId, content, attachmentIds, replyToId }) {
   if (access.kind === 'voice') throw new MessageError('Canais de voz não têm mensagens de texto.');
   if (!access.can(P.SEND_MESSAGES)) throw new MessageError('Você não tem permissão para enviar mensagens aqui.');
   content = String(content || '').trim();
@@ -130,15 +164,27 @@ async function createMessage({ access, userId, content, attachmentIds }) {
   if (ids.length > MAX_ATTACHMENTS) throw new MessageError(`No máximo ${MAX_ATTACHMENTS} anexos por mensagem.`);
   if (ids.length && !access.can(P.ATTACH_FILES)) throw new MessageError('Você não pode enviar arquivos aqui.');
   validateContent(content, ids.length > 0);
+  let replyTo = null;
+  if (replyToId !== undefined && replyToId !== null && replyToId !== '') {
+    replyTo = /^\d{1,18}$/.test(String(replyToId)) ? String(replyToId) : null;
+    const ok = replyTo && await db.query('SELECT 1 FROM messages WHERE id = $1 AND channel_id = $2', [replyTo, access.channel.id]);
+    if (!ok || ok.rowCount === 0) throw new MessageError('A mensagem que você está respondendo não existe mais.');
+  }
   checkRate(userId);
 
   const id = await db.transaction(async (c) => {
     const mentions = await parseMentions(c, content, access);
     const { rows } = await c.query(
-      `INSERT INTO messages (channel_id, author_id, content, mention_everyone)
-       VALUES ($1, $2, $3, $4) RETURNING id`,
-      [access.channel.id, userId, content, mentions.everyone],
+      `INSERT INTO messages (channel_id, author_id, content, mention_everyone, reply_to_id)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [access.channel.id, userId, content, mentions.everyone, replyTo],
     );
+    // Responder alguém já avisa essa pessoa (como uma menção), se ela vê o canal.
+    if (replyTo) {
+      const orig = await c.query('SELECT author_id FROM messages WHERE id = $1', [replyTo]);
+      const authorId = orig.rows[0]?.author_id;
+      if (authorId && authorId !== userId && !mentions.userIds.includes(authorId)) mentions.userIds.push(authorId);
+    }
     const messageId = rows[0].id;
     if (ids.length) {
       const upd = await c.query(
@@ -181,6 +227,26 @@ async function editMessage({ access, messageRow, content }) {
   return getMessage(messageRow.id);
 }
 
+// Avisa todos que algo mudou numa mensagem (ex.: a thread dela ganhou resposta).
+async function emitUpdated(messageId) {
+  const message = messageId && await getMessage(messageId);
+  if (!message) return;
+  const rooms = message.serverId ? [`server:${message.serverId}`] : null;
+  if (rooms) events.emitTo(rooms, 'message:updated', message);
+}
+
+// Uma thread mudou (mensagem nova/apagada, renomeada, apagada): atualiza o "chip"
+// da mensagem de origem no canal pai.
+async function refreshThreadParent(channel) {
+  if (channel && channel.kind === 'thread' && channel.parent_message_id) await emitUpdated(channel.parent_message_id);
+}
+
+// Depois de criar: manda a mensagem para todo mundo e atualiza a thread, se for o caso.
+function announceNew(access, message, nonce) {
+  events.emitTo(access.rooms, 'message:new', nonce ? { ...message, nonce } : message);
+  refreshThreadParent(access.channel).catch(() => {});
+}
+
 async function deleteMessage(messageId) {
   const att = await db.query('SELECT id FROM attachments WHERE message_id = $1', [messageId]);
   await db.query('DELETE FROM messages WHERE id = $1', [messageId]);
@@ -188,6 +254,7 @@ async function deleteMessage(messageId) {
 }
 
 module.exports = {
-  SELECT_MESSAGE, MAX_LENGTH, MessageError, checkRate,
+  SELECT_MESSAGE, MAX_LENGTH, MAX_PINS, MessageError, checkRate, isServerText,
   hydrate, getMessage, reactionsOf, createMessage, editMessage, deleteMessage,
+  emitUpdated, refreshThreadParent, announceNew,
 };

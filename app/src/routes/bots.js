@@ -12,7 +12,7 @@ const MAX_BOTS = 10;
 async function myBot(req) {
   const id = parseId(req.params.id);
   const { rows } = id
-    ? await db.query('SELECT id, username, display_name, is_bot FROM users WHERE id = $1 AND is_bot AND bot_owner_id = $2', [id, req.userId])
+    ? await db.query('SELECT id, username, display_name, is_bot, avatar_id, status, status_text FROM users WHERE id = $1 AND is_bot AND bot_owner_id = $2', [id, req.userId])
     : { rows: [] };
   if (!rows[0]) fail(404, 'Bot não encontrado.');
   return rows[0];
@@ -29,7 +29,7 @@ module.exports = function botRoutes(r) {
 
   r.get('/bots', wrap(async (req, res) => {
     const { rows } = await db.query(
-      `SELECT u.id, u.username, u.display_name, u.is_bot,
+      `SELECT u.id, u.username, u.display_name, u.is_bot, u.avatar_id, u.status, u.status_text,
               (SELECT count(*)::int FROM server_members m WHERE m.user_id = u.id) AS server_count
        FROM users u WHERE u.is_bot AND u.bot_owner_id = $1 ORDER BY u.id`,
       [req.userId],
@@ -51,7 +51,7 @@ module.exports = function botRoutes(r) {
       // Bots não têm senha: o "!" nunca bate com nenhuma senha.
       const { rows } = await db.query(
         `INSERT INTO users (username, display_name, password_hash, is_bot, bot_owner_id)
-         VALUES ($1, $2, '!', true, $3) RETURNING id, username, display_name, is_bot`,
+         VALUES ($1, $2, '!', true, $3) RETURNING id, username, display_name, is_bot, avatar_id, status, status_text`,
         [username, displayName, req.userId],
       );
       bot = rows[0];
@@ -76,7 +76,7 @@ module.exports = function botRoutes(r) {
     const bot = await myBot(req);
     const displayName = String(req.body.displayName || '').replace(/\s+/g, ' ').trim().slice(0, 32) || bot.username;
     const { rows } = await db.query(
-      'UPDATE users SET display_name = $2 WHERE id = $1 RETURNING id, username, display_name, is_bot',
+      'UPDATE users SET display_name = $2 WHERE id = $1 RETURNING id, username, display_name, is_bot, avatar_id, status, status_text',
       [bot.id, displayName],
     );
     const servers = await db.query('SELECT server_id FROM server_members WHERE user_id = $1', [bot.id]);

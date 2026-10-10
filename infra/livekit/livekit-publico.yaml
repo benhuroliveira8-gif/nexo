@@ -1,0 +1,15 @@
+# LiveKit no modo "acesso pela internet" (usado pelo docker-compose.publico.yml).
+# Igual ao livekit.yaml, mas descobre e anuncia o IP PÚBLICO da sua casa,
+# para quem está fora conseguir mandar áudio/vídeo.
+# Para funcionar de fora, o roteador precisa encaminhar 7881/TCP e 7882/UDP
+# para o PC (veja docs/acesso-externo.md).
+port: 7880
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: true
+room:
+  auto_create: true
+  empty_timeout: 300
+logging:
+  level: info

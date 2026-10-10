@@ -24,6 +24,7 @@ app.use('/api', buildApi());
 // Anexos (imagens, vídeos, arquivos).
 app.get('/files/:id', files.serveFile);
 app.get('/files/:id/:name', files.serveFile);
+app.get('/avatars/:file', files.serveAvatar);
 
 // Biblioteca de voz/vídeo do navegador (livekit-client), servida daqui mesmo.
 function findLivekitClient() {

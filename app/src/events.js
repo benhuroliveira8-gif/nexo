@@ -28,4 +28,11 @@ async function friendIdsOf(userId) {
 
 const friendsChanged = (...userIds) => emitTo(userIds.map((id) => `user:${id}`), 'friends:changed', {});
 
-module.exports = { setIo, getIo, emitTo, serverChanged, friendIdsOf, friendsChanged };
+// Quem mudou de status avisa os outros (a função vem do realtime.js).
+let presenceBroadcaster = async () => {};
+const setPresenceBroadcaster = (fn) => { presenceBroadcaster = fn; };
+const presenceChanged = (userId) => presenceBroadcaster(userId).catch(() => {});
+
+module.exports = {
+  setIo, getIo, emitTo, serverChanged, friendIdsOf, friendsChanged, setPresenceBroadcaster, presenceChanged,
+};

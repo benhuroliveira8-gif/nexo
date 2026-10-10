@@ -110,11 +110,51 @@ export const initials = (name) =>
 
 export const hueFor = (id) => ((Number(id) || 0) * 137) % 360;
 
+// Status de presença: online, ausente, não perturbe ou offline.
+export const STATUS_LABEL = {
+  online: 'Online', idle: 'Ausente', dnd: 'Não perturbe', invisible: 'Invisível', offline: 'Offline',
+};
+export const presenceOf = (u) => (u && u.status) || (u && u.online ? 'online' : 'offline');
+
+// "online" pode ser true/false ou um status ('online', 'idle', 'dnd', 'offline').
 export function avatar(user, { size, online } = {}) {
-  const el = h('div', { class: `avatar${size ? ` ${size}` : ''}`, style: `--hue:${hueFor(user.id)}` },
-    initials(user.displayName));
-  if (online !== undefined) el.append(h('span', { class: `dot${online ? ' on' : ''}`, title: online ? 'Online' : 'Offline' }));
+  const el = h('div', { class: `avatar${size ? ` ${size}` : ''}`, style: `--hue:${hueFor(user.id)}` });
+  if (user.avatarUrl) {
+    const img = h('img', { class: 'avatar-img', src: user.avatarUrl, alt: '', loading: 'lazy', draggable: 'false' });
+    // Se a foto falhar (apagada no meio do caminho), volta para as iniciais.
+    img.addEventListener('error', () => img.replaceWith(initials(user.displayName)));
+    el.append(img);
+  } else el.append(initials(user.displayName));
+  if (online !== undefined) {
+    const status = typeof online === 'string' ? (online === 'invisible' ? 'offline' : online) : (online ? 'online' : 'offline');
+    el.append(h('span', { class: `dot ${status}${status !== 'offline' ? ' on' : ''}`, title: STATUS_LABEL[status] || 'Offline' }));
+  }
   return el;
+}
+
+// Foto de perfil: recorta no centro (quadrado), reduz para 256x256 e envia.
+export async function uploadAvatar(file) {
+  if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) throw new Error('Escolha uma imagem PNG, JPG, GIF ou WEBP.');
+  const bitmap = await createImageBitmap(file).catch(() => { throw new Error('Não deu para abrir essa imagem.'); });
+  const side = Math.min(bitmap.width, bitmap.height);
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 256;
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, 256, 256);
+  if (bitmap.close) bitmap.close();
+  const toBlob = (type, q) => new Promise((r) => canvas.toBlob(r, type, q));
+  let blob = await toBlob('image/webp', 0.9);
+  if (!blob || blob.type !== 'image/webp') blob = await toBlob('image/png');
+  const res = await fetch('/api/me/avatar', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream' },
+    body: blob,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Erro ${res.status}`);
+  return data.user;
 }
 
 export function badge(count) {

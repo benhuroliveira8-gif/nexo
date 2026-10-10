@@ -1,8 +1,8 @@
-// Nexo — frontend (Fase 2). JavaScript puro em módulos, sem etapa de build.
+// Nexo — frontend (Fase 4). JavaScript puro em módulos, sem etapa de build.
 import {
   $, h, storage, api, setToken, setUnauthorizedHandler, uploadFile, formatTime, dayLabel, fullTime,
   formatSize, avatar, badge, toast, copyText, openDialog, ask, confirmDialog, openPopover,
-  closePopover, openMenu, playPing, hueFor,
+  closePopover, openMenu, playPing, hueFor, presenceOf, STATUS_LABEL, uploadAvatar,
 } from './util.js';
 import { openEmojiPicker } from './emoji.js';
 import {
@@ -28,6 +28,11 @@ function debounce(fn, ms) {
 // ================================================================ Login / cadastro
 
 let authMode = 'login';
+let registrationRequiresCode = false;
+api('/config').then((c) => {
+  registrationRequiresCode = !!c.registrationRequiresCode;
+  if (authMode === 'register') $('#reg-code-field').hidden = !registrationRequiresCode;
+}).catch(() => {});
 
 function showAuth(mode = 'login') {
   authMode = mode;
@@ -40,6 +45,7 @@ function showAuth(mode = 'login') {
     ? 'Entre ou crie uma conta para aceitar o convite.'
     : register ? 'Leva menos de um minuto.' : 'Entre para continuar a conversa.';
   $('#display-name-field').hidden = !register;
+  $('#reg-code-field').hidden = !register || !registrationRequiresCode;
   $('#auth-submit').textContent = register ? 'Cadastrar' : 'Entrar';
   $('#auth-switch-text').textContent = register ? 'Já tem conta?' : 'Não tem conta?';
   $('#auth-switch').textContent = register ? 'Entrar' : 'Cadastre-se';
@@ -55,7 +61,10 @@ $('#auth-form').addEventListener('submit', async (e) => {
   const form = e.currentTarget;
   const btn = $('#auth-submit');
   const body = { username: form.username.value.trim().toLowerCase(), password: form.password.value };
-  if (authMode === 'register') body.displayName = form.displayName.value.trim();
+  if (authMode === 'register') {
+    body.displayName = form.displayName.value.trim();
+    if (registrationRequiresCode) body.inviteCode = form.inviteCode.value.trim();
+  }
   btn.disabled = true;
   $('#auth-error').textContent = '';
   try {
@@ -80,8 +89,9 @@ function logout() {
   closePopover();
   Object.assign(state, {
     token: null, me: null, socket: null, servers: [], view: 'home', detail: null, channelId: null,
-    dms: [], friends: { friends: [], incoming: [], outgoing: [] }, editingId: null,
+    dms: [], friends: { friends: [], incoming: [], outgoing: [] }, editingId: null, replyTo: null,
   });
+  closeSearch();
   setToken(null);
   state.messages.clear();
   state.typing.clear();
@@ -172,7 +182,7 @@ async function refreshDetail() {
   const { detail } = fetched;
   setDetail(detail, fetched.replay);
   if (!detail.channels.some((c) => c.id === state.channelId)) {
-    const first = detail.channels[0];
+    const first = detail.channels.find((c) => c.kind === 'text') || detail.channels[0];
     if (first) return selectChannel(first.id);
   }
   renderAll();
@@ -240,13 +250,20 @@ function connectSocket() {
   });
 
   socket.on('message:new', onMessageNew);
-  socket.on('message:updated', (msg) => updateMessage(msg.channelId, msg.id, msg));
+  socket.on('message:updated', (msg) => {
+    updateMessage(msg.channelId, msg.id, msg);
+    // Quem respondeu essa mensagem mostra o texto novo na citação.
+    patchReplies(msg.channelId, msg.id, (r) => ({ ...r, content: msg.content.slice(0, 120), hasAttachments: msg.attachments.length > 0 }));
+  });
+  socket.on('channel:pins', ({ channelId }) => { if (pinsOpenFor === channelId) openPins(); });
   socket.on('message:reactions', ({ id, channelId, reactions }) => updateMessage(channelId, id, { reactions }));
   socket.on('message:deleted', ({ id, channelId }) => {
     const bucket = state.messages.get(channelId);
     if (!bucket) return;
     bucket.items = bucket.items.filter((m) => m.id !== id);
     if (state.editingId === id) state.editingId = null;
+    if (state.replyTo && state.replyTo.message.id === id) setReply(null);
+    patchReplies(channelId, id, () => ({ deleted: true }));
     if (channelId === state.channelId) renderMessages();
   });
 
@@ -287,13 +304,14 @@ function connectSocket() {
 
   socket.on('friends:changed', () => { loadFriendsSoon(); loadDmsSoon(); });
 
-  socket.on('presence', ({ userId, online }) => {
+  socket.on('presence', ({ userId, online, status, statusText }) => {
+    const p = { online, status: status || (online ? 'online' : 'offline'), statusText: statusText || null };
     applyLive(() => {
       const m = memberById(userId);
-      if (m) m.online = online;
+      if (m) Object.assign(m, p);
     });
-    for (const list of Object.values(state.friends)) list.forEach((f) => { if (f.id === userId) f.online = online; });
-    state.dms.forEach((d) => { if (d.user.id === userId) d.user.online = online; });
+    for (const list of Object.values(state.friends)) list.forEach((f) => { if (f.id === userId) Object.assign(f, p); });
+    state.dms.forEach((d) => { if (d.user.id === userId) Object.assign(d.user, p); });
     if (state.view === 'home') {
       renderSidebar();
       renderHeader();
@@ -406,6 +424,7 @@ function clearLocalUnread(channelId) {
 }
 
 function notifyUser(msg) {
+  if (state.me.status === 'dnd') return; // "Não perturbe": sem som nem aviso
   if (state.soundOn) playPing();
   if ('Notification' in window && window.isSecureContext && Notification.permission === 'granted' && !isVisible()) {
     const where = msg.serverId === null ? 'mensagem direta' : 'menção';
@@ -440,6 +459,7 @@ document.addEventListener('visibilitychange', () => {
 // ================================================================ Navegação
 
 async function goHome(channelId = null) {
+  if (state.view !== 'home') closeSearch();
   state.view = 'home';
   state.detail = null;
   storage('nexo.view', 'home');
@@ -454,6 +474,7 @@ async function goHome(channelId = null) {
 }
 
 async function selectServer(serverId, preferredChannelId) {
+  if (state.view !== serverId) closeSearch();
   state.view = serverId;
   storage('nexo.view', String(serverId));
   renderRail();
@@ -469,7 +490,7 @@ async function selectServer(serverId, preferredChannelId) {
   setDetail(detail, fetched.replay);
 
   const saved = preferredChannelId || Number(storage(`nexo.channel.${serverId}`));
-  const channel = detail.channels.find((c) => c.id === saved) || detail.channels.find((c) => c.kind !== 'voice') || detail.channels[0];
+  const channel = detail.channels.find((c) => c.id === saved) || detail.channels.find((c) => c.kind === 'text') || detail.channels[0];
   if (channel) await selectChannel(channel.id);
   else { state.channelId = null; renderAll(); }
 }
@@ -478,6 +499,8 @@ async function selectChannel(channelId) {
   if (state.channelId !== channelId) {
     state.editingId = null;
     clearUploads();
+    setReply(null, { render: false });
+    pinsOpenFor = null;
   }
   state.channelId = channelId;
   if (state.view === 'home') storage('nexo.homeChannel', String(channelId));
@@ -579,7 +602,7 @@ function renderSidebar() {
           h('button', {
             class: `side-item dm${d.channelId === state.channelId ? ' active' : ''}${d.unread ? ' unread' : ''}`,
             onclick: () => selectChannel(d.channelId),
-          }, avatar(d.user, { size: 'sm', online: d.user.online }), h('span', { class: 'truncate' }, d.user.displayName), badge(d.mentions))))),
+          }, avatar(d.user, { size: 'sm', online: d.user.online ? presenceOf(d.user) : 'offline' }), h('span', { class: 'truncate' }, d.user.displayName), badge(d.mentions))))),
     );
     return;
   }
@@ -599,21 +622,33 @@ function renderSidebar() {
 
   const manage = can(P.MANAGE_CHANNELS);
   const channels = [...state.detail.channels].sort((a, b) => a.position - b.position || a.id - b.id);
-  const text = channels.filter((c) => c.kind !== 'voice');
+  const text = channels.filter((c) => c.kind === 'text');
   const voiceChannels = channels.filter((c) => c.kind === 'voice');
-  const gear = (c) => (manage ? h('button', { class: 'icon-btn small channel-gear', title: 'Editar canal', onclick: () => editChannelDialog(c) }, '⚙') : null);
+  const threadsOf = (parentId) => channels
+    .filter((t) => t.kind === 'thread' && t.parentChannelId === parentId && threadVisible(t))
+    .sort((a, b) => new Date(b.lastMessageAt || 0) - new Date(a.lastMessageAt || 0));
+  const gear = (c) => (manage || (c.kind === 'thread' && c.createdBy === state.me.id)
+    ? h('button', { class: 'icon-btn small channel-gear', title: c.kind === 'thread' ? 'Editar thread' : 'Editar canal', onclick: () => editChannelDialog(c) }, '⚙')
+    : null);
+  const threadRow = (t) => h('li', { class: 'channel-row thread' },
+    h('button', {
+      class: `side-item channel thread${t.id === state.channelId ? ' active' : ''}${t.unread ? ' unread' : ''}`,
+      title: t.name,
+      onclick: () => selectChannel(t.id),
+    }, h('span', { class: 'thread-branch', 'aria-hidden': 'true' }), h('span', { class: 'truncate' }, t.name), badge(t.mentions)),
+    gear(t));
   const vs = voiceState();
 
   body.replaceChildren(...[
     h('div', { class: 'section-title' },
       h('span', {}, 'Canais de texto'),
       manage ? h('button', { class: 'icon-btn small', title: 'Criar canal', onclick: () => createChannelDialog('text') }, '+') : null),
-    h('ul', { class: 'side-list' }, text.map((c) => h('li', { class: 'channel-row' },
+    h('ul', { class: 'side-list' }, text.flatMap((c) => [h('li', { class: 'channel-row' },
       h('button', {
         class: `side-item channel${c.id === state.channelId ? ' active' : ''}${c.unread ? ' unread' : ''}`,
         onclick: () => selectChannel(c.id),
       }, h('span', { class: 'hash' }, '#'), h('span', { class: 'truncate' }, c.name), badge(c.mentions)),
-      gear(c)))),
+      gear(c)), ...threadsOf(c.id).map(threadRow)])),
     voiceChannels.length || manage ? h('div', { class: 'section-title' },
       h('span', {}, 'Canais de voz'),
       manage ? h('button', { class: 'icon-btn small', title: 'Criar canal de voz', onclick: () => createChannelDialog('voice') }, '+') : null) : null,
@@ -640,6 +675,13 @@ function renderSidebar() {
         })) : null);
     })),
   ].filter(Boolean));
+}
+
+// Threads aparecem na lista enquanto estão ativas (última semana), com algo
+// não lido ou abertas agora. As antigas continuam acessíveis pela mensagem de origem.
+function threadVisible(t) {
+  if (t.id === state.channelId || t.unread) return true;
+  return Date.now() - new Date(t.lastMessageAt || 0) < 7 * 24 * 3600 * 1000;
 }
 
 // Clicar num canal de voz: abre a tela dele e entra (se ainda não estiver nele).
@@ -670,12 +712,24 @@ function renderHeader() {
   } else if (dm) {
     title.replaceChildren(
       h('button', { class: 'header-user', onclick: (e) => openProfile(e.currentTarget, dm.user) },
-        avatar(dm.user, { size: 'xs', online: dm.user.online }), h('span', { class: 'truncate' }, dm.user.displayName)),
+        avatar(dm.user, { size: 'xs', online: dm.user.online ? presenceOf(dm.user) : 'offline' }), h('span', { class: 'truncate' }, dm.user.displayName)),
+    );
+  } else if (channel && channel.kind === 'thread') {
+    const parent = state.detail.channels.find((c) => c.id === channel.parentChannelId);
+    title.replaceChildren(
+      parent ? h('button', { class: 'crumb', onclick: () => selectChannel(parent.id) }, h('span', { class: 'hash' }, '#'), h('span', { class: 'truncate' }, parent.name)) : null,
+      parent ? h('span', { class: 'crumb-sep' }, '›') : null,
+      h('span', { class: 'hash thread-icon' }, '🧵'), h('span', { class: 'truncate' }, channel.name),
     );
   } else {
     title.replaceChildren(h('span', { class: 'hash' }, channel && channel.kind === 'voice' ? '🔊' : '#'), h('span', { class: 'truncate' }, channel ? channel.name : ''));
   }
+  const textual = !!state.channelId && !(channel && channel.kind === 'voice');
+  $('#btn-pins').hidden = !textual;
   $('#btn-toggle-members').hidden = state.view === 'home';
+  $('#search-input').placeholder = state.view === 'home'
+    ? (dm ? `Buscar com @${dm.user.username}` : 'Buscar nas conversas')
+    : `Buscar em ${state.detail ? state.detail.server.name : 'servidor'}`;
 }
 
 function renderMain() {
@@ -706,16 +760,20 @@ function renderMembers() {
   const ownerId = state.detail.server.ownerId;
   const online = state.detail.members.filter((m) => m.online);
   const offline = state.detail.members.filter((m) => !m.online);
+  const statusLine = (m) => (m.statusText ? h('span', { class: 'member-status truncate' }, m.statusText) : null);
   const group = (title, members, isOnline) => (members.length === 0 ? null
     : h('div', { class: 'member-group' },
       h('div', { class: 'section-title' }, `${title} — ${members.length}`),
       members.map((m) => {
         const color = roleColor(m.id);
         return h('button', { class: `member${isOnline ? '' : ' off'}`, title: `@${m.username}`, onclick: (e) => openProfile(e.currentTarget, m) },
-          avatar(m, { size: 'sm', online: isOnline }),
-          h('span', { class: 'name truncate', style: color ? `color:${color}` : null }, m.displayName),
-          m.isBot ? botTag() : null,
-          m.id === ownerId ? h('span', { class: 'owner-badge', title: 'Dono do servidor' }, '👑') : null);
+          avatar(m, { size: 'sm', online: isOnline ? presenceOf(m) : 'offline' }),
+          h('span', { class: 'member-info' },
+            h('span', { class: 'member-name' },
+              h('span', { class: 'name truncate', style: color ? `color:${color}` : null }, m.displayName),
+              m.isBot ? botTag() : null,
+              m.id === ownerId ? h('span', { class: 'owner-badge', title: 'Dono do servidor' }, '👑') : null),
+            isOnline ? statusLine(m) : null));
       })));
   panel.replaceChildren(...[group('Online', online, true), group('Offline', offline, false)].filter(Boolean));
 }
@@ -808,12 +866,24 @@ function renderMessages({ stick = 'if-near' } = {}) {
   } else {
     const dm = currentDm();
     const channel = currentChannel();
-    nodes.push(cached('top', `start|${dm ? dm.user.displayName : channel && channel.name}`, () => (dm
-      ? h('div', { class: 'channel-start' }, avatar(dm.user, { size: 'lg' }), h('h2', {}, dm.user.displayName),
-        h('p', { class: 'muted' }, `Este é o começo da sua conversa com @${dm.user.username}.`))
-      : h('div', { class: 'channel-start' }, h('div', { class: 'start-hash' }, '#'),
+    nodes.push(cached('top', `start|${dm ? dm.user.displayName : channel && channel.name}|${dm && dm.user.avatarUrl}`, () => {
+      if (dm) {
+        return h('div', { class: 'channel-start' }, avatar(dm.user, { size: 'lg' }), h('h2', {}, dm.user.displayName),
+          h('p', { class: 'muted' }, `Este é o começo da sua conversa com @${dm.user.username}.`));
+      }
+      if (channel && channel.kind === 'thread') {
+        const parent = state.detail.channels.find((c) => c.id === channel.parentChannelId);
+        return h('div', { class: 'channel-start' }, h('div', { class: 'start-hash' }, '🧵'),
+          h('h2', {}, channel.name),
+          h('p', { class: 'muted' }, parent ? `Thread criada a partir de uma mensagem em #${parent.name}. ` : 'Thread. ',
+            parent && channel.parentMessageId
+              ? h('button', { class: 'link', onclick: () => jumpToMessage(parent.id, channel.parentMessageId) }, 'Ver mensagem original')
+              : null));
+      }
+      return h('div', { class: 'channel-start' }, h('div', { class: 'start-hash' }, '#'),
         h('h2', {}, `Bem-vindo a #${channel ? channel.name : ''}!`),
-        h('p', { class: 'muted' }, 'Este é o começo do canal.')))));
+        h('p', { class: 'muted' }, 'Este é o começo do canal.'));
+    }));
   }
 
   const view = `${state.detailVersion}|${state.view}`;
@@ -825,9 +895,10 @@ function renderMessages({ stick = 'if-near' } = {}) {
       const key = `day:${date.toDateString()}`;
       nodes.push(cached(key, dayLabel(date), () => h('div', { class: 'day-sep' }, dayLabel(date))));
     }
-    const grouped = !!prev && !newDay && prev.author.id === m.author.id && !prev.failed &&
+    const grouped = !!prev && !newDay && prev.author.id === m.author.id && !prev.failed && !m.replyTo &&
       date - new Date(prev.createdAt) < 7 * 60 * 1000;
-    const sig = [m._v || 0, grouped, !!m.pending, !!m.failed, state.editingId === m.id, view].join('|');
+    const replying = !!(state.replyTo && state.replyTo.message.id === m.id);
+    const sig = [m._v || 0, grouped, !!m.pending, !!m.failed, state.editingId === m.id, replying, view].join('|');
     nodes.push(cached(`m:${m.nonce && m.pending ? m.nonce : m.id}`, sig, () => buildMessage(m, grouped)));
     prev = m;
   }
@@ -855,16 +926,54 @@ function canDelete(m) {
   return state.view !== 'home' && can(P.MANAGE_MESSAGES);
 }
 
+// Em DM qualquer um fixa; em servidor precisa de "Gerenciar mensagens".
+const canPin = () => state.view === 'home' || can(P.MANAGE_MESSAGES);
+
+// Dados mais recentes de um usuário (nome/foto podem ter mudado depois da mensagem).
+function freshUser(u) {
+  if (!u || u.id == null) return u;
+  if (u.id === state.me.id) return { ...u, displayName: state.me.displayName, avatarUrl: state.me.avatarUrl };
+  const m = memberById(u.id);
+  if (m) return m;
+  const dm = state.dms.find((d) => d.user.id === u.id);
+  return dm ? dm.user : u;
+}
+
+// A linha "↱ Fulano: texto" acima de uma resposta.
+function buildReplyRef(m) {
+  const r = m.replyTo;
+  if (r.deleted) return h('div', { class: 'reply-ref deleted' }, h('span', { class: 'reply-spine' }), h('em', {}, 'A mensagem original foi apagada'));
+  const author = freshUser(r.author);
+  const color = (r.author.id && roleColor(r.author.id)) || null;
+  const text = r.content ? r.content.replace(/\s+/g, ' ') : (r.hasAttachments ? '📎 Clique para ver o anexo' : '');
+  return h('button', { class: 'reply-ref', type: 'button', title: 'Ir para a mensagem', onclick: () => jumpToMessage(m.channelId, r.id) },
+    h('span', { class: 'reply-spine' }),
+    avatar(author, { size: 'xxs' }),
+    h('strong', { style: color ? `color:${color}` : null }, `@${author.displayName}`),
+    h('span', { class: 'reply-text truncate' }, text));
+}
+
+// O "chip" de thread embaixo da mensagem de origem.
+function buildThreadChip(m) {
+  const t = m.thread;
+  const last = t.lastAt ? new Date(t.lastAt) : null;
+  return h('button', { class: 'thread-chip', type: 'button', onclick: () => selectChannel(t.id) },
+    h('span', { class: 'thread-icon' }, '🧵'),
+    h('strong', { class: 'truncate' }, t.name),
+    h('span', { class: 'link' }, t.messageCount === 1 ? '1 mensagem' : `${t.messageCount} mensagens`),
+    last ? h('span', { class: 'muted' }, `· ${fullTime(last)}`) : null);
+}
+
 function buildMessage(m, grouped) {
   const date = new Date(m.createdAt);
   const mine = m.author.id === state.me.id;
   const mentionsMe = !mine && (m.mentions.includes(state.me.id) || m.mentionEveryone);
   const editing = state.editingId === m.id;
-  const authorUser = memberById(m.author.id) || m.author;
+  const authorUser = freshUser(m.author);
 
   const left = grouped
     ? h('span', { class: 'msg-time hover', title: fullTime(date) }, formatTime(date))
-    : h('button', { class: 'avatar-btn', onclick: (e) => openProfile(e.currentTarget, authorUser) }, avatar(m.author));
+    : h('button', { class: 'avatar-btn', onclick: (e) => openProfile(e.currentTarget, authorUser) }, avatar(authorUser));
 
   const body = h('div', { class: 'msg-body' });
   if (!grouped) {
@@ -872,7 +981,10 @@ function buildMessage(m, grouped) {
     body.append(h('div', { class: 'msg-head' },
       h('button', { class: 'msg-author', style: `color:${color}`, onclick: (e) => openProfile(e.currentTarget, authorUser) }, m.author.displayName),
       m.author.isBot ? botTag() : null,
-      h('span', { class: 'msg-time', title: fullTime(date) }, fullTime(date))));
+      h('span', { class: 'msg-time', title: fullTime(date) }, fullTime(date)),
+      m.pinnedAt ? h('span', { class: 'pin-mark', title: 'Mensagem fixada' }, '📌') : null));
+  } else if (m.pinnedAt) {
+    body.append(h('span', { class: 'pin-mark floating', title: 'Mensagem fixada' }, '📌'));
   }
 
   if (editing) body.append(buildEditor(m));
@@ -885,15 +997,24 @@ function buildMessage(m, grouped) {
   if (m.attachments.length) body.append(h('div', { class: 'attachments' }, m.attachments.map((a) => buildAttachment(a, m.pending))));
   if (m.failed) body.append(h('div', { class: 'msg-failed' }, 'Não foi enviada.'));
   if (m.reactions.length) body.append(buildReactions(m));
+  if (m.thread) body.append(buildThreadChip(m));
 
+  const repliesToMe = !mine && m.replyTo && !m.replyTo.deleted && m.replyTo.author && m.replyTo.author.id === state.me.id;
+  const replying = !!(state.replyTo && state.replyTo.message.id === m.id);
   const el = h('div', {
-    class: `msg ${grouped ? 'grouped' : 'first'}${mentionsMe ? ' mentioned' : ''}${editing ? ' editing' : ''}`,
+    class: `msg ${grouped ? 'grouped' : 'first'}${mentionsMe || repliesToMe ? ' mentioned' : ''}${editing ? ' editing' : ''}${replying ? ' replying' : ''}${m.replyTo ? ' has-reply' : ''}`,
     dataset: { id: m.id },
-  }, h('div', { class: 'msg-left' }, left), body);
+  }, m.replyTo ? buildReplyRef(m) : null, h('div', { class: 'msg-left' }, left), body);
 
   if (!m.pending && !m.failed && !editing) {
     const tools = [];
+    const channel = currentChannel();
     if (can(P.ADD_REACTIONS)) tools.push(h('button', { class: 'tool', title: 'Reagir', onclick: (e) => openEmojiPicker(e.currentTarget, (emoji) => toggleReaction(m, emoji, true)) }, '😀'));
+    if (can(P.SEND_MESSAGES)) tools.push(h('button', { class: 'tool', title: 'Responder', onclick: () => setReply(m) }, '↩️'));
+    if (channel && channel.kind === 'text' && can(P.SEND_MESSAGES)) {
+      tools.push(h('button', { class: 'tool', title: m.thread ? 'Abrir thread' : 'Criar thread', onclick: () => (m.thread ? selectChannel(m.thread.id) : createThreadDialog(m)) }, '🧵'));
+    }
+    if (canPin()) tools.push(h('button', { class: 'tool', title: m.pinnedAt ? 'Desafixar' : 'Fixar', onclick: () => togglePin(m) }, m.pinnedAt ? '📍' : '📌'));
     if (mine) tools.push(h('button', { class: 'tool', title: 'Editar', onclick: () => startEdit(m) }, '✏️'));
     if (canDelete(m)) tools.push(h('button', { class: 'tool danger', title: 'Apagar (Shift+clique apaga direto)', onclick: (e) => deleteMessage(m, e.shiftKey) }, '🗑️'));
     if (tools.length) el.append(h('div', { class: 'msg-tools' }, tools));
@@ -1082,8 +1203,10 @@ function renderComposerState() {
   const channel = currentChannel();
   input.placeholder = !allowed
     ? 'Você não tem permissão para enviar mensagens aqui.'
-    : dm ? `Conversar com @${dm.user.username}` : `Conversar em #${channel ? channel.name : ''}`;
+    : dm ? `Conversar com @${dm.user.username}`
+      : channel && channel.kind === 'thread' ? `Conversar em 🧵 ${channel.name}` : `Conversar em #${channel ? channel.name : ''}`;
   renderUploads();
+  renderReplyBar();
 }
 
 function autoResize() {
@@ -1103,6 +1226,7 @@ input.addEventListener('input', () => {
 
 input.addEventListener('keydown', (e) => {
   if (handleAutocompleteKey(e)) return;
+  if (e.key === 'Escape' && state.replyTo) { e.preventDefault(); setReply(null); return; }
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     sendMessage();
@@ -1136,10 +1260,13 @@ function sendMessage() {
 
   const channelId = state.channelId;
   const nonce = `n${Date.now().toString(36)}${++tempSeq}`;
+  const reply = state.replyTo && state.replyTo.channelId === channelId ? state.replyTo.message : null;
   const temp = {
     id: `tmp-${nonce}`, nonce, pending: true, channelId, serverId: state.view === 'home' ? null : state.view,
     content, createdAt: new Date().toISOString(), author: state.me, mentions: [], mentionEveryone: false,
     reactions: [], attachments: ups.map((u) => ({ ...u.attachment, local: true })),
+    replyTo: reply ? { id: reply.id, content: reply.content.slice(0, 120), hasAttachments: reply.attachments.length > 0, author: reply.author } : null,
+    thread: null, pinnedAt: null,
   };
   const attachmentIds = ups.map((u) => u.attachment.id);
   bucketFor(channelId).items.push(temp);
@@ -1147,10 +1274,12 @@ function sendMessage() {
   autoResize();
   clearUploads();
   hideAutocomplete();
+  setReply(null, { render: false });
   lastTypingSent = 0;
   renderMessages({ stick: 'always' });
 
-  state.socket.timeout(15000).emit('message:send', { channelId, content, attachmentIds, nonce }, (err, res) => {
+  const payload = { channelId, content, attachmentIds, nonce, ...(reply ? { replyToId: reply.id } : {}) };
+  state.socket.timeout(15000).emit('message:send', payload, (err, res) => {
     const bucket = state.messages.get(channelId);
     if (!bucket) return;
     const idx = bucket.items.indexOf(temp);
@@ -1353,28 +1482,31 @@ export function openProfile(anchor, user) {
   const isMe = user.id === state.me.id;
   const member = state.view !== 'home' ? memberById(user.id) : null;
   const roles = memberRoles(member);
-  const status = friendStatus(user.id);
-  const online = member ? member.online : user.online;
+  const friendship = friendStatus(user.id);
+  const source = member || user;
+  const online = source.online;
+  const status = isMe ? state.me.status : presenceOf(source);
+  const statusText = isMe ? state.me.statusText : (online ? source.statusText : null);
 
   const actions = [];
   if (!isMe) {
     actions.push(h('button', { class: 'btn primary', onclick: () => openDm(user.id) }, 'Enviar mensagem'));
     if (user.isBot) {
       // bots não fazem amizade
-    } else if (!status) {
+    } else if (!friendship) {
       actions.push(h('button', {
         class: 'btn', onclick: async (e) => {
           e.currentTarget.disabled = true;
           try { await api('/friends', { method: 'POST', body: { username: user.username } }); toast('Pedido de amizade enviado!'); closePopover(); } catch (err) { toast(err.message); }
         },
       }, 'Adicionar amigo'));
-    } else if (status === 'incoming') {
+    } else if (friendship === 'incoming') {
       actions.push(h('button', {
         class: 'btn', onclick: async () => {
           try { await api(`/friends/${user.id}/accept`, { method: 'POST' }); toast('Agora vocês são amigos!'); closePopover(); } catch (err) { toast(err.message); }
         },
       }, 'Aceitar amizade'));
-    } else if (status === 'outgoing') {
+    } else if (friendship === 'outgoing') {
       actions.push(h('button', { class: 'btn', disabled: true }, 'Pedido enviado'));
     } else {
       actions.push(h('span', { class: 'friend-tag' }, '✓ Amigos'));
@@ -1387,10 +1519,11 @@ export function openProfile(anchor, user) {
   const color = member ? roleColor(member.id) : null;
   openPopover(anchor, h('div', { class: 'profile' },
     h('div', { class: 'profile-banner', style: `--hue:${hueFor(user.id)}` }),
-    h('div', { class: 'profile-avatar' }, avatar(user, { size: 'xl', online: online === undefined ? undefined : !!online })),
+    h('div', { class: 'profile-avatar' }, avatar(freshUser(user), { size: 'xl', online: online === undefined && !isMe ? undefined : (isMe ? status : (online ? status : 'offline')) })),
     h('div', { class: 'profile-body' },
-      h('h3', { style: color ? `color:${color}` : null }, user.displayName, user.isBot ? botTag() : null),
+      h('h3', { style: color ? `color:${color}` : null }, freshUser(user).displayName, user.isBot ? botTag() : null),
       h('div', { class: 'muted' }, `@${user.username}`),
+      statusText ? h('div', { class: 'profile-status' }, statusText) : null,
       member && member.id === state.detail.server.ownerId ? h('div', { class: 'owner-line' }, '👑 Dono do servidor') : null,
       roles.length ? h('div', { class: 'role-chips' }, roles.map((r) => h('span', { class: 'role-chip' },
         h('i', { style: `background:${r.color || 'var(--text-3)'}` }), r.name))) : null,
@@ -1486,18 +1619,20 @@ function createChannelDialog(kind = 'text') {
 }
 
 function editChannelDialog(channel) {
+  const thread = channel.kind === 'thread';
   const input2 = h('input', { value: channel.name, maxlength: '100' });
   openDialog({
-    title: 'Editar canal',
-    body: h('label', { class: 'field' }, 'Nome do canal', input2),
+    title: thread ? 'Editar thread' : 'Editar canal',
+    body: h('label', { class: 'field' }, thread ? 'Nome da thread' : 'Nome do canal', input2),
     actions: [
       {
-        label: 'Apagar canal', kind: 'danger-ghost',
+        label: thread ? 'Apagar thread' : 'Apagar canal', kind: 'danger-ghost',
         onClick: () => {
           confirmDialog({
-            title: `Apagar #${channel.name}`,
-            text: 'Todas as mensagens deste canal serão apagadas para sempre.',
-            okLabel: 'Apagar canal',
+            title: thread ? `Apagar a thread "${channel.name}"` : `Apagar #${channel.name}`,
+            text: thread ? 'Todas as mensagens da thread serão apagadas para sempre.'
+              : 'Todas as mensagens deste canal (e das threads dele) serão apagadas para sempre.',
+            okLabel: thread ? 'Apagar thread' : 'Apagar canal',
             onConfirm: () => api(`/channels/${channel.id}`, { method: 'DELETE' }),
           });
         },
@@ -1589,7 +1724,7 @@ function newDmDialog() {
     body: h('div', { class: 'pick-list' }, friends.map((f) => h('button', {
       class: 'pick-item', type: 'button',
       onclick: (e) => { e.currentTarget.closest('dialog').close(); openDm(f.id); },
-    }, avatar(f, { size: 'sm', online: f.online }), h('strong', {}, f.displayName), h('span', { class: 'muted' }, `@${f.username}`)))),
+    }, avatar(f, { size: 'sm', online: f.online ? presenceOf(f) : 'offline' }), h('strong', {}, f.displayName), h('span', { class: 'muted' }, `@${f.username}`)))),
     actions: [{ label: 'Fechar' }],
   });
 }
@@ -1597,9 +1732,10 @@ function newDmDialog() {
 // ================================================================ Painel do usuário
 
 function renderUserPanel() {
-  $('#me-avatar').replaceChildren(avatar(state.me));
+  $('#me-avatar').replaceChildren(avatar(state.me, { size: 'sm', online: state.me.status || 'online' }));
   $('#me-name').textContent = state.me.displayName;
-  $('#me-username').textContent = `@${state.me.username}`;
+  $('#me-username').textContent = state.me.statusText || `@${state.me.username}`;
+  $('#me-username').title = state.me.statusText ? `@${state.me.username} • ${state.me.statusText}` : '';
   $('#btn-sound').textContent = state.soundOn ? '🔔' : '🔕';
   $('#btn-sound').title = state.soundOn ? 'Som de notificação ligado' : 'Som de notificação desligado';
 }
@@ -1615,12 +1751,80 @@ $('#btn-sound').addEventListener('click', () => {
   }
 });
 
+const STATUS_MENU = [
+  ['online', '🟢', 'Online'],
+  ['idle', '🌙', 'Ausente'],
+  ['dnd', '⛔', 'Não perturbe (sem sons nem avisos)'],
+  ['invisible', '⚫', 'Invisível (aparece offline)'],
+];
+
 $('#me-info').addEventListener('click', (e) => openMenu(e.currentTarget, [
+  ...STATUS_MENU.map(([value, icon, label]) => ({
+    label: `${icon}  ${label}${state.me.status === value ? '  ✓' : ''}`,
+    onClick: () => saveMe({ status: value }),
+  })),
+  { label: state.me.statusText ? '💬  Editar status personalizado' : '💬  Definir status personalizado', onClick: editStatusText },
+  { separator: true },
+  { label: '🖼️  Mudar foto de perfil', onClick: pickAvatar },
+  { label: '🗑️  Remover foto de perfil', hidden: !state.me.avatarUrl, onClick: removeAvatar },
   { label: '✏️  Mudar nome de exibição', onClick: editDisplayName },
   { label: '🤖  Desenvolvedor (bots)', onClick: () => openDeveloper() },
   { separator: true },
   { label: '🚪  Sair da conta', danger: true, onClick: logout },
 ]));
+
+function applyMe(user) {
+  state.me = user;
+  renderUserPanel();
+  if (state.channelId) renderMessages();
+}
+
+async function saveMe(changes) {
+  try {
+    const { user } = await api('/me', { method: 'PATCH', body: changes });
+    applyMe(user);
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+const editStatusText = () => ask({
+  title: 'Status personalizado',
+  text: 'Aparece embaixo do seu nome. Ex.: "Jogando Minecraft", "Estudando 📚". Deixe vazio para tirar.',
+  placeholder: 'O que você está fazendo?',
+  value: state.me.statusText || '',
+  maxLength: 80,
+  okLabel: 'Salvar',
+  onSubmit: async (statusText) => {
+    const { user } = await api('/me', { method: 'PATCH', body: { statusText } });
+    applyMe(user);
+  },
+});
+
+function pickAvatar() {
+  const picker = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp' });
+  picker.addEventListener('change', async () => {
+    const file = picker.files[0];
+    if (!file) return;
+    try {
+      toast('Enviando foto…');
+      applyMe(await uploadAvatar(file));
+      toast('Foto de perfil atualizada!');
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+  picker.click();
+}
+
+function removeAvatar() {
+  confirmDialog({
+    title: 'Remover foto de perfil',
+    text: 'Seu avatar volta a ser as iniciais do seu nome.',
+    okLabel: 'Remover',
+    onConfirm: async () => applyMe((await api('/me/avatar', { method: 'DELETE' })).user),
+  });
+}
 
 const editDisplayName = () => ask({
   title: 'Seu nome de exibição',
@@ -1630,8 +1834,7 @@ const editDisplayName = () => ask({
   okLabel: 'Salvar',
   onSubmit: async (displayName) => {
     const { user } = await api('/me', { method: 'PATCH', body: { displayName } });
-    state.me = user;
-    renderUserPanel();
+    applyMe(user);
   },
 });
 
@@ -1647,6 +1850,263 @@ $('#btn-toggle-sidebar').addEventListener('click', () => $('#app').classList.tog
 function botTag() {
   return h('span', { class: 'bot-tag', title: 'Conta automática (bot)' }, 'BOT');
 }
+
+// ================================================================ Responder
+
+function setReply(message, { render = true } = {}) {
+  const prev = state.replyTo;
+  state.replyTo = message ? { channelId: message.channelId, message } : null;
+  renderReplyBar();
+  if (!render) return;
+  if (prev || message) renderMessages();
+  if (message) input.focus();
+}
+
+function renderReplyBar() {
+  const bar = $('#reply-bar');
+  const r = state.replyTo;
+  if (!r || r.channelId !== state.channelId) { bar.hidden = true; bar.replaceChildren(); return; }
+  bar.hidden = false;
+  bar.replaceChildren(
+    h('span', {}, 'Respondendo a ', h('strong', {}, freshUser(r.message.author).displayName)),
+    h('button', { class: 'icon-btn small', type: 'button', title: 'Cancelar resposta (Esc)', onclick: () => setReply(null) }, '✕'),
+  );
+}
+
+// Atualiza a citação nas respostas a uma mensagem (editada ou apagada).
+function patchReplies(channelId, id, fn) {
+  const bucket = state.messages.get(channelId);
+  if (!bucket) return;
+  let changed = false;
+  for (const m of bucket.items) {
+    if (m.replyTo && m.replyTo.id === id) {
+      m.replyTo = fn(m.replyTo);
+      m._v = (m._v || 0) + 1;
+      changed = true;
+    }
+  }
+  if (changed && channelId === state.channelId) renderMessages();
+}
+
+// ================================================================ Ir até uma mensagem
+
+let jumpSeq = 0;
+
+async function jumpToMessage(channelId, messageId) {
+  const seq = ++jumpSeq;
+  closePopover();
+  if (state.channelId !== channelId) {
+    const inServer = state.detail && state.detail.channels.some((c) => c.id === channelId);
+    const isDm = state.dms.some((d) => d.channelId === channelId);
+    if (inServer) await selectChannel(channelId);
+    else if (isDm) await goHome(channelId);
+    else return toast('Não foi possível abrir essa conversa.');
+  }
+  const bucket = bucketFor(channelId);
+  // Vai carregando o histórico para trás até achar (no máximo ~2000 mensagens).
+  for (let i = 0; i < 40 && !bucket.items.some((m) => m.id === messageId); i++) {
+    if (seq !== jumpSeq || state.channelId !== channelId) return;
+    if (!bucket.hasMore) break;
+    if (bucket.loading) { await new Promise((r) => setTimeout(r, 100)); i--; continue; }
+    await loadOlder(channelId);
+  }
+  if (seq !== jumpSeq || state.channelId !== channelId) return;
+  const el = $(`#messages .msg[data-id="${CSS.escape(messageId)}"]`);
+  if (!el) return toast('Essa mensagem não existe mais (ou é antiga demais).');
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  el.classList.remove('flash');
+  void el.offsetWidth; // reinicia a animação
+  el.classList.add('flash');
+  setTimeout(() => el.classList.remove('flash'), 2200);
+}
+
+// ================================================================ Threads
+
+function createThreadDialog(m) {
+  const suggestion = (m.content || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  ask({
+    title: 'Criar thread',
+    text: 'Uma conversa paralela sobre essa mensagem, sem atrapalhar o canal.',
+    placeholder: 'Nome da thread',
+    value: suggestion,
+    maxLength: 100,
+    okLabel: 'Criar thread',
+    onSubmit: async (name) => {
+      const { channel } = await api(`/messages/${m.id}/thread`, { method: 'POST', body: { name } });
+      await refreshDetail();
+      await selectChannel(channel.id);
+    },
+  });
+}
+
+// ================================================================ Mensagens fixadas
+
+let pinsOpenFor = null;
+
+async function togglePin(m) {
+  try {
+    const { message } = await api(`/messages/${m.id}/pin`, { method: m.pinnedAt ? 'DELETE' : 'PUT' });
+    updateMessage(message.channelId, message.id, message);
+    toast(message.pinnedAt ? 'Mensagem fixada 📌' : 'Mensagem desafixada.');
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+async function openPins() {
+  const channelId = state.channelId;
+  if (!channelId) return;
+  const anchor = $('#btn-pins');
+  let messages;
+  try {
+    ({ messages } = await api(`/channels/${channelId}/pins`));
+  } catch (err) {
+    return toast(err.message);
+  }
+  if (state.channelId !== channelId) return;
+  pinsOpenFor = channelId;
+  const allowed = canPin();
+  openPopover(anchor, h('div', { class: 'pins' },
+    h('div', { class: 'pins-title' }, '📌 Mensagens fixadas'),
+    messages.length === 0
+      ? h('p', { class: 'muted pins-empty' }, allowed
+        ? 'Nenhuma mensagem fixada. Passe o mouse numa mensagem e clique em 📌 para fixar.'
+        : 'Nenhuma mensagem fixada neste canal.')
+      : h('div', { class: 'pins-list' }, messages.map((m) => resultCard(m, {
+        actions: [
+          h('button', { class: 'btn small', onclick: () => jumpToMessage(m.channelId, m.id) }, 'Ir'),
+          allowed ? h('button', { class: 'icon-btn small', title: 'Desafixar', onclick: async () => { await togglePin(m); openPins(); } }, '✕') : null,
+        ],
+      })))), { align: 'end', className: 'popover-pins' });
+}
+
+$('#btn-pins').addEventListener('click', () => {
+  if (pinsOpenFor === state.channelId && document.querySelector('.popover-pins')) { closePopover(); pinsOpenFor = null; return; }
+  openPins();
+});
+
+// Cartão de mensagem usado nas fixadas e na busca.
+function resultCard(m, { actions = [], channelLabel = null } = {}) {
+  const date = new Date(m.createdAt);
+  const author = freshUser(m.author);
+  return h('div', { class: 'result' },
+    channelLabel ? h('div', { class: 'result-channel muted' }, channelLabel) : null,
+    h('div', { class: 'result-row' },
+      avatar(author, { size: 'sm' }),
+      h('div', { class: 'result-body' },
+        h('div', { class: 'msg-head' },
+          h('strong', { style: roleColor(m.author.id) ? `color:${roleColor(m.author.id)}` : null }, author.displayName),
+          h('span', { class: 'msg-time' }, fullTime(date))),
+        m.content ? h('div', { class: 'msg-text' }, renderContent(m.content)) : null,
+        m.attachments.length ? h('div', { class: 'muted small' }, `📎 ${m.attachments.length} anexo(s)`) : null),
+      actions.length ? h('div', { class: 'result-actions' }, actions) : null));
+}
+
+// ================================================================ Busca
+
+const search = { q: '', authorId: null, results: [], total: 0, hasMore: false, loading: false, scopeKey: '' };
+
+function searchScope() {
+  if (state.view !== 'home') return { key: `s${state.view}`, qs: `serverId=${state.view}` };
+  if (state.channelId) return { key: `c${state.channelId}`, qs: `channelId=${state.channelId}` };
+  return { key: 'dms', qs: 'dms=1' };
+}
+
+// "de:fulano bolo" = mensagens do @fulano com "bolo".
+function parseSearch(text) {
+  let authorId = null;
+  let unknown = null;
+  const q = text.replace(/(?:^|\s)(?:de|from):@?([a-z0-9_.]{1,32})/gi, (_, name) => {
+    const u = knownUsers().get(name.toLowerCase());
+    if (u) authorId = u.id; else unknown = name;
+    return ' ';
+  }).replace(/\s+/g, ' ').trim();
+  return { q, authorId, unknown };
+}
+
+async function runSearch(more = false) {
+  const text = $('#search-input').value.trim();
+  if (!text) return closeSearch();
+  const { q, authorId, unknown } = parseSearch(text);
+  if (unknown) return toast(`Não encontrei o usuário @${unknown}.`);
+  if (!q && !authorId) return;
+  const scope = searchScope();
+  if (!more) Object.assign(search, { q, authorId, results: [], total: 0, hasMore: false, scopeKey: scope.key });
+  search.loading = true;
+  renderSearch();
+  try {
+    const params = new URLSearchParams({ q: search.q });
+    if (search.authorId) params.set('authorId', search.authorId);
+    const last = search.results.at(-1);
+    if (more && last) params.set('before', last.id);
+    const data = await api(`/search?${scope.qs}&${params}`);
+    if (search.scopeKey !== scope.key) return;
+    search.results.push(...data.messages);
+    search.total = data.total;
+    search.hasMore = data.hasMore;
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    search.loading = false;
+    renderSearch();
+  }
+}
+
+function renderSearch() {
+  const panel = $('#search-panel');
+  panel.hidden = false;
+  $('#app').classList.add('searching');
+  const countText = search.loading && search.results.length === 0 ? 'Buscando…'
+    : search.total === 0 ? 'Nenhum resultado'
+      : search.total >= 1000 ? 'Mais de 1000 resultados' : `${search.total} ${search.total === 1 ? 'resultado' : 'resultados'}`;
+  const channelName = (m) => {
+    if (!m.channel) return null;
+    if (m.channel.kind === 'dm') {
+      const dm = state.dms.find((d) => d.channelId === m.channelId);
+      return dm ? `@${dm.user.displayName}` : 'Mensagem direta';
+    }
+    return m.channel.kind === 'thread' ? `🧵 ${m.channel.name}` : `# ${m.channel.name}`;
+  };
+  panel.replaceChildren(
+    h('div', { class: 'search-head' },
+      h('strong', {}, countText),
+      h('button', { class: 'icon-btn small', title: 'Fechar busca', onclick: closeSearch }, '✕')),
+    h('div', { class: 'search-results' },
+      search.results.map((m) => {
+        const card = resultCard(m, { channelLabel: channelName(m) });
+        card.classList.add('clickable');
+        card.title = 'Ir para a mensagem';
+        card.addEventListener('click', (e) => {
+          if (e.target.closest('a, .mention')) return;
+          openSearchResult(m);
+        });
+        return card;
+      }),
+      search.hasMore ? h('button', { class: 'btn search-more', disabled: search.loading, onclick: () => runSearch(true) }, search.loading ? 'Carregando…' : 'Carregar mais') : null,
+      !search.loading && search.total === 0 ? h('p', { class: 'muted search-tip' }, 'Dica: use de:usuario para filtrar por quem escreveu. Ex.: de:ana bolo') : null),
+  );
+}
+
+async function openSearchResult(m) {
+  if (window.matchMedia('(max-width: 900px)').matches) closeSearch();
+  if (m.serverId && state.view !== m.serverId) await selectServer(m.serverId, m.channelId);
+  jumpToMessage(m.channelId, m.id);
+}
+
+function closeSearch() {
+  const panel = $('#search-panel');
+  if (!panel) return;
+  panel.hidden = true;
+  panel.replaceChildren();
+  $('#app').classList.remove('searching');
+  search.scopeKey = '';
+}
+
+$('#search-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); runSearch(); }
+  if (e.key === 'Escape') { e.preventDefault(); e.currentTarget.value = ''; closeSearch(); e.currentTarget.blur(); }
+});
+$('#search-input').addEventListener('search', (e) => { if (!e.currentTarget.value) closeSearch(); });
 
 initVoice({ getSocket: () => state.socket, onChange: onVoiceChange });
 

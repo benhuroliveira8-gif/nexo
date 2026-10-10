@@ -1,5 +1,5 @@
 // Tela de amigos (início): online, todos, pedidos pendentes e adicionar amigo.
-import { h, api, avatar, badge, toast, confirmDialog } from './util.js';
+import { h, api, avatar, badge, toast, confirmDialog, presenceOf, STATUS_LABEL } from './util.js';
 import { state } from './state.js';
 import { openDm, openProfile } from './main.js';
 
@@ -24,7 +24,7 @@ function act(fn) {
 function row(user, subtitle, actions) {
   return h('div', { class: 'friend-row' },
     h('button', { class: 'friend-main', onclick: (e) => openProfile(e.currentTarget, user) },
-      avatar(user, { online: user.online }),
+      avatar(user, { online: user.online === undefined ? undefined : (user.online ? presenceOf(user) : 'offline') }),
       h('div', { class: 'friend-text' },
         h('strong', { class: 'truncate' }, user.displayName),
         h('span', { class: 'muted truncate' }, subtitle))),
@@ -84,7 +84,7 @@ export function renderFriendsPage(container) {
     content = list(`Pendentes — ${rows.length}`, rows, 'Nenhum pedido pendente.');
   } else {
     const people = tab === 'online' ? f.friends.filter((u) => u.online) : f.friends;
-    const rows = people.map((u) => row(u, u.online ? 'Online' : 'Offline', [
+    const rows = people.map((u) => row(u, u.online ? (u.statusText || STATUS_LABEL[presenceOf(u)]) : 'Offline', [
       roundBtn('💬', 'Enviar mensagem', () => openDm(u.id)),
       roundBtn('✕', 'Desfazer amizade', () => confirmDialog({
         title: `Desfazer amizade com ${u.displayName}`,

@@ -11,7 +11,10 @@ const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads
 const MAX_SIZE = (Number(process.env.MAX_UPLOAD_MB) || 8) * 1024 * 1024;
 const ORPHAN_AFTER_MIN = 60; // anexos enviados mas nunca usados numa mensagem
 
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const AVATAR_DIR = path.join(UPLOAD_DIR, 'avatars');
+const AVATAR_MAX = 2 * 1024 * 1024;
+
+fs.mkdirSync(AVATAR_DIR, { recursive: true });
 
 const filePath = (id) => path.join(UPLOAD_DIR, id);
 
@@ -64,7 +67,70 @@ function uploadRouter(requireAuth) {
       }
     });
 
+  // Foto de perfil: imagem crua (o navegador já recorta e reduz para 256x256).
+  r.post('/me/avatar',
+    requireAuth,
+    express.raw({ type: 'application/octet-stream', limit: AVATAR_MAX }),
+    async (req, res, next) => {
+      try {
+        if (req.isBot) return res.status(403).json({ error: 'Bots não podem fazer isso.' });
+        const data = req.body;
+        const ext = Buffer.isBuffer(data) && imageExt(data);
+        if (!ext) return res.status(400).json({ error: 'Envie uma imagem PNG, JPG, GIF ou WEBP.' });
+        const id = `${crypto.randomBytes(12).toString('hex')}.${ext}`;
+        await fs.promises.writeFile(path.join(AVATAR_DIR, id), data);
+        const { rows } = await db.query(
+          `UPDATE users u SET avatar_id = $2 FROM users old
+           WHERE u.id = $1 AND old.id = u.id
+           RETURNING old.avatar_id AS previous, u.id, u.username, u.display_name, u.is_bot,
+                     u.avatar_id, u.status, u.status_text`,
+          [req.userId, id],
+        );
+        if (rows[0]?.previous) removeAvatar(rows[0].previous);
+        res.json({ user: S.me(rows[0]) });
+        avatarChanged(req.userId);
+      } catch (err) {
+        next(err);
+      }
+    });
+
   return r;
+}
+
+// Reconhece a imagem pelos primeiros bytes (não confia no que o navegador diz).
+function imageExt(b) {
+  if (b.length < 12) return null;
+  if (b[0] === 0x89 && b.toString('ascii', 1, 4) === 'PNG') return 'png';
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpg';
+  if (b.toString('ascii', 0, 4) === 'GIF8') return 'gif';
+  if (b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP') return 'webp';
+  return null;
+}
+
+const AVATAR_TYPES = { png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
+const AVATAR_RE = /^[a-f0-9]{24}\.(png|jpg|gif|webp)$/;
+
+function removeAvatar(id) {
+  if (AVATAR_RE.test(id)) fs.unlink(path.join(AVATAR_DIR, id), () => {});
+}
+
+// Avisar servidores/amigos que a foto mudou (definido pelas rotas, evita import circular).
+let avatarChanged = () => {};
+const onAvatarChanged = (fn) => { avatarChanged = fn; };
+
+// GET /avatars/:arquivo — público (é só a foto), o nome é aleatório.
+function serveAvatar(req, res) {
+  const m = AVATAR_RE.exec(req.params.file);
+  if (!m) return res.status(404).end();
+  res.set({
+    'Content-Type': AVATAR_TYPES[m[1]],
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': "default-src 'none'; sandbox",
+    'Cache-Control': 'public, max-age=31536000, immutable',
+  });
+  res.sendFile(path.join(AVATAR_DIR, req.params.file), (err) => {
+    if (err && !res.headersSent) res.status(404).end();
+  });
 }
 
 // GET /files/:id/:nome — imagens/vídeos/áudios abrem no navegador; o resto vira download.
@@ -125,4 +191,6 @@ function startCleanup() {
   setInterval(cleanup, 60 * 60 * 1000).unref();
 }
 
-module.exports = { uploadRouter, serveFile, removeFile, startCleanup, cleanup, MAX_SIZE };
+module.exports = {
+  uploadRouter, serveFile, serveAvatar, removeAvatar, onAvatarChanged, removeFile, startCleanup, cleanup, MAX_SIZE,
+};

@@ -16,7 +16,7 @@ module.exports = function voiceRoutes(r) {
     if (!access || access.kind !== 'voice') fail(404, 'Canal de voz não encontrado.');
     if (!access.can(P.CONNECT)) fail(403, 'Você não tem permissão para entrar neste canal de voz.');
 
-    const { rows } = await db.query('SELECT id, username, display_name, is_bot FROM users WHERE id = $1', [req.userId]);
+    const { rows } = await db.query('SELECT id, username, display_name, is_bot, avatar_id, status, status_text FROM users WHERE id = $1', [req.userId]);
     const user = S.user(rows[0]);
     const canSpeak = access.can(P.SPEAK);
     const canVideo = access.can(P.VIDEO);

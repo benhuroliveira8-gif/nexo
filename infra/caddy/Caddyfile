@@ -10,6 +10,8 @@
 https://{$NEXO_HOST}, https://localhost {
 	tls internal
 	encode gzip
+	# Este cabeçalho só pode vir da Cloudflare (pelo túnel); aqui é removido.
+	request_header -Cf-Connecting-Ip
 
 	# Sinalização do LiveKit (voz/vídeo) passa pelo mesmo endereço.
 	handle /rtc* {
@@ -23,4 +25,19 @@ https://{$NEXO_HOST}, https://localhost {
 
 http:// {
 	redir https://{host}{uri} permanent
+}
+
+# Entrada do túnel da Cloudflare (acesso pela internet com domínio próprio).
+# Só o container "cloudflared" usa esta porta, por dentro da rede do Docker:
+# ela NÃO é aberta na VM. O HTTPS de verdade quem faz é a Cloudflare.
+:8080 {
+	encode gzip
+
+	handle /rtc* {
+		reverse_proxy livekit:7880
+	}
+
+	handle {
+		reverse_proxy app:3000
+	}
 }

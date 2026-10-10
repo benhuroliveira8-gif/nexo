@@ -32,6 +32,8 @@ services:
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-8}
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:?Defina LIVEKIT_API_KEY no .env (rode infra/completar-env.sh)}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:?Defina LIVEKIT_API_SECRET no .env (rode infra/completar-env.sh)}
+      # Opcional: exige este código para criar conta (bom quando o Nexo está na internet).
+      REGISTRATION_CODE: ${REGISTRATION_CODE:-}
     volumes:
       - nexo_uploads:/data/uploads
     ports:
@@ -75,6 +77,29 @@ services:
     environment:
       NEXO_URL: http://app:3000
       BOT_TOKEN: ${BOT_TOKEN:-}
+
+  # Backup do banco + anexos. Não fica ligado: roda e termina.
+  #   docker compose --profile backup run --rm --build backup            (fazer agora)
+  #   docker compose --profile backup run --rm backup listar             (ver backups)
+  #   bash infra/backup/restaurar.sh ultimo                              (restaurar)
+  # O Jenkins roda todo dia sozinho (job nexo-backup).
+  backup:
+    build: ./infra/backup
+    profiles: ["backup"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: nexo
+      PGDATABASE: nexo
+      PGPASSWORD: ${DB_PASSWORD}
+      KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      TZ: ${TZ:-America/Sao_Paulo}
+    volumes:
+      - nexo_uploads:/uploads
+      # Pasta da VM onde os backups ficam (caminho completo, funciona até pelo Jenkins).
+      - ${BACKUP_DIR:-/var/backups/nexo}:/backups
 
 volumes:
   nexo_db:

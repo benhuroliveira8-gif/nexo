@@ -58,7 +58,7 @@ async function memberContext(serverId, userId) {
 
 // Acesso a um canal (de servidor ou DM). null = sem acesso.
 async function channelAccess(channelId, userId) {
-  const { rows } = await db.query('SELECT id, server_id, kind, name FROM channels WHERE id = $1', [channelId]);
+  const { rows } = await db.query('SELECT id, server_id, kind, name, parent_channel_id, parent_message_id, created_by FROM channels WHERE id = $1', [channelId]);
   const channel = rows[0];
   if (!channel) return null;
 

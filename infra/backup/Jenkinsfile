@@ -1,0 +1,40 @@
+// Job "nexo-backup": todo dia de madrugada salva o banco e os anexos do Nexo
+// numa pasta da VM (padrão /var/backups/nexo) e apaga os backups antigos.
+pipeline {
+  agent any
+
+  // Uma vez por dia, entre 3h e 4h (horário do Jenkins). "H" espalha o minuto.
+  triggers { cron('H 3 * * *') }
+
+  options {
+    disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '30'))
+    timeout(time: 30, unit: 'MINUTES')
+  }
+
+  environment {
+    COMPOSE_PROJECT_NAME = 'nexo'
+  }
+
+  stages {
+    stage('Backup') {
+      steps {
+        withCredentials([file(credentialsId: 'nexo-env', variable: 'ENV_FILE')]) {
+          sh 'cp "$ENV_FILE" .env'
+        }
+        sh 'docker compose --profile backup run --rm --build backup'
+      }
+    }
+    stage('Listar') {
+      steps {
+        sh 'docker compose --profile backup run --rm backup listar'
+      }
+    }
+  }
+
+  post {
+    always {
+      sh 'rm -f .env'
+    }
+  }
+}

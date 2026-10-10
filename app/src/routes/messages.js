@@ -2,10 +2,15 @@
 const db = require('../db');
 const events = require('../events');
 const M = require('../messages');
-const { P, channelAccess } = require('../permissions');
+const S = require('../serializers');
+const { P, channelAccess, memberContext } = require('../permissions');
 const { wrap, fail, parseId, parseBigId } = require('./util');
 
 const PAGE_SIZE = 50;
+const SEARCH_PAGE = 25;
+
+// Escapa % e _ para o ILIKE procurar o texto literalmente.
+const likeEscape = (text) => text.replace(/[\\%_]/g, (c) => `\\${c}`);
 
 // Uma reação é um único emoji (inclui bandeiras, tons de pele e combinações).
 const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
@@ -46,16 +51,20 @@ module.exports = function messageRoutes(r) {
   }));
 
   // Enviar mensagem pela API (usado principalmente por bots).
-  // Corpo: { content, attachmentIds? }
+  // Corpo: { content, attachmentIds?, replyToId? }
   r.post('/channels/:id/messages', wrap(async (req, res) => {
     const channelId = parseId(req.params.id);
     const access = channelId && await channelAccess(channelId, req.userId);
     if (!access) fail(404, 'Canal não encontrado.');
     try {
       const message = await M.createMessage({
-        access, userId: req.userId, content: req.body.content, attachmentIds: req.body.attachmentIds,
+        access,
+        userId: req.userId,
+        content: req.body.content,
+        attachmentIds: req.body.attachmentIds,
+        replyToId: req.body.replyToId,
       });
-      events.emitTo(access.rooms, 'message:new', message);
+      M.announceNew(access, message);
       res.status(201).json({ message });
     } catch (err) {
       if (err instanceof M.MessageError) fail(/rápido/.test(err.message) ? 429 : 400, err.message);
@@ -79,12 +88,117 @@ module.exports = function messageRoutes(r) {
   r.delete('/messages/:messageId', wrap(async (req, res) => {
     const { row, access } = await messageWithAccess(req);
     const mine = row.author_id === req.userId;
-    if (!mine && !(access.kind === 'text' && access.can(P.MANAGE_MESSAGES))) {
+    if (!mine && !(M.isServerText(access.kind) && access.can(P.MANAGE_MESSAGES))) {
       fail(403, 'Você não pode apagar essa mensagem.');
     }
     await M.deleteMessage(row.id);
     events.emitTo(access.rooms, 'message:deleted', { id: String(row.id), channelId: row.channel_id });
+    M.refreshThreadParent(access.channel).catch(() => {});
     res.json({ ok: true });
+  }));
+
+  // ---------- Mensagens fixadas
+  // Em servidor precisa de "Gerenciar mensagens"; em DM qualquer um dos dois pode fixar.
+  async function pin(req, res, add) {
+    const { row, access } = await messageWithAccess(req);
+    if (access.kind !== 'dm' && !access.can(P.MANAGE_MESSAGES)) fail(403, 'Você não tem permissão para fixar mensagens.');
+    if (add && !row.pinned_at) {
+      const n = await db.query('SELECT count(*)::int AS n FROM messages WHERE channel_id = $1 AND pinned_at IS NOT NULL', [row.channel_id]);
+      if (n.rows[0].n >= M.MAX_PINS) fail(400, `Este canal já tem ${M.MAX_PINS} mensagens fixadas. Desafixe alguma antes.`);
+      await db.query('UPDATE messages SET pinned_at = now(), pinned_by = $2 WHERE id = $1', [row.id, req.userId]);
+    } else if (!add) {
+      await db.query('UPDATE messages SET pinned_at = NULL, pinned_by = NULL WHERE id = $1', [row.id]);
+    }
+    const message = await M.getMessage(row.id);
+    events.emitTo(access.rooms, 'message:updated', message);
+    events.emitTo(access.rooms, 'channel:pins', { channelId: row.channel_id });
+    res.json({ message });
+  }
+  r.put('/messages/:messageId/pin', wrap((req, res) => pin(req, res, true)));
+  r.delete('/messages/:messageId/pin', wrap((req, res) => pin(req, res, false)));
+
+  r.get('/channels/:id/pins', wrap(async (req, res) => {
+    const channelId = parseId(req.params.id);
+    const access = channelId && await channelAccess(channelId, req.userId);
+    if (!access) fail(404, 'Canal não encontrado.');
+    const { rows } = await db.query(
+      `${M.SELECT_MESSAGE} WHERE msg.channel_id = $1 AND msg.pinned_at IS NOT NULL ORDER BY msg.pinned_at DESC`,
+      [channelId],
+    );
+    res.json({ messages: await M.hydrate(rows) });
+  }));
+
+  // ---------- Threads: uma conversa paralela que nasce de uma mensagem.
+  r.post('/messages/:messageId/thread', wrap(async (req, res) => {
+    const { row, access } = await messageWithAccess(req);
+    if (access.kind !== 'text') fail(400, 'Só dá para criar threads em canais de texto de servidor.');
+    if (!access.can(P.SEND_MESSAGES)) fail(403, 'Você não tem permissão para enviar mensagens aqui.');
+
+    const existing = await db.query("SELECT * FROM channels WHERE kind = 'thread' AND parent_message_id = $1", [row.id]);
+    if (existing.rows[0]) return res.json({ channel: S.channel(existing.rows[0]), existed: true });
+
+    const fallback = String(row.content || '').replace(/\s+/g, ' ').trim().slice(0, 40) || 'Thread';
+    const name = String(req.body.name || '').replace(/\s+/g, ' ').trim().slice(0, 100) || fallback;
+    let channel;
+    try {
+      const { rows } = await db.query(
+        `INSERT INTO channels (server_id, name, kind, position, parent_channel_id, parent_message_id, created_by)
+         VALUES ($1, $2, 'thread', 0, $3, $4, $5) RETURNING *`,
+        [access.serverId, name, row.channel_id, row.id, req.userId],
+      );
+      channel = rows[0];
+    } catch (err) {
+      if (err.code !== '23505') throw err; // duas pessoas criaram ao mesmo tempo
+      const again = await db.query("SELECT * FROM channels WHERE kind = 'thread' AND parent_message_id = $1", [row.id]);
+      return res.json({ channel: S.channel(again.rows[0]), existed: true });
+    }
+    events.serverChanged(access.serverId);
+    await M.emitUpdated(row.id);
+    res.status(201).json({ channel: S.channel(channel) });
+  }));
+
+  // ---------- Busca
+  // GET /search?q=texto&serverId=1 (ou channelId=5, ou dms=1) &authorId=7 &before=<id da mensagem>
+  r.get('/search', wrap(async (req, res) => {
+    const q = String(req.query.q || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    const authorId = req.query.authorId ? parseId(req.query.authorId) : null;
+    if (!q && !authorId) fail(400, 'Digite algo para buscar.');
+    const before = parseBigId(req.query.before || '');
+
+    let channelIds;
+    if (req.query.channelId) {
+      const channelId = parseId(req.query.channelId);
+      const access = channelId && await channelAccess(channelId, req.userId);
+      if (!access) fail(404, 'Canal não encontrado.');
+      channelIds = [channelId];
+    } else if (req.query.serverId) {
+      const serverId = parseId(req.query.serverId);
+      const ctx = serverId && await memberContext(serverId, req.userId);
+      if (!ctx) fail(404, 'Servidor não encontrado.');
+      const { rows } = await db.query("SELECT id FROM channels WHERE server_id = $1 AND kind IN ('text', 'thread')", [serverId]);
+      channelIds = rows.map((c) => c.id);
+    } else {
+      const { rows } = await db.query('SELECT channel_id AS id FROM dm_members WHERE user_id = $1', [req.userId]);
+      channelIds = rows.map((c) => c.id);
+    }
+
+    const where = `msg.channel_id = ANY($1::int[])
+       AND ($2::text = '' OR msg.content ILIKE '%' || $2 || '%')
+       AND ($3::int IS NULL OR msg.author_id = $3)`;
+    const params = [channelIds, likeEscape(q), authorId];
+    const [found, total] = await Promise.all([
+      db.query(
+        `${M.SELECT_MESSAGE}
+         WHERE ${where} AND ($4::bigint IS NULL OR msg.id < $4::bigint)
+         ORDER BY msg.id DESC LIMIT ${SEARCH_PAGE}`,
+        [...params, before],
+      ),
+      db.query(`SELECT count(*)::int AS n FROM (SELECT 1 FROM messages msg WHERE ${where} LIMIT 1000) x`, params),
+    ]);
+    const names = await db.query('SELECT id, name, kind FROM channels WHERE id = ANY($1::int[])', [[...new Set(found.rows.map((m) => m.channel_id))]]);
+    const channelInfo = new Map(names.rows.map((c) => [c.id, { id: c.id, name: c.name, kind: c.kind }]));
+    const messages = (await M.hydrate(found.rows)).map((m) => ({ ...m, channel: channelInfo.get(m.channelId) || null }));
+    res.json({ messages, total: total.rows[0].n, hasMore: found.rows.length === SEARCH_PAGE });
   }));
 
   // Reagir: PUT adiciona a sua reação, DELETE tira.

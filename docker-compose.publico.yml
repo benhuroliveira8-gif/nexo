@@ -1,0 +1,24 @@
+# Acesso pela internet com domínio próprio + túnel da Cloudflare.
+#
+# Este arquivo é um "complemento" do docker-compose.yml. Para ativar, coloque
+# no .env (e na credencial nexo-env do Jenkins):
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.publico.yml
+#   CLOUDFLARE_TUNNEL_TOKEN=<token do túnel>
+#
+# Passo a passo completo: docs/acesso-externo.md
+services:
+  # Abre um túnel de SAÍDA até a Cloudflare: não precisa abrir porta 80/443
+  # no roteador, e o seu IP de casa não aparece para quem acessa o site.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?Defina CLOUDFLARE_TUNNEL_TOKEN no .env (veja docs/acesso-externo.md)}
+    depends_on:
+      - caddy
+
+  # Voz: anuncia o IP público (descoberto sozinho) em vez do IP da rede local.
+  livekit:
+    command: ["--config", "/etc/livekit-publico.yaml"]

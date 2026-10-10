@@ -10,6 +10,8 @@ const { humansOnly } = require('../auth');
 const { P, ALL, DEFAULT_EVERYONE, memberContext } = require('../permissions');
 const { wrap, fail, parseId, channelStates, markServerRead } = require('./util');
 
+const M = require('../messages');
+
 const newInviteCode = () => crypto.randomBytes(6).toString('base64url'); // 8 caracteres
 const COLOR_RE = /^#[0-9a-f]{6}$/i;
 
@@ -24,6 +26,9 @@ function normalizeChannelName(name) {
     .replace(/^-|-$/g, '')
     .slice(0, 100);
 }
+
+// Nome de thread: texto livre (com espaços e maiúsculas), uma linha.
+const cleanThreadName = (name) => String(name || '').replace(/\s+/g, ' ').trim().slice(0, 100);
 
 // Carrega o contexto do usuário no servidor da URL e exige uma permissão (opcional).
 async function requireMember(req, flag) {
@@ -63,9 +68,13 @@ async function serverDetail(serverId, userId) {
   if (!ctx) return null;
   const [server, channels, members, roles, memberRoles] = await Promise.all([
     db.query('SELECT * FROM servers WHERE id = $1', [serverId]),
-    db.query('SELECT * FROM channels WHERE server_id = $1 ORDER BY position, id', [serverId]),
     db.query(
-      `SELECT u.id, u.username, u.display_name, u.is_bot FROM users u
+      `SELECT c.*, (SELECT max(created_at) FROM messages WHERE channel_id = c.id) AS last_message_at
+       FROM channels c WHERE c.server_id = $1 ORDER BY c.position, c.id`,
+      [serverId],
+    ),
+    db.query(
+      `SELECT u.id, u.username, u.display_name, u.is_bot, u.avatar_id, u.status, u.status_text FROM users u
        JOIN server_members m ON m.user_id = u.id
        WHERE m.server_id = $1 ORDER BY lower(u.display_name)`,
       [serverId],
@@ -81,8 +90,12 @@ async function serverDetail(serverId, userId) {
   });
   return {
     server: S.server(server.rows[0], { showInvite: ctx.can(P.CREATE_INVITE) }),
-    channels: channels.rows.map((c) => ({ ...S.channel(c), ...(states.get(c.id) || { unread: false, mentions: 0 }) })),
-    members: members.rows.map((m) => ({ ...S.user(m), online: presence.isOnline(m.id), roleIds: rolesByUser.get(m.id) || [] })),
+    channels: channels.rows.map((c) => ({
+      ...S.channel(c),
+      ...(c.kind === 'thread' ? { lastMessageAt: c.last_message_at || c.created_at } : {}),
+      ...(states.get(c.id) || { unread: false, mentions: 0 }),
+    })),
+    members: members.rows.map((m) => ({ ...S.user(m), ...presence.publicPresence(m), roleIds: rolesByUser.get(m.id) || [] })),
     roles: roles.rows.map(S.role),
     voice: voice.statesForChannels(channels.rows.filter((c) => c.kind === 'voice').map((c) => c.id)),
     me: { permissions: ctx.perms, isOwner: ctx.isOwner, top: ctx.isOwner ? null : ctx.top },
@@ -260,16 +273,19 @@ module.exports = function serverRoutes(r) {
     if (!rows[0]) fail(404, 'Canal não encontrado.');
     const ctx = await memberContext(rows[0].server_id, req.userId);
     if (!ctx) fail(404, 'Canal não encontrado.');
-    if (!ctx.can(P.MANAGE_CHANNELS)) fail(403, 'Você não tem permissão para gerenciar canais.');
+    // Quem criou a thread também pode renomear/apagar a própria thread.
+    const ownThread = rows[0].kind === 'thread' && rows[0].created_by === req.userId;
+    if (!ownThread && !ctx.can(P.MANAGE_CHANNELS)) fail(403, 'Você não tem permissão para gerenciar canais.');
     return { channel: rows[0], ctx };
   }
 
   r.patch('/channels/:channelId', wrap(async (req, res) => {
     const { channel } = await channelForManage(req);
-    const name = normalizeChannelName(req.body.name);
+    const name = channel.kind === 'thread' ? cleanThreadName(req.body.name) : normalizeChannelName(req.body.name);
     if (!name) fail(400, 'Dê um nome ao canal.');
     const { rows } = await db.query('UPDATE channels SET name = $2 WHERE id = $1 RETURNING *', [channel.id, name]);
     events.serverChanged(channel.server_id);
+    if (channel.kind === 'thread') M.refreshThreadParent(channel).catch(() => {});
     res.json({ channel: S.channel(rows[0]) });
   }));
 
@@ -280,13 +296,16 @@ module.exports = function serverRoutes(r) {
       if (count.rows[0].n <= 1) fail(400, 'O servidor precisa ter pelo menos um canal de texto.');
     }
     voice.clearChannel(channel.id);
+    // Apaga junto os anexos das threads penduradas neste canal.
     const att = await db.query(
-      'SELECT a.id FROM attachments a JOIN messages m ON m.id = a.message_id WHERE m.channel_id = $1',
+      `SELECT a.id FROM attachments a JOIN messages m ON m.id = a.message_id
+       WHERE m.channel_id IN (SELECT id FROM channels WHERE id = $1 OR parent_channel_id = $1)`,
       [channel.id],
     );
     await db.query('DELETE FROM channels WHERE id = $1', [channel.id]);
     att.rows.forEach((a) => files.removeFile(a.id));
     events.serverChanged(channel.server_id);
+    if (channel.kind === 'thread') M.refreshThreadParent(channel).catch(() => {});
     res.json({ ok: true });
   }));
 
@@ -375,7 +394,7 @@ module.exports = function serverRoutes(r) {
   r.post('/servers/:id/bots', humansOnly, wrap(async (req, res) => {
     const ctx = await requireMember(req, P.MANAGE_SERVER);
     const username = String(req.body.username || '').trim().toLowerCase().replace(/^@/, '');
-    const { rows } = await db.query('SELECT id, username, display_name, is_bot FROM users WHERE username = $1 AND is_bot', [username]);
+    const { rows } = await db.query('SELECT id, username, display_name, is_bot, avatar_id, status, status_text FROM users WHERE username = $1 AND is_bot', [username]);
     const bot = rows[0];
     if (!bot) fail(404, 'Não existe bot com esse nome de usuário.');
     const added = await db.transaction(async (c) => {

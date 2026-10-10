@@ -1,5 +1,5 @@
 // Configurações do servidor: visão geral, cargos e membros.
-import { h, api, avatar, toast, openDialog, confirmDialog, openMenu } from './util.js';
+import { h, api, avatar, toast, openDialog, confirmDialog, openMenu, presenceOf } from './util.js';
 import { state, P, PERMISSION_INFO, can, isOwner, myTop, memberRoles, memberTop } from './state.js';
 
 const PRESET_COLORS = ['#ff7a45', '#f5c542', '#3ecf8e', '#2ec4b6', '#4d9fff', '#7c6cff', '#c86bfa', '#ff5c8a', '#ff5c6c', '#a7adbb'];
@@ -290,7 +290,7 @@ function renderMembersTab() {
     const roles = memberRoles(m);
     const missing = assignable.filter((r) => !m.roleIds.includes(r.id));
     return h('div', { class: 'member-row' },
-      avatar(m, { online: m.online }),
+      avatar(m, { online: m.online ? presenceOf(m) : 'offline' }),
       h('div', { class: 'member-text' },
         h('strong', { class: 'truncate' }, m.displayName, isServerOwner ? ' 👑' : ''),
         h('span', { class: 'muted small truncate' }, `@${m.username}`)),

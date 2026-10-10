@@ -15,23 +15,30 @@ async function serverIdsOf(userId) {
   return rows.map((r) => r.server_id);
 }
 
-// Avisa servidores e amigos que alguém ficou online/offline.
-async function broadcastPresence(userId, online) {
-  const [servers, friends] = await Promise.all([serverIdsOf(userId), events.friendIdsOf(userId)]);
+// Avisa servidores e amigos como a pessoa aparece agora (online, ausente, offline...).
+async function broadcastPresence(userId) {
+  const [servers, friends, row] = await Promise.all([
+    serverIdsOf(userId),
+    events.friendIdsOf(userId),
+    db.query('SELECT id, status, status_text FROM users WHERE id = $1', [userId]).then((r) => r.rows[0]),
+  ]);
+  if (!row) return;
   const rooms = [...servers.map((id) => `server:${id}`), ...friends.map((id) => `user:${id}`)];
-  events.emitTo(rooms, 'presence', { userId, online });
+  events.emitTo(rooms, 'presence', { userId, ...presence.publicPresence(row) });
 }
 
 module.exports = function setupRealtime(io) {
+  events.setPresenceBroadcaster(broadcastPresence);
   // Só aceita conexões com token válido.
   io.use(async (socket, next) => {
     try {
       // Pessoas mandam o token de login; bots mandam "Bot <token do bot>".
       const who = await auth.authenticate(socket.handshake.auth && socket.handshake.auth.token);
       if (!who) return next(new Error('unauthorized'));
-      const { rows } = await db.query('SELECT id, username, display_name, is_bot FROM users WHERE id = $1', [who.userId]);
+      const { rows } = await db.query('SELECT id, username, display_name, is_bot, avatar_id, status, status_text FROM users WHERE id = $1', [who.userId]);
       if (!rows[0]) return next(new Error('unauthorized'));
       socket.data.user = S.user(rows[0]);
+      socket.data.isBot = who.isBot;
       next();
     } catch (err) {
       next(new Error('server_error'));
@@ -48,7 +55,7 @@ module.exports = function setupRealtime(io) {
       .then((ids) => {
         if (!socket.connected) return;
         ids.forEach((id) => socket.join(`server:${id}`));
-        if (becameOnline) return broadcastPresence(user.id, true);
+        if (becameOnline) return broadcastPresence(user.id);
       })
       .catch((err) => console.error('Erro ao preparar conexão:', err));
 
@@ -66,11 +73,12 @@ module.exports = function setupRealtime(io) {
           userId: user.id,
           content: payload.content,
           attachmentIds: payload.attachmentIds,
+          replyToId: payload.replyToId,
         });
         // "nonce" é um id temporário criado pelo navegador para casar a mensagem
         // "enviando..." com a confirmada.
         const nonce = typeof payload.nonce === 'string' && payload.nonce.length <= 40 ? payload.nonce : undefined;
-        events.emitTo(access.rooms, 'message:new', { ...message, nonce });
+        M.announceNew(access, message, nonce);
         reply({ ok: true, message: { ...message, nonce } });
       } catch (err) {
         if (err instanceof M.MessageError) return reply({ ok: false, error: err.message });
@@ -138,7 +146,7 @@ module.exports = function setupRealtime(io) {
     socket.on('disconnect', () => {
       voice.disconnect(user.id, socket.id);
       if (!presence.disconnect(user.id)) return;
-      broadcastPresence(user.id, false).catch(() => {});
+      broadcastPresence(user.id).catch(() => {});
     });
   });
 };

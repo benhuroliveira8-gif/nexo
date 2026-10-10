@@ -23,13 +23,16 @@
         <label id="display-name-field" hidden>Nome de exibição
           <input name="displayName" maxlength="32" autocomplete="nickname" />
         </label>
+        <label id="reg-code-field" hidden>Código de cadastro
+          <input name="inviteCode" maxlength="100" autocomplete="off" spellcheck="false" placeholder="Peça para quem administra o Nexo" />
+        </label>
         <label>Senha
           <input name="password" type="password" required minlength="6" maxlength="128" autocomplete="current-password" />
         </label>
         <p class="form-error" id="auth-error" role="alert"></p>
         <button class="btn primary" type="submit" id="auth-submit">Entrar</button>
       </form>
-      <p class="switch">
+      <p class="auth-switch">
         <span id="auth-switch-text">Não tem conta?</span>
         <button class="link" type="button" id="auth-switch">Cadastre-se</button>
       </p>
@@ -70,6 +73,10 @@
         <button class="icon-btn mobile-only" id="btn-toggle-sidebar" title="Canais">☰</button>
         <div class="chat-title" id="chat-title"></div>
         <span class="conn-status" id="conn-status" hidden>Reconectando…</span>
+        <button class="icon-btn" id="btn-pins" title="Mensagens fixadas" hidden>📌</button>
+        <div class="search-box">
+          <input type="search" id="search-input" placeholder="Buscar" maxlength="200" autocomplete="off" aria-label="Buscar mensagens" />
+        </div>
         <button class="icon-btn mobile-hide" id="btn-toggle-members" title="Mostrar/esconder membros">Membros</button>
       </header>
 
@@ -84,6 +91,7 @@
         <div class="typing" id="typing" aria-live="polite"></div>
         <div class="autocomplete" id="autocomplete" hidden></div>
         <div class="uploads" id="uploads" hidden></div>
+        <div class="reply-bar" id="reply-bar" hidden></div>
         <form class="composer" id="composer">
           <button type="button" class="composer-btn" id="btn-attach" title="Anexar arquivos">＋</button>
           <input type="file" id="file-input" multiple hidden />
@@ -97,6 +105,8 @@
     <aside class="members" id="members-panel">
       <div id="member-list"></div>
     </aside>
+
+    <aside class="search-panel" id="search-panel" hidden aria-label="Resultados da busca"></aside>
   </div>
 
   <div class="toast" id="toast" role="status"></div>

@@ -6,7 +6,7 @@ const events = require('../events');
 const { humansOnly } = require('../auth');
 const { wrap, fail, parseId, channelStates } = require('./util');
 
-const withPresence = (row) => ({ ...S.user(row), online: presence.isOnline(row.id) });
+const withPresence = (row) => ({ ...S.user(row), ...presence.publicPresence(row) });
 
 async function findFriendship(a, b) {
   const { rows } = await db.query(
@@ -36,7 +36,7 @@ module.exports = function socialRoutes(r) {
 
   r.get('/friends', wrap(async (req, res) => {
     const { rows } = await db.query(
-      `SELECT f.status, f.requester_id, u.id, u.username, u.display_name, u.is_bot
+      `SELECT f.status AS friendship_status, f.requester_id, u.id, u.username, u.display_name, u.is_bot, u.avatar_id, u.status, u.status_text
        FROM friendships f
        JOIN users u ON u.id = CASE WHEN f.requester_id = $1 THEN f.addressee_id ELSE f.requester_id END
        WHERE f.requester_id = $1 OR f.addressee_id = $1
@@ -44,9 +44,9 @@ module.exports = function socialRoutes(r) {
       [req.userId],
     );
     res.json({
-      friends: rows.filter((x) => x.status === 'accepted').map(withPresence),
-      incoming: rows.filter((x) => x.status === 'pending' && x.requester_id !== req.userId).map(withPresence),
-      outgoing: rows.filter((x) => x.status === 'pending' && x.requester_id === req.userId).map(withPresence),
+      friends: rows.filter((x) => x.friendship_status === 'accepted').map(withPresence),
+      incoming: rows.filter((x) => x.friendship_status === 'pending' && x.requester_id !== req.userId).map(withPresence),
+      outgoing: rows.filter((x) => x.friendship_status === 'pending' && x.requester_id === req.userId).map(withPresence),
     });
   }));
 
@@ -105,7 +105,7 @@ module.exports = function socialRoutes(r) {
 
   r.get('/dms', wrap(async (req, res) => {
     const { rows } = await db.query(
-      `SELECT c.id AS channel_id, u.id, u.username, u.display_name, u.is_bot,
+      `SELECT c.id AS channel_id, u.id, u.username, u.display_name, u.is_bot, u.avatar_id, u.status, u.status_text,
               (SELECT max(m.created_at) FROM messages m WHERE m.channel_id = c.id) AS last_at
        FROM dm_members me
        JOIN channels c ON c.id = me.channel_id AND c.kind = 'dm'
@@ -130,7 +130,7 @@ module.exports = function socialRoutes(r) {
   r.post('/dms', wrap(async (req, res) => {
     const otherId = parseId(req.body.userId);
     if (!otherId || otherId === req.userId) fail(400, 'Escolha outra pessoa.');
-    const { rows: users } = await db.query('SELECT id, username, display_name, is_bot FROM users WHERE id = $1', [otherId]);
+    const { rows: users } = await db.query('SELECT id, username, display_name, is_bot, avatar_id, status, status_text FROM users WHERE id = $1', [otherId]);
     if (!users[0]) fail(404, 'Usuário não encontrado.');
 
     const key = [req.userId, otherId].sort((a, b) => a - b).join(':');
