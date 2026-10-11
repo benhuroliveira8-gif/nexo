@@ -52,6 +52,10 @@ function inline(text, ctx, depth = 0) {
     if (ch === '~' && (m = /^~~([\s\S]+?)~~/.exec(rest))) {
       flush(); out.push(h('s', {}, inline(m[1], ctx, depth + 1))); i += m[0].length; continue;
     }
+    // Emoji personalizado do servidor: <:nome:id> ou <a:nome:id>
+    if (ch === '<' && (m = /^<(a?):([a-z0-9_]{2,32}):(\d{1,10})>/.exec(rest))) {
+      flush(); out.push(customEmoji(m[2], m[3])); i += m[0].length; continue;
+    }
     // <https://link> = link sem prévia
     if (ch === '<' && (m = /^<(https?:\/\/[^\s<>"]+)>/i.exec(rest))) {
       flush(); out.push(link(m[1])); i += m[0].length; continue;
@@ -82,6 +86,13 @@ function inline(text, ctx, depth = 0) {
   return out;
 }
 
+export function customEmoji(name, id, cls = 'cemoji') {
+  const img = h('img', { class: cls, src: `/emoji/${id}`, alt: `:${name}:`, title: `:${name}:`, draggable: 'false', loading: 'lazy' });
+  // Emoji apagado: mostra o nome.
+  img.addEventListener('error', () => img.replaceWith(`:${name}:`));
+  return img;
+}
+
 function link(url) {
   return h('a', { href: url, target: '_blank', rel: 'noopener noreferrer nofollow' }, url);
 }
@@ -89,7 +100,7 @@ function link(url) {
 // Só emojis (até 10)? Mostra grandão.
 const EMOJI_ONLY = /^(?:\p{Extended_Pictographic}|\p{Emoji_Component}|‍|️|\s)+$/u;
 export function isJumbo(text) {
-  const t = String(text || '').trim();
+  const t = String(text || '').replace(/<a?:[a-z0-9_]{2,32}:\d{1,10}>/g, '😀').trim();
   if (!t || !EMOJI_ONLY.test(t) || /^[\d#*\s]+$/.test(t)) return false;
   const count = [...new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(t.replace(/\s+/g, ''))].length;
   return count <= 10;
@@ -141,6 +152,7 @@ export function renderMarkdown(text, ctx = {}) {
 // Versão sem formatação (para notificações, citações de resposta etc.).
 export function stripMarkdown(text) {
   return String(text || '')
+    .replace(/<a?:([a-z0-9_]{2,32}):\d{1,10}>/g, ':$1:')
     .replace(/\|\|[\s\S]*?\|\|/g, '▒▒▒▒')
     .replace(/```[\w+#.-]*\n?/g, '')
     .replace(/(\*\*|__|~~|`|\*|_)/g, '')

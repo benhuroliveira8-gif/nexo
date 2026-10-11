@@ -19,6 +19,7 @@ export const P = {
   BAN_MEMBERS: 1 << 14,
   MODERATE_MEMBERS: 1 << 15,
   VIEW_AUDIT_LOG: 1 << 16,
+  MANAGE_EMOJIS: 1 << 17,
 };
 
 export const PERMISSION_INFO = [
@@ -30,6 +31,7 @@ export const PERMISSION_INFO = [
   [P.BAN_MEMBERS, 'Banir membros', 'Expulsar e impedir de voltar (mesmo com convite).'],
   [P.MODERATE_MEMBERS, 'Castigar membros', 'Deixar alguém só lendo por um tempo (sem escrever, reagir ou falar).'],
   [P.VIEW_AUDIT_LOG, 'Ver registro de auditoria', 'Ver quem fez o quê no servidor.'],
+  [P.MANAGE_EMOJIS, 'Gerenciar emojis', 'Enviar, renomear e apagar os emojis personalizados do servidor.'],
   [P.MANAGE_MESSAGES, 'Gerenciar mensagens', 'Apagar e fixar mensagens de outras pessoas.'],
   [P.MENTION_EVERYONE, 'Mencionar @everyone', 'Notificar todo mundo do servidor de uma vez.'],
   [P.CREATE_INVITE, 'Convidar pessoas', 'Criar convites para o servidor.'],

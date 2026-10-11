@@ -5,7 +5,7 @@ import {
   formatSize, avatar, badge, toast, copyText, openDialog, ask, confirmDialog, openPopover,
   closePopover, openMenu, playPing, hueFor, presenceOf, STATUS_LABEL, uploadAvatar,
 } from './util.js';
-import { openEmojiPicker } from './emoji.js';
+import { openEmojiPicker, setCustomEmojiProvider, emojiNode } from './emoji.js';
 import {
   state, P, can, isOwner, myTop, memberById, memberRoles, memberTop, roleColor, knownUsers,
   currentDm, currentChannel, dmName,
@@ -219,7 +219,7 @@ async function start(user) {
   if (storage('nexo.hideMembers') === '1') $('#app').classList.add('no-members');
 
   connectSocket();
-  await Promise.all([loadServers(), loadDms(), loadFriends()]);
+  await Promise.all([loadServers(), loadDms(), loadFriends(), loadMyEmojis()]);
 
   const savedView = storage('nexo.view');
   const savedServer = state.servers.find((s) => String(s.id) === savedView);
@@ -271,6 +271,15 @@ const refreshPushFlag = () => pushStatus().then((s) => { pushOn = s === 'on'; })
 onPwaChange(refreshPushFlag);
 
 // ================================================================ Carregar dados
+
+// Emojis personalizados: no servidor, os dele; nas DMs, os de todos os seus servidores.
+state.myEmojis = [];
+async function loadMyEmojis() {
+  try { state.myEmojis = (await api('/emojis')).emojis; } catch { /* sem emojis */ }
+}
+const loadMyEmojisSoon = debounce(loadMyEmojis, 800);
+const availableEmojis = () => (state.view !== 'home' && state.detail ? state.detail.emojis || [] : state.myEmojis);
+setCustomEmojiProvider(availableEmojis);
 
 async function loadServers() {
   const { servers } = await api('/servers');
@@ -439,6 +448,7 @@ function connectSocket() {
   socket.on('server:changed', ({ serverId }) => {
     if (serverId === state.view) refreshDetailSoon();
     loadServersSoon();
+    loadMyEmojisSoon();
   });
 
   socket.on('voice:update', ({ serverId, channelId, states }) => {
@@ -1440,10 +1450,10 @@ function buildReactions(m) {
       const names = r.users.map((id) => (users.get(id) || {}).displayName).filter(Boolean);
       return h('button', {
         class: `reaction${mine ? ' mine' : ''}`,
-        title: names.length ? `${names.join(', ')} reagiu com ${r.emoji}` : r.emoji,
+        title: names.length ? `${names.join(', ')} reagiu com ${r.emoji.replace(/^<a?:([a-z0-9_]+):\d+>$/, ':$1:')}` : r.emoji,
         disabled: !allowed && !mine,
         onclick: () => toggleReaction(m, r.emoji, !mine),
-      }, h('span', { class: 'r-emoji' }, r.emoji), h('span', { class: 'r-count' }, String(r.count)));
+      }, h('span', { class: 'r-emoji' }, emojiNode(r.emoji, 'cemoji reaction-emoji')), h('span', { class: 'r-count' }, String(r.count)));
     }),
     allowed ? h('button', { class: 'reaction add', title: 'Adicionar reação', onclick: (e) => openEmojiPicker(e.currentTarget, (emoji) => toggleReaction(m, emoji, true)) }, '+') : null);
 }
@@ -1997,7 +2007,10 @@ main.addEventListener('drop', (e) => {
 // ---------------------------------------------------------------- Emojis no texto
 
 $('#btn-emoji').addEventListener('click', (e) => {
-  openEmojiPicker(e.currentTarget, (emoji) => {
+  openEmojiPicker(e.currentTarget, (picked) => {
+    // Emoji personalizado entra como :nome: (o servidor troca pela imagem).
+    const custom = /^<a?:([a-z0-9_]+):\d+>$/.exec(picked);
+    const emoji = custom ? `:${custom[1]}: ` : picked;
     const start = input.selectionStart ?? input.value.length;
     const end = input.selectionEnd ?? input.value.length;
     input.value = input.value.slice(0, start) + emoji + input.value.slice(end);
@@ -2023,6 +2036,17 @@ function mentionCandidates() {
 function updateAutocomplete() {
   const pos = input.selectionStart;
   const before = input.value.slice(0, pos);
+  // :nom → emojis personalizados
+  const em = /(^|\s):([a-z0-9_]{2,32})$/i.exec(before);
+  if (em) {
+    const q = em[2].toLowerCase();
+    const items = availableEmojis().filter((e) => e.name.includes(q))
+      .sort((a, b) => (b.name.startsWith(q) - a.name.startsWith(q)) || a.name.localeCompare(b.name))
+      .slice(0, 8).map((e) => ({ emoji: e, insert: `:${e.name}: ` }));
+    if (!items.length) return hideAutocomplete();
+    ac = { items, index: 0, start: pos - q.length - 1, title: 'Emojis' };
+    return renderAutocomplete();
+  }
   const m = /(^|\s)@([a-z0-9_.]*)$/i.exec(before);
   if (!m) return hideAutocomplete();
   const q = m[2].toLowerCase();
@@ -2034,7 +2058,7 @@ function updateAutocomplete() {
     items.push({ everyone: true, value: 'everyone' });
   }
   if (items.length === 0) return hideAutocomplete();
-  ac = { items, index: 0, start: pos - q.length - 1 };
+  ac = { items, index: 0, start: pos - q.length - 1, title: 'Membros' };
   renderAutocomplete();
 }
 
@@ -2043,12 +2067,14 @@ function renderAutocomplete() {
   if (!ac) { box.hidden = true; return; }
   box.hidden = false;
   box.replaceChildren(
-    h('div', { class: 'ac-title' }, 'Membros'),
+    h('div', { class: 'ac-title' }, ac.title || 'Membros'),
     ...ac.items.map((it, i) => h('button', {
       type: 'button',
       class: `ac-item${i === ac.index ? ' active' : ''}`,
       onmousedown: (e) => { e.preventDefault(); pickAutocomplete(i); },
-    }, it.everyone
+    }, it.emoji
+      ? [h('img', { class: 'cemoji ac-emoji', src: it.emoji.url, alt: '' }), h('strong', {}, `:${it.emoji.name}:`), it.emoji.serverName ? h('span', { class: 'muted' }, it.emoji.serverName) : null]
+      : it.everyone
       ? [h('span', { class: 'ac-at' }, '@'), h('strong', {}, '@everyone'), h('span', { class: 'muted' }, 'Notifica todo mundo')]
       : [avatar(it.user, { size: 'xs' }), h('strong', {}, it.user.displayName), h('span', { class: 'muted' }, `@${it.user.username}`)])),
   );
@@ -2063,7 +2089,7 @@ function pickAutocomplete(i) {
   if (!ac) return;
   const it = ac.items[i];
   const pos = input.selectionStart;
-  const text = `@${it.value} `;
+  const text = it.insert || `@${it.value} `;
   input.value = input.value.slice(0, ac.start) + text + input.value.slice(pos);
   const caret = ac.start + text.length;
   input.setSelectionRange(caret, caret);
@@ -2192,12 +2218,13 @@ function openServerMenu(anchor) {
   const d = state.detail;
   if (!d) return;
   const manageSomething = isOwner() || can(P.MANAGE_SERVER) || can(P.MANAGE_ROLES) || can(P.KICK_MEMBERS)
-    || can(P.BAN_MEMBERS) || can(P.MODERATE_MEMBERS) || can(P.VIEW_AUDIT_LOG) || can(P.CREATE_INVITE);
+    || can(P.BAN_MEMBERS) || can(P.MODERATE_MEMBERS) || can(P.VIEW_AUDIT_LOG) || can(P.CREATE_INVITE) || can(P.MANAGE_EMOJIS);
   openMenu(anchor, [
     { label: '✉️  Convidar pessoas', hidden: !can(P.CREATE_INVITE), onClick: inviteDialog },
     { label: '⚙️  Configurações do servidor', hidden: !manageSomething, onClick: () => openServerSettings() },
     { label: '➕  Criar canal', hidden: !can(P.MANAGE_CHANNELS), onClick: () => createChannelDialog('text') },
     { label: '📁  Criar categoria', hidden: !can(P.MANAGE_CHANNELS), onClick: createCategoryDialog },
+    { label: '😺  Emojis do servidor', hidden: !can(P.MANAGE_EMOJIS), onClick: () => openServerSettings('emojis') },
     { label: '📜  Registro de auditoria', hidden: !can(P.VIEW_AUDIT_LOG), onClick: () => openServerSettings('audit') },
     { separator: true, hidden: isOwner() },
     { label: '🚪  Sair do servidor', danger: true, hidden: isOwner(), onClick: leaveServerDialog },

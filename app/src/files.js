@@ -9,6 +9,7 @@ const S = require('./serializers');
 const events = require('./events');
 const { audit } = require('./audit');
 const { P, memberContext } = require('./permissions');
+const emojis = require('./emojis');
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
 const MAX_SIZE = (Number(process.env.MAX_UPLOAD_MB) || 8) * 1024 * 1024;
@@ -126,6 +127,29 @@ function uploadRouter(requireAuth) {
         audit(serverId, req.userId, 'server_icon');
         events.serverChanged(serverId);
         res.json({ server: S.server(rows[0]) });
+      } catch (err) {
+        next(err);
+      }
+    });
+
+  // Emoji personalizado: imagem crua (até 256 KB), nome no cabeçalho X-Emoji-Name.
+  r.post('/servers/:id/emojis',
+    requireAuth,
+    express.raw({ type: 'application/octet-stream', limit: emojis.MAX_BYTES + 1024 }),
+    async (req, res, next) => {
+      try {
+        if (req.isBot) return res.status(403).json({ error: 'Bots não podem fazer isso.' });
+        const serverId = Number(req.params.id);
+        const ctx = Number.isInteger(serverId) && serverId > 0 && await memberContext(serverId, req.userId);
+        if (!ctx) return res.status(404).json({ error: 'Servidor não encontrado.' });
+        if (!ctx.can(P.MANAGE_EMOJIS)) return res.status(403).json({ error: 'Você não tem permissão para gerenciar emojis.' });
+        let name = req.get('x-emoji-name') || '';
+        try { name = decodeURIComponent(name); } catch { /* usa como veio */ }
+        const result = await emojis.create({ serverId, userId: req.userId, name, data: req.body });
+        if (result.error) return res.status(400).json({ error: result.error });
+        audit(serverId, req.userId, 'emoji_create', { targetId: result.emoji.id, targetName: result.emoji.name });
+        events.serverChanged(serverId);
+        res.status(201).json({ emoji: result.emoji });
       } catch (err) {
         next(err);
       }

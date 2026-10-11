@@ -7,6 +7,7 @@ const events = require('./events');
 const push = require('./push');
 const presence = require('./presence');
 const previews = require('./linkpreview');
+const emojis = require('./emojis');
 const { P, roomsForChannel } = require('./permissions');
 
 const MAX_LENGTH = 4000;
@@ -226,6 +227,7 @@ async function createMessage({ access, userId, content, attachmentIds, replyToId
   const ids = [...new Set((Array.isArray(attachmentIds) ? attachmentIds : []).map(String))];
   if (ids.length > MAX_ATTACHMENTS) throw new MessageError(`No máximo ${MAX_ATTACHMENTS} anexos por mensagem.`);
   if (ids.length && !access.can(P.ATTACH_FILES)) throw new MessageError('Você não pode enviar arquivos aqui.');
+  content = await emojis.expand(content, { serverId: access.serverId, userId });
   const pollData = poll && typeof poll === 'object' ? cleanPoll(poll) : null;
   if (pollData && ids.length) throw new MessageError('Enquetes não podem ter anexos.');
   validateContent(content, ids.length > 0 || !!pollData);
@@ -282,7 +284,7 @@ async function createMessage({ access, userId, content, attachmentIds, replyToId
 }
 
 async function editMessage({ access, messageRow, content }) {
-  content = String(content || '').trim();
+  content = await emojis.expand(String(content || '').trim(), { serverId: access.serverId, userId: messageRow.author_id });
   const att = await db.query(
     `SELECT (SELECT count(*)::int FROM attachments WHERE message_id = $1)
           + (SELECT count(*)::int FROM polls WHERE message_id = $1) AS n`,
@@ -349,6 +351,7 @@ function announceNew(access, message, nonce) {
 // Texto curto da notificação (sem a formatação **negrito**, ||spoiler|| etc.).
 function previewText(message) {
   let text = String(message.content || '')
+    .replace(/<a?:([a-z0-9_]{2,32}):\d{1,10}>/g, ':$1:')
     .replace(/\|\|[\s\S]*?\|\|/g, '▒▒▒▒')
     .replace(/```[\w-]*\n?/g, '')
     .replace(/(\*\*|__|~~|`|\*|_)/g, '')

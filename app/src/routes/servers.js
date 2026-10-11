@@ -8,6 +8,7 @@ const files = require('../files');
 const voice = require('../voice');
 const { humansOnly } = require('../auth');
 const { audit } = require('../audit');
+const emojis = require('../emojis');
 const {
   P, ALL, DEFAULT_EVERYONE, memberContext, visibleChannelIds, VISIBLE_SQL,
 } = require('../permissions');
@@ -137,6 +138,7 @@ async function serverDetail(serverId, userId) {
       timeoutUntil: m.timeout_until && new Date(m.timeout_until) > now ? m.timeout_until : null,
     })),
     roles: roles.rows.map(S.role),
+    emojis: await emojis.listForServer(serverId),
     voice: voice.statesForChannels(list.filter((c) => c.kind === 'voice').map((c) => c.id)),
     me: {
       permissions: ctx.perms,
@@ -311,11 +313,46 @@ module.exports = function serverRoutes(r) {
     );
     const vc = await db.query("SELECT id FROM channels WHERE server_id = $1 AND kind = 'voice'", [ctx.serverId]);
     vc.rows.forEach((c) => voice.clearChannel(c.id));
+    const emojiFiles = await db.query('SELECT file FROM nexo_emojis WHERE server_id = $1', [ctx.serverId]);
     const { rows } = await db.query('DELETE FROM servers WHERE id = $1 RETURNING icon_id', [ctx.serverId]);
+    emojiFiles.rows.forEach((e) => emojis.removeFile(e.file));
     if (rows[0] && rows[0].icon_id) files.removeAvatar(rows[0].icon_id);
     att.rows.forEach((a) => files.removeFile(a.id));
     events.emitTo([`server:${ctx.serverId}`], 'server:removed', { serverId: ctx.serverId, reason: 'deleted' });
     events.getIo().in(`server:${ctx.serverId}`).socketsLeave(`server:${ctx.serverId}`);
+    res.json({ ok: true });
+  }));
+
+  // ---------- Emojis personalizados (enviar fica em files.js)
+  r.get('/emojis', wrap(async (req, res) => res.json({ emojis: await emojis.listForUser(req.userId) })));
+
+  r.patch('/servers/:id/emojis/:emojiId', wrap(async (req, res) => {
+    const ctx = await requireMember(req, P.MANAGE_EMOJIS);
+    const name = emojis.cleanName(req.body.name);
+    if (!emojis.NAME_RE.test(name)) fail(400, 'O nome do emoji precisa ter de 2 a 32 letras, números ou _.');
+    let rows;
+    try {
+      ({ rows } = await db.query(
+        'UPDATE nexo_emojis e SET name = $3 FROM nexo_emojis old WHERE e.id = $1 AND e.server_id = $2 AND old.id = e.id RETURNING e.*, old.name AS old_name',
+        [parseId(req.params.emojiId), ctx.serverId, name],
+      ));
+    } catch (err) {
+      if (err.code === '23505') fail(409, `Já existe um emoji chamado :${name}: neste servidor.`);
+      throw err;
+    }
+    if (!rows[0]) fail(404, 'Emoji não encontrado.');
+    if (rows[0].old_name !== name) audit(ctx.serverId, req.userId, 'emoji_update', { targetId: rows[0].id, targetName: name, details: { from: rows[0].old_name, to: name } });
+    events.serverChanged(ctx.serverId);
+    res.json({ emoji: emojis.toJson(rows[0]) });
+  }));
+
+  r.delete('/servers/:id/emojis/:emojiId', wrap(async (req, res) => {
+    const ctx = await requireMember(req, P.MANAGE_EMOJIS);
+    const { rows } = await db.query('DELETE FROM nexo_emojis WHERE id = $1 AND server_id = $2 RETURNING *', [parseId(req.params.emojiId), ctx.serverId]);
+    if (!rows[0]) fail(404, 'Emoji não encontrado.');
+    emojis.removeFile(rows[0].file);
+    audit(ctx.serverId, req.userId, 'emoji_delete', { targetId: rows[0].id, targetName: rows[0].name });
+    events.serverChanged(ctx.serverId);
     res.json({ ok: true });
   }));
 

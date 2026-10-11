@@ -8,6 +8,7 @@ const files = require('./files');
 const events = require('./events');
 const buildApi = require('./routes');
 const previews = require('./linkpreview');
+const emojis = require('./emojis');
 const setupRealtime = require('./realtime');
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -19,13 +20,27 @@ events.setIo(io);
 
 app.disable('x-powered-by');
 
-app.get('/health', (req, res) => res.json({ ok: true }));
+// Saúde do app: responde 200 só se o banco também estiver respondendo.
+// Usado pelo Docker, pelo Jenkins e por monitores externos (ex.: UptimeRobot).
+app.get('/health', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    await Promise.race([
+      db.query('SELECT 1'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('tempo esgotado')), 3000)),
+    ]);
+    res.json({ ok: true, db: 'ok', uptime: Math.round(process.uptime()) });
+  } catch (err) {
+    res.status(503).json({ ok: false, db: err.message });
+  }
+});
 app.use('/api', buildApi());
 
 // Anexos (imagens, vídeos, arquivos).
 app.get('/files/:id', files.serveFile);
 app.get('/files/:id/:name', files.serveFile);
 app.get('/avatars/:file', files.serveAvatar);
+app.get('/emoji/:id', emojis.serve);
 // Imagens das prévias de link (passam pelo Nexo; o endereço é assinado).
 app.get('/link-image/:sig/:data', previews.serveImage);
 

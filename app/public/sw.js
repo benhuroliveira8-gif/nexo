@@ -1,6 +1,6 @@
 // Service worker do Nexo: deixa o app instalável, abre mais rápido e mostra
 // as notificações push mesmo com o Nexo fechado.
-const CACHE = 'nexo-v5';
+const CACHE = 'nexo-v6';
 const SHELL = [
   '/', '/styles.css', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/badge-96.png',
   '/js/main.js', '/js/util.js', '/js/state.js', '/js/home.js', '/js/settings.js', '/js/emoji.js',

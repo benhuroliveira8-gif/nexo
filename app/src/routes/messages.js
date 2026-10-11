@@ -5,6 +5,7 @@ const M = require('../messages');
 const S = require('../serializers');
 const { P, channelAccess, memberContext, visibleChannelIds } = require('../permissions');
 const { audit } = require('../audit');
+const emojis = require('../emojis');
 const { wrap, fail, parseId, parseBigId } = require('./util');
 
 const PAGE_SIZE = 50;
@@ -253,7 +254,8 @@ module.exports = function messageRoutes(r) {
     const { row, access } = await messageWithAccess(req);
     let emoji = '';
     try { emoji = decodeURIComponent(req.params.emoji); } catch { /* inválido */ }
-    if (!validEmoji(emoji)) fail(400, 'Emoji inválido.');
+    const custom = emojis.TOKEN_RE.test(emoji);
+    if (custom ? (add && !(await emojis.validReaction(emoji, req.userId))) : !validEmoji(emoji)) fail(400, 'Emoji inválido.');
 
     if (add) {
       if (!access.can(P.ADD_REACTIONS)) fail(403, 'Você não pode reagir aqui.');

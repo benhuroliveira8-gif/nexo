@@ -4,6 +4,7 @@
 #   nexo-backup                    faz um backup novo
 #   nexo-backup listar             mostra os backups guardados
 #   nexo-backup restaurar <nome>   volta tudo para um backup (ou "ultimo")
+#   nexo-backup idade              horas desde o último backup completo
 #
 # Cada backup é uma pasta com a data, ex.: 2026-10-10_0300/
 #   banco.dump      banco inteiro (formato do pg_dump)
@@ -96,9 +97,19 @@ restaurar() {
   say "Pronto! Tudo voltou para $nome."
 }
 
+# Quantas horas faz desde o último backup completo (-1 = nenhum). Usado pelo monitor.
+idade() {
+  ultimo="$(completos | tail -n 1)"
+  [ -n "$ultimo" ] || { echo -1; return 0; }
+  agora="$(date +%s)"
+  feito="$(stat -c %Y "$DEST/$ultimo/OK")"
+  echo $(( (agora - feito) / 3600 ))
+}
+
 case "${1:-backup}" in
   backup) fazer_backup ;;
   listar) listar ;;
+  idade) idade ;;
   restaurar) restaurar "${2:-}" ;;
   *) die "comando desconhecido: $1 (use: backup, listar ou restaurar <nome>)" ;;
 esac

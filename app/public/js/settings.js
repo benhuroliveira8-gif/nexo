@@ -1,7 +1,7 @@
 // Configurações do servidor: visão geral (nome e ícone), cargos, membros (moderação),
 // convites, banimentos e registro de auditoria.
 import {
-  h, api, avatar, toast, openDialog, confirmDialog, openMenu, presenceOf, uploadAvatar, fullTime, copyText,
+  h, api, avatar, toast, openDialog, confirmDialog, openMenu, presenceOf, uploadAvatar, fullTime, copyText, getToken,
 } from './util.js';
 import { state, P, PERMISSION_INFO, can, isOwner, myTop, memberRoles, memberTop } from './state.js';
 import { sortable } from './sortable.js';
@@ -47,6 +47,7 @@ function tabsAvailable() {
   const tabs = [['overview', 'Visão geral']];
   if (can(P.MANAGE_ROLES)) tabs.push(['roles', 'Cargos']);
   if (can(P.MANAGE_ROLES) || can(P.KICK_MEMBERS) || can(P.BAN_MEMBERS) || can(P.MODERATE_MEMBERS)) tabs.push(['members', 'Membros']);
+  if (can(P.MANAGE_EMOJIS)) tabs.push(['emojis', 'Emojis']);
   if (can(P.CREATE_INVITE)) tabs.push(['invites', 'Convites']);
   if (can(P.BAN_MEMBERS)) tabs.push(['bans', 'Banimentos']);
   if (can(P.VIEW_AUDIT_LOG)) tabs.push(['audit', 'Registro de auditoria']);
@@ -65,7 +66,7 @@ function render() {
       onclick: () => { ui.tab = key; render(); },
     }, label)));
 
-  const pages = { roles: renderRoles, members: renderMembersTab, invites: renderInvites, bans: renderBans, audit: renderAudit, overview: renderOverview };
+  const pages = { emojis: renderEmojis, roles: renderRoles, members: renderMembersTab, invites: renderInvites, bans: renderBans, audit: renderAudit, overview: renderOverview };
   const content = (pages[ui.tab] || renderOverview)();
 
   ui.root.replaceChildren(h('div', { class: 'settings' },
@@ -437,6 +438,93 @@ function renderMembersTab() {
     h('div', { class: 'member-rows' }, rows.length ? rows : h('p', { class: 'muted' }, 'Ninguém encontrado.')));
 }
 
+// ---------------------------------------------------------------- Emojis
+
+const EMOJI_MAX = 50;
+const emojiNameFrom = (filename) => String(filename || '').replace(/\.[^.]+$/, '').toLowerCase()
+  .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 32) || 'emoji';
+
+// Reduz para no máximo 128x128 (GIF vai como está, para continuar animado).
+async function prepareEmoji(file) {
+  if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) throw new Error(`${file.name}: use PNG, JPG, GIF ou WEBP.`);
+  if (file.type === 'image/gif') {
+    if (file.size > 256 * 1024) throw new Error(`${file.name}: GIF animado pode ter no máximo 256 KB.`);
+    return file;
+  }
+  const bmp = await createImageBitmap(file).catch(() => { throw new Error(`${file.name}: não deu para abrir a imagem.`); });
+  const scale = Math.min(1, 128 / Math.max(bmp.width, bmp.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(bmp.width * scale));
+  canvas.height = Math.max(1, Math.round(bmp.height * scale));
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  if (bmp.close) bmp.close();
+  const toBlob = (t, q) => new Promise((r) => canvas.toBlob(r, t, q));
+  let blob = await toBlob('image/webp', 0.92);
+  if (!blob || blob.type !== 'image/webp') blob = await toBlob('image/png');
+  return blob;
+}
+
+async function uploadEmoji(serverId, file, name) {
+  const body = await prepareEmoji(file);
+  const res = await fetch(`/api/servers/${serverId}/emojis`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/octet-stream', 'X-Emoji-Name': encodeURIComponent(name) },
+    body,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Erro ${res.status}`);
+  return data.emoji;
+}
+
+function renderEmojis() {
+  const d = state.detail;
+  const list = d.emojis || [];
+  const picker = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp', multiple: true, hidden: true });
+  picker.addEventListener('change', async () => {
+    const chosen = [...picker.files];
+    picker.value = '';
+    let ok = 0;
+    for (const f of chosen.slice(0, EMOJI_MAX - list.length)) {
+      try { await uploadEmoji(d.server.id, f, emojiNameFrom(f.name)); ok++; } catch (err) { toast(err.message); }
+    }
+    if (ok) toast(ok === 1 ? 'Emoji adicionado!' : `${ok} emojis adicionados!`);
+  });
+  const rename = async (e, input) => {
+    const name = input.value.trim().toLowerCase().replace(/:/g, '');
+    if (name === e.name) return;
+    try { await api(`/servers/${d.server.id}/emojis/${e.id}`, { method: 'PATCH', body: { name } }); toast('Nome salvo!'); } catch (err) { toast(err.message); input.value = e.name; }
+  };
+  return h('div', { class: 'settings-page' },
+    h('h2', {}, 'Emojis'),
+    h('p', { class: 'muted' }, `Emojis próprios do servidor (até ${EMOJI_MAX}). Para usar, escreva :nome: na mensagem ou escolha no 😊. Também servem como reação. Quem está no servidor pode usá-los nas DMs.`),
+    h('div', { class: 'row-actions' },
+      h('button', { class: 'btn primary small', disabled: list.length >= EMOJI_MAX, onclick: () => picker.click() }, '+ Enviar emoji'),
+      h('span', { class: 'muted small' }, `${list.length} de ${EMOJI_MAX} · PNG, JPG, WEBP ou GIF (até 256 KB). Imagens quadradas ficam melhores.`),
+      picker),
+    list.length === 0
+      ? h('div', { class: 'empty-state' }, h('div', { class: 'empty-art' }, '😺'), h('p', { class: 'muted' }, 'Nenhum emoji ainda. Envie uma imagem para começar!'))
+      : h('div', { class: 'emoji-admin' }, list.map((e) => {
+        const input = h('input', { value: e.name, maxlength: '32', 'aria-label': 'Nome do emoji' });
+        input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); input.blur(); } });
+        input.addEventListener('blur', () => rename(e, input));
+        return h('div', { class: 'emoji-admin-row' },
+          h('img', { class: 'emoji-admin-img', src: e.url, alt: '' }),
+          h('span', { class: 'emoji-colon' }, ':'), input, h('span', { class: 'emoji-colon' }, ':'),
+          e.animated ? h('span', { class: 'muted small' }, 'animado') : null,
+          h('button', {
+            class: 'icon-btn small', title: 'Apagar emoji',
+            onclick: () => confirmDialog({
+              title: `Apagar :${e.name}:?`,
+              text: 'Nas mensagens antigas ele vai aparecer só como texto.',
+              okLabel: 'Apagar',
+              onConfirm: () => api(`/servers/${d.server.id}/emojis/${e.id}`, { method: 'DELETE' }),
+            }),
+          }, '🗑️'));
+      })));
+}
+
 // ---------------------------------------------------------------- Convites
 
 const AGES = [[1800, '30 minutos'], [3600, '1 hora'], [6 * 3600, '6 horas'], [12 * 3600, '12 horas'], [86400, '1 dia'], [7 * 86400, '7 dias'], [0, 'Nunca']];
@@ -589,6 +677,9 @@ function describe(e) {
     case 'invite_delete': return ['apagou um convite', x.code || ''];
     case 'message_delete': return [`apagou uma mensagem de ${who}`, [x.channel ? `#${x.channel}` : '', x.preview ? `"${x.preview}"` : ''].filter(Boolean).join(' · ')];
     case 'bot_add': return [`adicionou o bot ${who}`];
+    case 'emoji_create': return [`adicionou o emoji :${e.targetName}:`];
+    case 'emoji_update': return [`renomeou o emoji :${x.from}: para :${x.to}:`];
+    case 'emoji_delete': return [`apagou o emoji :${e.targetName}:`];
     default: return [e.action];
   }
 }
@@ -598,6 +689,7 @@ const AUDIT_ICONS = {
   role_create: '🏷️', role_update: '🏷️', role_delete: '🏷️', role_reorder: '↕️', channel_create: '#️⃣', channel_update: '#️⃣',
   channel_delete: '#️⃣', category_create: '📁', category_update: '📁', category_delete: '📁', server_update: '⚙️', server_icon: '🖼️',
   invite_create: '✉️', invite_delete: '✉️', message_delete: '🗑️', bot_add: '🤖',
+  emoji_create: '😺', emoji_update: '😺', emoji_delete: '😺',
 };
 
 function renderAudit() {

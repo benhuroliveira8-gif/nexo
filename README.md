@@ -59,6 +59,12 @@ Chat em tempo real no estilo de servidores e canais. Projeto pessoal, construíd
 - **Segurança da conta**: trocar senha, **verificação em duas etapas** (app autenticador + códigos de recuperação), **sair de todos os aparelhos** e **apagar conta**
 - **Tema claro** ☀️ e **cor de destaque** (⚙️ → *Aparência*)
 
+**Extras**
+- **Emojis personalizados** 😺: cada servidor pode ter até 50 (Configurações do servidor → *Emojis*). Use com `:nome:` (com autocompletar), pelo 😊 ou como reação. Funcionam também nas DMs de quem está no servidor. Nova permissão: *Gerenciar emojis*
+- **Monitor**: job `nexo-monitor` no Jenkins confere tudo a cada 5 minutos, religa o que caiu e avisa no canal `#avisos`; e monitor externo grátis (UptimeRobot) para quando a VM inteira cair
+- **Backup fora da VM**: script do Windows copia os backups todo dia para o OneDrive
+- Guia: [docs/monitor-e-backup.md](docs/monitor-e-backup.md)
+
 ## Como rodar (no servidor Ubuntu com Docker)
 
 ```bash
@@ -156,7 +162,8 @@ bash infra/backup/restaurar.sh ultimo                       # voltar tudo para o
 ```
 
 O restaurar pede confirmação, faz antes um backup do estado atual e para/religa o app sozinho.
-Dica: de vez em quando, copie a pasta de backups para fora da VM (ex.: com `scp` para o Windows).
+Para guardar uma cópia **fora da VM** (no Windows/OneDrive, todo dia sozinho), veja
+[docs/monitor-e-backup.md](docs/monitor-e-backup.md).
 
 ## Estrutura
 

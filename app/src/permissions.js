@@ -20,6 +20,7 @@ const P = {
   BAN_MEMBERS:      1 << 14, // banir (expulsar e impedir de voltar)
   MODERATE_MEMBERS: 1 << 15, // castigar (só ler por um tempo)
   VIEW_AUDIT_LOG:   1 << 16, // ver o registro de auditoria
+  MANAGE_EMOJIS:    1 << 17, // enviar, renomear e apagar emojis do servidor
 };
 
 const ALL = Object.values(P).reduce((a, b) => a | b, 0);

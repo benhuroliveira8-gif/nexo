@@ -1,0 +1,35 @@
+// Job "nexo-monitor": a cada 5 minutos confere se o Nexo está bem.
+// Se algo estiver errado, tenta religar sozinho e avisa no canal #avisos do Nexo
+// (pelo bot), além de deixar o job vermelho no Jenkins.
+pipeline {
+  agent any
+
+  triggers { cron('H/5 * * * *') }
+
+  options {
+    disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '50'))
+    timeout(time: 5, unit: 'MINUTES')
+  }
+
+  environment {
+    COMPOSE_PROJECT_NAME = 'nexo'
+  }
+
+  stages {
+    stage('Verificar') {
+      steps {
+        withCredentials([file(credentialsId: 'nexo-env', variable: 'ENV_FILE')]) {
+          sh 'cp "$ENV_FILE" .env'
+        }
+        sh 'sh infra/monitor/verificar.sh'
+      }
+    }
+  }
+
+  post {
+    always {
+      sh 'rm -f .env'
+    }
+  }
+}
