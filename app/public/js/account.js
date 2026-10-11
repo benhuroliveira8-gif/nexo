@@ -7,6 +7,7 @@ import { state } from './state.js';
 import { qrSvg } from './qr.js';
 import { ACCENTS, getTheme, getAccent, setTheme, setAccent } from './theme.js';
 import { voiceSettings, saveVoiceSettings, keyLabel } from './voice.js';
+import { devicesSection } from './devices.js';
 import {
   pushStatus, enablePush, disablePush, canPromptInstall, promptInstall, isStandalone, isIos, onPwaChange,
 } from './pwa.js';
@@ -386,6 +387,7 @@ function pageVoice() {
   return h('div', { class: 'settings-page' },
     h('h2', {}, 'Voz e vídeo'),
     h('p', { class: 'muted' }, 'Vale só para este aparelho.'),
+    block('Microfone, som e câmera', devicesSection()),
     block('Modo do microfone',
       h('div', { class: 'kind-options' },
         modeOption('voice', 'Detecção de voz', 'O microfone fica ligado; use o botão 🎤 para mutar.'),

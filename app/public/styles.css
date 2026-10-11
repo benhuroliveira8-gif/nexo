@@ -1236,3 +1236,23 @@ body.is-dragging, body.is-dragging * { cursor: grabbing !important; user-select:
 .stage-grid.has-screen .tile .avatar.xl { width: 72px; height: 72px; font-size: 28px; }
 .call-stage .stage-grid.has-screen .tile.screen { max-height: 50vh; min-height: 160px; }
 .call-stage .stage-grid.has-screen .tile { height: 110px; }
+
+/* ---------------------------------------------------------------- Aparelhos de áudio e vídeo */
+.devices { display: grid; gap: 16px; }
+.dev-ask { display: grid; gap: 8px; justify-items: start; padding: 12px; border-radius: 10px; background: var(--accent-soft); border: 1px solid var(--accent); }
+.dev-ask[hidden] { display: none; }
+.dev-ask p { margin: 0; color: var(--text); }
+.dev-field { display: grid; gap: 8px; }
+.dev-label { font-weight: 700; font-size: 14px; }
+.dev-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.dev-select {
+  flex: 1; min-width: 200px; max-width: 100%; padding: 9px 10px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--bg-0); color: var(--text);
+}
+.dev-select:disabled { opacity: .6; }
+.dev-note { margin: 0; }
+.dev-note:empty { display: none; }
+.mic-meter { height: 8px; border-radius: 4px; background: var(--bg-0); border: 1px solid var(--line); overflow: hidden; }
+.mic-meter i { display: block; height: 100%; width: 0; background: var(--online); transition: width .06s linear; }
+.cam-preview { width: 100%; max-width: 360px; aspect-ratio: 16 / 9; border-radius: 10px; background: #000; object-fit: cover; transform: scaleX(-1); }
+.cam-preview[hidden] { display: none; }

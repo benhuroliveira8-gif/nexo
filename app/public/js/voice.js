@@ -26,6 +26,7 @@ const vs = {
 const DEFAULT_SETTINGS = {
   mode: 'voice', pttKey: 'ControlLeft', noiseSuppression: true, echoCancellation: true, autoGainControl: true,
   screenQuality: '1080p30', screenContent: 'motion', screenAudio: true,
+  micId: '', speakerId: '', camId: '', // '' = padrão do sistema
 };
 export function voiceSettings() {
   try { return { ...DEFAULT_SETTINGS, ...JSON.parse(storage('nexo.voice') || '{}') }; } catch { return { ...DEFAULT_SETTINGS }; }
@@ -36,10 +37,23 @@ export function saveVoiceSettings(changes) {
   applySettingsLive(changes);
   return next;
 }
-const captureOptions = () => {
+// "ideal": se o aparelho escolhido foi desconectado, usa o padrão em vez de dar erro.
+const pickDevice = (id) => (id ? { deviceId: { ideal: id } } : {});
+export const captureOptions = () => {
   const st = voiceSettings();
-  return { noiseSuppression: st.noiseSuppression, echoCancellation: st.echoCancellation, autoGainControl: st.autoGainControl };
+  return {
+    noiseSuppression: st.noiseSuppression, echoCancellation: st.echoCancellation, autoGainControl: st.autoGainControl,
+    ...pickDevice(st.micId),
+  };
 };
+const cameraOptions = () => ({ ...pickDevice(voiceSettings().camId) });
+
+// Saída de som escolhida (alto-falante/fone). Só Chrome/Edge/Firefox permitem escolher.
+export const canPickSpeaker = () => typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in HTMLMediaElement.prototype;
+export function applySpeaker(el, id = voiceSettings().speakerId) {
+  if (!canPickSpeaker() || !el) return Promise.resolve();
+  return el.setSinkId(id || '').catch(() => el.setSinkId('').catch(() => {}));
+}
 
 // Volume de cada pessoa (0 a 1), guardado neste aparelho.
 function volumes() {
@@ -155,7 +169,7 @@ export async function joinVoice({ channelId, channelName, serverId, serverName, 
     if (vs.room) await leaveVoice({ silent: true });
 
     const { Room } = LK();
-    const room = new Room({ adaptiveStream: true, dynacast: true, audioCaptureDefaults: captureOptions() });
+    const room = new Room({ adaptiveStream: true, dynacast: true, audioCaptureDefaults: captureOptions(), videoCaptureDefaults: cameraOptions() });
     wireRoom(room);
     Object.assign(vs, {
       room, channelId, serverId, channelName, serverName, canSpeak, canVideo, isDm,
@@ -179,7 +193,7 @@ export async function joinVoice({ channelId, channelName, serverId, serverName, 
       }
     }
     if (video && canVideo) {
-      try { await room.localParticipant.setCameraEnabled(true); vs.video = true; } catch { /* sem câmera */ }
+      try { await room.localParticipant.setCameraEnabled(true, cameraOptions()); vs.video = true; } catch { /* sem câmera */ }
     }
     announceJoin();
   } catch (err) {
@@ -233,6 +247,7 @@ function wireRoom(room) {
       const isScreen = !!(publication && Track.Source.ScreenShareAudio && publication.source === Track.Source.ScreenShareAudio);
       if (isScreen) el.dataset.screen = '1';
       if (uid) { el.dataset.userId = String(uid); el.volume = isScreen ? screenVolumeOf(uid) : volumeOf(uid); }
+      applySpeaker(el);
       document.getElementById('voice-audio').append(el);
       trackEls.set(track.sid, el);
     }
@@ -279,7 +294,7 @@ export async function toggleMute() {
   if (vs.deafened) return toggleDeafen(); // desensurdecer também desmuta
   const next = !vs.muted;
   try {
-    await vs.room.localParticipant.setMicrophoneEnabled(!next);
+    await vs.room.localParticipant.setMicrophoneEnabled(!next, captureOptions());
     vs.muted = next;
   } catch (err) {
     toast(micErrorMessage(err));
@@ -309,7 +324,7 @@ export async function toggleDeafen() {
 export async function toggleCamera() {
   if (!vs.room || !vs.canVideo) return;
   try {
-    await vs.room.localParticipant.setCameraEnabled(!vs.video);
+    await vs.room.localParticipant.setCameraEnabled(!vs.video, vs.video ? undefined : cameraOptions());
     vs.video = !vs.video;
   } catch (err) {
     toast(err && err.name === 'NotAllowedError' ? 'O navegador bloqueou a câmera.' : 'Não foi possível ligar a câmera.');
@@ -506,20 +521,51 @@ export function keyLabel(code) {
 
 // Mudou a configuração no meio da chamada: aplica na hora.
 async function applySettingsLive(changes) {
-  if (!vs.room || !vs.canSpeak) return;
+  if (!vs.room) return;
+  if ('speakerId' in changes) {
+    for (const el of trackEls.values()) if (el.tagName === 'AUDIO') applySpeaker(el, changes.speakerId);
+  }
+  const { Track } = LK();
+  updateRoomDefaults();
+  if ('camId' in changes) {
+    // Troca de câmera no meio da chamada.
+    try { await refreshTrack(Track.Source.Camera, cameraOptions()); } catch { toast('Não foi possível usar essa câmera.'); }
+    onChange();
+  }
+  if (!vs.canSpeak) return;
   if ('mode' in changes) {
     const ptt = changes.mode === 'ptt';
     try { await vs.room.localParticipant.setMicrophoneEnabled(!ptt, captureOptions()); vs.muted = ptt; } catch { vs.muted = true; }
     vs.pttDown = false;
     emitState();
     onChange();
-  } else if (['noiseSuppression', 'echoCancellation', 'autoGainControl'].some((k) => k in changes) && !vs.muted) {
-    // Reinicia o microfone com as opções novas.
-    try {
-      await vs.room.localParticipant.setMicrophoneEnabled(false);
-      await vs.room.localParticipant.setMicrophoneEnabled(true, captureOptions());
-    } catch { /* fica como estava */ }
+  } else if (['noiseSuppression', 'echoCancellation', 'autoGainControl', 'micId'].some((k) => k in changes)) {
+    // Reinicia o microfone com o aparelho/opções novos.
+    try { await refreshTrack(Track.Source.Microphone, captureOptions()); } catch { toast('Não foi possível usar esse microfone.'); }
   }
+}
+
+// O LiveKit guarda as opções da primeira captura; atualiza para as próximas.
+function updateRoomDefaults() {
+  try {
+    const o = vs.room.options;
+    if (!o) return;
+    o.audioCaptureDefaults = { ...(o.audioCaptureDefaults || {}), deviceId: undefined, ...captureOptions() };
+    o.videoCaptureDefaults = { ...(o.videoCaptureDefaults || {}), deviceId: undefined, ...cameraOptions() };
+  } catch { /* versão diferente da biblioteca */ }
+}
+
+// Ligado: reinicia a captura com as opções novas. Mutado/desligado: descarta,
+// para a próxima vez já começar com o aparelho certo.
+async function refreshTrack(source, options) {
+  const lp = vs.room.localParticipant;
+  const pub = lp.getTrackPublication(source);
+  if (!pub || !pub.track) return;
+  if (pub.isMuted || !pub.track.restartTrack) {
+    if (lp.unpublishTrack) await lp.unpublishTrack(pub.track, true);
+    return;
+  }
+  await pub.track.restartTrack(options);
 }
 
 // ---------------------------------------------------------------- Volume por pessoa
