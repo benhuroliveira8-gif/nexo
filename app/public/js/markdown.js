@@ -1,142 +1,150 @@
-// Formatação das mensagens (parecida com a do Discord):
-//   **negrito**  *itálico* ou _itálico_  __sublinhado__  ~~riscado~~  ||spoiler||
-//   `código`  ```bloco de código```  > citação  >>> citação até o fim
-//   # Título  ## Subtítulo  ### Menor   - lista   1. lista numerada
-// Tudo vira elementos com textContent: nunca HTML vindo do usuário.
+// Formatação de texto das mensagens (estilo Discord), sempre montando elementos
+// (nunca HTML cru), então ninguém consegue injetar código pelas mensagens.
+//
+//   **negrito**   *itálico* ou _itálico_   __sublinhado__   ~~riscado~~
+//   `código`      ```bloco de código```    > citação        ||spoiler||
+//   links e @menções
 import { h } from './util.js';
 
-const URL_RE = /https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]}'"*_~|]/;
-const RULES = [
-  ['escape', /\\([*_~`|\\>#\-])/],
-  ['code', /`([^`\n]+)`/],
-  ['url', URL_RE],
-  ['bold', /\*\*(?=\S)([\s\S]*?\S)\*\*/],
-  ['underline', /__(?=\S)([\s\S]*?\S)__/],
-  ['strike', /~~(?=\S)([\s\S]*?\S)~~/],
-  ['spoiler', /\|\|(?=\S)([\s\S]*?\S)\|\|/],
-  ['italic', /\*(?=[^\s*])([^*]*?[^\s*])\*/],
-  ['italic', /(?<![\p{L}\p{N}_])_(?=[^\s_])([^_]*?[^\s_])_(?![\p{L}\p{N}_])/u],
-];
+const URL_RE = /^https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]}'"]/i;
+const MENTION_RE = /^@([a-z0-9_.]{3,32})/i;
+const SPECIAL = new Set(['`', '|', '*', '_', '~', 'h', 'H', '@', '\\', '<']);
+const ESCAPABLE = new Set(['*', '_', '~', '`', '|', '>', '\\', '@', '<']);
 
-// Texto de uma linha (ou parágrafo) → nós. "leaf" cuida de links e @menções.
-function inline(text, leaf, depth = 0) {
+// ctx: { users: Map(username -> user), meId, onMention(el, user) }
+function inline(text, ctx, depth = 0) {
   const out = [];
-  let rest = text;
-  while (rest) {
-    let best = null;
-    if (depth < 6) {
-      for (const [type, re] of RULES) {
-        const m = re.exec(rest);
-        if (m && (!best || m.index < best.m.index)) best = { type, m };
-      }
-    }
-    if (!best) { out.push(...leaf(rest)); break; }
-    const { type, m } = best;
-    if (m.index > 0) out.push(...leaf(rest.slice(0, m.index)));
-    const inner = () => inline(m[1], leaf, depth + 1);
-    switch (type) {
-      case 'escape': out.push(m[1]); break;
-      case 'code': out.push(h('code', { class: 'md-code' }, m[1])); break;
-      case 'url': out.push(...leaf(m[0])); break;
-      case 'bold': out.push(h('strong', {}, inner())); break;
-      case 'underline': out.push(h('u', {}, inner())); break;
-      case 'strike': out.push(h('s', {}, inner())); break;
-      case 'italic': out.push(h('em', {}, inner())); break;
-      case 'spoiler': {
-        const el = h('span', { class: 'spoiler', title: 'Spoiler: clique para ver', role: 'button', tabindex: '0' }, inner());
-        const reveal = (e) => { if (!el.classList.contains('shown')) { e.preventDefault(); e.stopPropagation(); el.classList.add('shown'); } };
-        el.addEventListener('click', reveal);
-        el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') reveal(e); });
-        out.push(el);
-        break;
-      }
-      default: out.push(m[0]);
-    }
-    rest = rest.slice(m.index + m[0].length);
-  }
-  return out;
-}
-
-// Linhas normais (fora de bloco de código) → títulos, citações, listas e parágrafos.
-function blocks(text, leaf) {
-  const out = [];
-  const lines = text.split('\n');
-  let para = [];
-  const flushPara = () => {
-    if (!para.length) return;
-    // Linhas em branco no começo/fim de um parágrafo entre blocos não contam.
-    while (para.length && para[0] === '' && out.length) para.shift();
-    if (para.length) out.push(h('span', { class: 'md-p' }, inline(para.join('\n'), leaf)));
-    para = [];
-  };
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+  let buf = '';
+  const flush = () => { if (buf) { out.push(buf); buf = ''; } };
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (!SPECIAL.has(ch) || depth > 6) { buf += ch; i++; continue; }
+    const rest = text.slice(i);
+    const prev = i > 0 ? text[i - 1] : '';
     let m;
-    if (/^>>> ?/.test(line)) {
-      flushPara();
-      const rest = [line.replace(/^>>> ?/, ''), ...lines.slice(i + 1)].join('\n');
-      out.push(h('blockquote', { class: 'md-quote' }, blocks(rest, leaf)));
-      return out;
+
+    if (ch === '\\' && ESCAPABLE.has(text[i + 1])) { buf += text[i + 1]; i += 2; continue; }
+
+    if (ch === '`' && (m = /^`([^`\n]+)`/.exec(rest))) {
+      flush(); out.push(h('code', { class: 'md-code' }, m[1])); i += m[0].length; continue;
     }
-    if (/^> ?/.test(line) && line !== '>') {
-      flushPara();
-      const quoted = [];
-      while (i < lines.length && /^> ?/.test(lines[i])) quoted.push(lines[i++].replace(/^> ?/, ''));
-      i--;
-      out.push(h('blockquote', { class: 'md-quote' }, inline(quoted.join('\n'), leaf)));
-      continue;
+    if (ch === '|' && (m = /^\|\|([\s\S]+?)\|\|/.exec(rest))) {
+      flush();
+      const el = h('span', { class: 'spoiler', title: 'Spoiler: clique para ver', tabindex: '0', role: 'button' }, inline(m[1], ctx, depth + 1));
+      const reveal = (e) => { if (!el.classList.contains('revealed')) { e.preventDefault(); e.stopPropagation(); el.classList.add('revealed'); el.removeAttribute('title'); } };
+      el.addEventListener('click', reveal);
+      el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') reveal(e); });
+      out.push(el); i += m[0].length; continue;
     }
-    if ((m = /^(#{1,3}) (.+)$/.exec(line))) {
-      flushPara();
-      out.push(h(`h${m[1].length + 2}`, { class: 'md-h' }, inline(m[2], leaf)));
-      continue;
+    if (ch === '*' && (m = /^\*\*([\s\S]+?)\*\*(?!\*)/.exec(rest))) {
+      flush(); out.push(h('strong', {}, inline(m[1], ctx, depth + 1))); i += m[0].length; continue;
     }
-    if (/^\s{0,4}([-*]|\d{1,3}\.) \S/.test(line)) {
-      flushPara();
-      const ordered = /^\s*\d/.test(line);
-      const items = [];
-      let start = 1;
-      while (i < lines.length && (m = /^(\s{0,4})([-*]|(\d{1,3})\.) (.*)$/.exec(lines[i])) && !!m[3] === ordered) {
-        if (!items.length && m[3]) start = Number(m[3]);
-        items.push(h('li', { class: m[1].length >= 2 ? 'nested' : null }, inline(m[4], leaf)));
-        i++;
+    if (ch === '_' && (m = /^__([\s\S]+?)__(?!_)/.exec(rest))) {
+      flush(); out.push(h('u', {}, inline(m[1], ctx, depth + 1))); i += m[0].length; continue;
+    }
+    if (ch === '*' && (m = /^\*(?![\s*])([\s\S]*?[^\s\\])\*(?!\*)/.exec(rest))) {
+      flush(); out.push(h('em', {}, inline(m[1], ctx, depth + 1))); i += m[0].length; continue;
+    }
+    if (ch === '_' && !/[\p{L}\p{N}_]/u.test(prev) && (m = /^_(?![\s_])([\s\S]*?[^\s\\])_(?![\p{L}\p{N}_])/u.exec(rest))) {
+      flush(); out.push(h('em', {}, inline(m[1], ctx, depth + 1))); i += m[0].length; continue;
+    }
+    if (ch === '~' && (m = /^~~([\s\S]+?)~~/.exec(rest))) {
+      flush(); out.push(h('s', {}, inline(m[1], ctx, depth + 1))); i += m[0].length; continue;
+    }
+    // <https://link> = link sem prévia
+    if (ch === '<' && (m = /^<(https?:\/\/[^\s<>"]+)>/i.exec(rest))) {
+      flush(); out.push(link(m[1])); i += m[0].length; continue;
+    }
+    if ((ch === 'h' || ch === 'H') && !/[\w/]/.test(prev) && (m = URL_RE.exec(rest))) {
+      flush(); out.push(link(m[0])); i += m[0].length; continue;
+    }
+    if (ch === '@' && !/[\w@]/.test(prev) && (m = MENTION_RE.exec(rest))) {
+      const name = m[1].toLowerCase().replace(/\.+$/, '');
+      const user = ctx.users ? ctx.users.get(name) : null;
+      if (name === 'everyone' || name === 'here' || user) {
+        flush();
+        const shown = user ? `@${user.displayName}` : `@${name}`;
+        const el = h('span', {
+          class: `mention${user && user.id === ctx.meId ? ' me' : ''}`,
+          title: user ? `@${user.username}` : null,
+        }, shown);
+        if (user && ctx.onMention) el.addEventListener('click', () => ctx.onMention(el, user));
+        out.push(el);
+        i += 1 + name.length; // mantém o ponto final que veio grudado (ex.: "@ana.")
+        continue;
       }
-      i--;
-      out.push(h(ordered ? 'ol' : 'ul', { class: 'md-list', start: ordered && start !== 1 ? String(start) : null }, items));
-      continue;
     }
-    para.push(line);
+    buf += ch;
+    i++;
   }
-  flushPara();
+  flush();
   return out;
 }
 
-const FENCE_RE = /```(?:([\w+#.-]{1,20})\n)?\n?([\s\S]*?)```/g;
-
-export function renderMarkdown(text, leaf) {
-  const out = [];
-  let last = 0;
-  for (const m of text.matchAll(FENCE_RE)) {
-    const before = text.slice(last, m.index).replace(/\n$/, '');
-    if (before) out.push(...blocks(before, leaf));
-    out.push(h('pre', { class: 'md-pre' }, m[1] ? h('span', { class: 'md-lang' }, m[1]) : null,
-      h('code', {}, m[2].replace(/\n$/, ''))));
-    last = m.index + m[0].length;
-    if (text[last] === '\n') last++;
-  }
-  const tail = text.slice(last);
-  if (tail) out.push(...blocks(tail, leaf));
-  // Mensagem comum (só um parágrafo): não precisa do invólucro.
-  if (out.length === 1 && out[0].classList && out[0].classList.contains('md-p')) return [...out[0].childNodes];
-  return out;
+function link(url) {
+  return h('a', { href: url, target: '_blank', rel: 'noopener noreferrer nofollow' }, url);
 }
 
-// Mensagem só com emojis (até 27) aparece com emojis grandes.
-const EMOJI_ONLY = /^(?:\p{Extended_Pictographic}|\p{Emoji_Component}|\p{Regional_Indicator}|‍|️|\s)+$/u;
-const seg = typeof Intl !== 'undefined' && Intl.Segmenter ? new Intl.Segmenter('pt', { granularity: 'grapheme' }) : null;
-export function isJumboEmoji(text) {
+// Só emojis (até 10)? Mostra grandão.
+const EMOJI_ONLY = /^(?:\p{Extended_Pictographic}|\p{Emoji_Component}|‍|️|\s)+$/u;
+export function isJumbo(text) {
   const t = String(text || '').trim();
   if (!t || !EMOJI_ONLY.test(t) || /^[\d#*\s]+$/.test(t)) return false;
-  const count = seg ? [...seg.segment(t.replace(/\s/g, ''))].length : t.length;
-  return count <= 27;
+  const count = [...new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(t.replace(/\s+/g, ''))].length;
+  return count <= 10;
+}
+
+// Texto completo (com blocos de código e citações).
+export function renderMarkdown(text, ctx = {}) {
+  const out = [];
+  const src = String(text || '');
+  const parts = src.split(/(```[\s\S]*?```)/g);
+  const isCode = (p) => /^```[\s\S]*```$/.test(p) && p.length > 6;
+  parts.forEach((part, idx) => {
+    if (!part) return;
+    const code = /^```([\w+#.-]{0,20})\n?([\s\S]*?)\n?```$/.exec(part);
+    if (!isCode(part)) {
+      if (idx > 0 && isCode(parts[idx - 1])) part = part.replace(/^\n/, '');
+      if (idx < parts.length - 1 && isCode(parts[idx + 1])) part = part.replace(/\n$/, '');
+      if (!part) return;
+    }
+    if (code && part.length > 6) {
+      out.push(h('pre', { class: 'md-pre' }, h('code', { class: code[1] ? `lang-${code[1]}` : null }, code[2] || ' ')));
+      return;
+    }
+    // Citações: linhas começando com "> "
+    const lines = part.split('\n');
+    let i = 0;
+    let plain = [];
+    const flushPlain = () => {
+      if (!plain.length) return;
+      out.push(...inline(plain.join('\n'), ctx));
+      plain = [];
+    };
+    while (i < lines.length) {
+      if (/^> /.test(lines[i]) || lines[i] === '>') {
+        flushPlain();
+        const q = [];
+        while (i < lines.length && (/^> /.test(lines[i]) || lines[i] === '>')) { q.push(lines[i].replace(/^> ?/, '')); i++; }
+        out.push(h('blockquote', { class: 'md-quote' }, inline(q.join('\n'), ctx)));
+      } else {
+        plain.push(lines[i]);
+        i++;
+      }
+    }
+    flushPlain();
+  });
+  return out;
+}
+
+// Versão sem formatação (para notificações, citações de resposta etc.).
+export function stripMarkdown(text) {
+  return String(text || '')
+    .replace(/\|\|[\s\S]*?\|\|/g, '▒▒▒▒')
+    .replace(/```[\w+#.-]*\n?/g, '')
+    .replace(/(\*\*|__|~~|`|\*|_)/g, '')
+    .replace(/^> /gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }

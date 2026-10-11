@@ -22,14 +22,14 @@ function disconnect(userId) {
 
 const isConnected = (userId) => connections.has(userId);
 
-// Qual aba/aparelho está com o Nexo na tela agora (para decidir se manda push).
-const visibleSockets = new Map(); // userId -> Set(socketId)
-function setVisible(userId, socketId, visible) {
-  const set = visibleSockets.get(userId) || new Set();
-  if (visible) set.add(socketId); else set.delete(socketId);
-  if (set.size) visibleSockets.set(userId, set); else visibleSockets.delete(userId);
+// Abas/apps com o Nexo aparecendo na tela agora (para não mandar push à toa).
+const visible = new Map(); // userId -> Set(socketId)
+function setVisible(userId, socketId, on) {
+  const set = visible.get(userId) || new Set();
+  if (on) set.add(socketId); else set.delete(socketId);
+  if (set.size) visible.set(userId, set); else visible.delete(userId);
 }
-const isActive = (userId) => visibleSockets.has(userId);
+const isActive = (userId) => visible.has(userId);
 
 // O que os OUTROS veem: invisível aparece como offline, e o texto
 // de status só aparece para quem está online.

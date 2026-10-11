@@ -1,10 +1,14 @@
-// Configurações do servidor: visão geral, cargos e membros.
-import { h, api, avatar, toast, openDialog, confirmDialog, openMenu, presenceOf } from './util.js';
+// Configurações do servidor: visão geral (nome e ícone), cargos, membros (moderação),
+// convites, banimentos e registro de auditoria.
+import {
+  h, api, avatar, toast, openDialog, confirmDialog, openMenu, presenceOf, uploadAvatar, fullTime, copyText,
+} from './util.js';
 import { state, P, PERMISSION_INFO, can, isOwner, myTop, memberRoles, memberTop } from './state.js';
+import { sortable } from './sortable.js';
 
 const PRESET_COLORS = ['#ff7a45', '#f5c542', '#3ecf8e', '#2ec4b6', '#4d9fff', '#7c6cff', '#c86bfa', '#ff5c8a', '#ff5c6c', '#a7adbb'];
 
-let ui = null; // { root, tab, roleId, draft, dirty, filter }
+let ui = null; // { root, tab, roleId, draft, dirty, filter, cache }
 
 export function closeServerSettings() {
   if (!ui) return;
@@ -21,7 +25,7 @@ export function openServerSettings(tab = 'overview') {
   closeServerSettings();
   const root = h('div', { class: 'settings-overlay', role: 'dialog', 'aria-modal': 'true' });
   document.body.append(root);
-  ui = { root, tab, roleId: null, draft: null, dirty: false, filter: '' };
+  ui = { root, tab, roleId: null, draft: null, dirty: false, filter: '', cache: {} };
   document.addEventListener('keydown', onKey);
   render();
 }
@@ -37,11 +41,15 @@ const isAdmin = () => isOwner() || (state.detail.me.permissions & P.ADMINISTRATO
 const canGrant = (flag) => isAdmin() || (state.detail.me.permissions & flag) === flag;
 const roleManageable = (role) => can(P.MANAGE_ROLES) && (role.isDefault || role.position < myTop());
 const memberManageable = (m) => m.id === state.me.id || isOwner() || memberTop(m) < myTop();
+const canModerate = (m) => m.id !== state.me.id && m.id !== state.detail.server.ownerId && memberTop(m) < myTop();
 
 function tabsAvailable() {
   const tabs = [['overview', 'Visão geral']];
   if (can(P.MANAGE_ROLES)) tabs.push(['roles', 'Cargos']);
-  if (can(P.MANAGE_ROLES) || can(P.KICK_MEMBERS)) tabs.push(['members', 'Membros']);
+  if (can(P.MANAGE_ROLES) || can(P.KICK_MEMBERS) || can(P.BAN_MEMBERS) || can(P.MODERATE_MEMBERS)) tabs.push(['members', 'Membros']);
+  if (can(P.CREATE_INVITE)) tabs.push(['invites', 'Convites']);
+  if (can(P.BAN_MEMBERS)) tabs.push(['bans', 'Banimentos']);
+  if (can(P.VIEW_AUDIT_LOG)) tabs.push(['audit', 'Registro de auditoria']);
   return tabs;
 }
 
@@ -57,12 +65,21 @@ function render() {
       onclick: () => { ui.tab = key; render(); },
     }, label)));
 
-  const content = ui.tab === 'roles' ? renderRoles() : ui.tab === 'members' ? renderMembersTab() : renderOverview();
+  const pages = { roles: renderRoles, members: renderMembersTab, invites: renderInvites, bans: renderBans, audit: renderAudit, overview: renderOverview };
+  const content = (pages[ui.tab] || renderOverview)();
 
   ui.root.replaceChildren(h('div', { class: 'settings' },
     nav,
     h('div', { class: 'settings-content' }, content),
     h('button', { class: 'settings-close', title: 'Fechar (Esc)', onclick: closeServerSettings }, '✕')));
+  if (ui.afterRender) { const fn = ui.afterRender; ui.afterRender = null; fn(); }
+}
+
+export function serverIcon(server, size = '') {
+  const el = h('div', { class: `server-icon ${size}` });
+  if (server.iconUrl) el.append(h('img', { src: server.iconUrl, alt: '', draggable: 'false' }));
+  else el.append(String(server.name || '?').trim().split(/\s+/).slice(0, 2).map((p) => [...p][0]).join('').toUpperCase());
+  return el;
 }
 
 // ---------------------------------------------------------------- Visão geral
@@ -71,8 +88,28 @@ function renderOverview() {
   const d = state.detail;
   const manage = can(P.MANAGE_SERVER);
   const name = h('input', { value: d.server.name, maxlength: '100', disabled: !manage });
+  const pickIcon = () => {
+    const picker = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp' });
+    picker.addEventListener('change', async () => {
+      const file = picker.files[0];
+      if (!file) return;
+      try { toast('Enviando ícone…'); await uploadAvatar(file, `/api/servers/${d.server.id}/icon`); toast('Ícone atualizado!'); } catch (err) { toast(err.message); }
+    });
+    picker.click();
+  };
   const parts = [
     h('h2', {}, 'Visão geral'),
+    h('div', { class: 'icon-editor' },
+      h('button', { class: 'icon-preview', disabled: !manage, title: manage ? 'Trocar ícone' : null, onclick: pickIcon }, serverIcon(d.server, 'xl'), manage ? h('span', { class: 'avatar-edit' }, '✏️') : null),
+      h('div', { class: 'icon-text' },
+        h('strong', {}, 'Ícone do servidor'),
+        h('span', { class: 'muted small' }, 'Aparece na barra da esquerda. Use uma imagem quadrada (mínimo 128×128).'),
+        manage ? h('div', { class: 'row-actions' },
+          h('button', { class: 'btn small', onclick: pickIcon }, 'Enviar imagem'),
+          d.server.iconUrl ? h('button', {
+            class: 'btn small danger-ghost',
+            onclick: async () => { try { await api(`/servers/${d.server.id}/icon`, { method: 'DELETE' }); } catch (err) { toast(err.message); } },
+          }, 'Remover') : null) : null)),
     h('label', { class: 'field' }, 'Nome do servidor', name),
   ];
   if (manage) {
@@ -85,23 +122,6 @@ function renderOverview() {
         } catch (err) { toast(err.message); } finally { e.currentTarget.disabled = false; }
       },
     }, 'Salvar nome'));
-  }
-
-  if (d.server.inviteCode) {
-    parts.push(h('div', { class: 'settings-block' },
-      h('h3', {}, 'Convite'),
-      h('p', { class: 'muted' }, 'Código atual: ', h('strong', {}, d.server.inviteCode)),
-      manage ? h('button', {
-        class: 'btn', onclick: () => confirmDialog({
-          title: 'Gerar novo convite',
-          text: 'O link/código atual vai parar de funcionar. Quem já entrou continua no servidor.',
-          okLabel: 'Gerar novo', danger: false,
-          onConfirm: async () => {
-            const { inviteCode } = await api(`/servers/${d.server.id}/invite`, { method: 'POST' });
-            toast(`Novo código: ${inviteCode}`);
-          },
-        }),
-      }, 'Gerar novo convite') : null));
   }
 
   if (isOwner()) {
@@ -166,16 +186,44 @@ function renderRoles() {
       },
     }, '+ Criar cargo'),
     roles.map((r) => h('button', {
-      class: `role-item${r.id === role.id ? ' active' : ''}`,
+      class: `role-item${r.id === role.id ? ' active' : ''}${!r.isDefault && roleManageable(r) ? ' draggable' : ''}`,
+      dataset: r.isDefault ? { roleId: String(r.id) } : { roleId: String(r.id), dragId: roleManageable(r) ? String(r.id) : '' },
       onclick: () => {
         if (ui.dirty && r.id !== role.id && !window.confirm('Descartar as alterações não salvas?')) return;
         selectRole(r);
         render();
       },
     },
+    !r.isDefault && roleManageable(r) ? h('span', { class: 'drag-grip', 'aria-hidden': 'true' }, '⠿') : null,
     h('i', { class: 'role-dot', style: `background:${r.color || 'var(--text-3)'}` }),
     h('span', { class: 'truncate' }, r.name),
-    h('span', { class: 'muted small' }, r.isDefault ? 'todos' : String(counts.get(r.id) || 0)))));
+    h('span', { class: 'muted small' }, r.isDefault ? 'todos' : String(counts.get(r.id) || 0)))),
+    h('p', { class: 'muted small role-hint' }, 'Arraste os cargos para mudar a ordem (no celular, segure e arraste).'));
+
+  // Arrastar para reordenar: só cargos abaixo do seu, e não dá para passar do @everyone.
+  sortable(list, {
+    handle: '.role-item.draggable',
+    targets: '.role-item',
+    canDrop: (dragEl, target, before) => {
+      const t = d.roles.find((x) => String(x.id) === target.dataset.roleId);
+      if (!t) return false;
+      if (t.isDefault) return before; // só acima do @everyone
+      const newPos = before ? t.position + 1 : t.position;
+      return newPos < myTop() || isOwner();
+    },
+    onDrop: async (dragEl, target, before) => {
+      const ids = roles.filter((r) => !r.isDefault).map((r) => r.id);
+      const moving = Number(dragEl.dataset.roleId);
+      const targetId = Number(target.dataset.roleId);
+      const from = ids.indexOf(moving);
+      ids.splice(from, 1);
+      const tRole = d.roles.find((x) => x.id === targetId);
+      let at = tRole.isDefault ? ids.length : ids.indexOf(targetId) + (before ? 0 : 1);
+      if (at < 0) at = ids.length;
+      ids.splice(at, 0, moving);
+      try { await api(`/servers/${d.server.id}/roles/order`, { method: 'PUT', body: { roleIds: ids } }); } catch (err) { toast(err.message); }
+    },
+  });
 
   return h('div', { class: 'settings-page roles-page' },
     h('h2', {}, 'Cargos'),
@@ -260,6 +308,69 @@ function roleEditor(role) {
       editable ? saveBtn : null));
 }
 
+// ---------------------------------------------------------------- Moderação (também usada pelo perfil)
+
+const TIMEOUTS = [[1, '1 minuto'], [5, '5 minutos'], [10, '10 minutos'], [60, '1 hora'], [24 * 60, '1 dia'], [7 * 24 * 60, '1 semana']];
+
+export function timeoutMenu(anchor, member) {
+  const d = state.detail;
+  const set = async (minutes) => {
+    try {
+      await api(`/servers/${d.server.id}/members/${member.id}/timeout`, { method: 'PUT', body: { minutes } });
+      toast(minutes ? `${member.displayName} está de castigo.` : `${member.displayName} saiu do castigo.`);
+    } catch (err) { toast(err.message); }
+  };
+  openMenu(anchor, [
+    ...(member.timeoutUntil ? [{ label: '✅  Tirar o castigo', onClick: () => set(0) }, { separator: true }] : []),
+    ...TIMEOUTS.map(([m, label]) => ({ label: `⏳  ${label}`, onClick: () => set(m) })),
+  ], { className: 'popover-menu' });
+}
+
+export function kickDialog(member) {
+  confirmDialog({
+    title: `Expulsar ${member.displayName}`,
+    text: `${member.displayName} vai sair do servidor, mas pode voltar se receber um convite.`,
+    okLabel: 'Expulsar',
+    onConfirm: () => api(`/servers/${state.detail.server.id}/members/${member.id}`, { method: 'DELETE' }),
+  });
+}
+
+export function banDialog(member) {
+  const reason = h('input', { maxlength: '300', placeholder: 'Motivo (opcional, aparece no registro)' });
+  const del = h('select', { class: 'select' },
+    h('option', { value: '0' }, 'Não apagar nada'),
+    h('option', { value: '1' }, 'Da última hora'),
+    h('option', { value: '24' }, 'Das últimas 24 horas'),
+    h('option', { value: '168' }, 'Dos últimos 7 dias'));
+  openDialog({
+    title: `Banir ${member.displayName}`,
+    text: `${member.displayName} sai do servidor e não consegue voltar, nem com convite (até alguém tirar o ban).`,
+    body: h('div', { class: 'stack' }, reason, h('label', { class: 'field' }, 'Apagar mensagens recentes', del)),
+    actions: [
+      { label: 'Cancelar' },
+      {
+        label: 'Banir', kind: 'danger', submit: true,
+        onClick: async () => {
+          await api(`/servers/${state.detail.server.id}/bans/${member.id}`, { method: 'PUT', body: { reason: reason.value, deleteMessagesHours: Number(del.value) } });
+          toast(`${member.displayName} foi banido.`);
+        },
+      },
+    ],
+  });
+}
+
+// Ações de moderação disponíveis para um membro (para menus).
+export function moderationItems(member) {
+  if (!state.detail || !canModerate(member)) return [];
+  const items = [];
+  if (can(P.MODERATE_MEMBERS)) items.push({ label: member.timeoutUntil ? '⏳  Castigo…' : '⏳  Castigar…', onClick: () => timeoutMenu(document.activeElement || document.body, member) });
+  if (can(P.KICK_MEMBERS)) items.push({ label: '👢  Expulsar', danger: true, onClick: () => kickDialog(member) });
+  if (can(P.BAN_MEMBERS)) items.push({ label: '🔨  Banir', danger: true, onClick: () => banDialog(member) });
+  return items;
+}
+
+const untilText = (iso) => `até ${fullTime(new Date(iso)).replace(/^Hoje às /, 'hoje às ').replace(/^Ontem às /, 'ontem às ')}`;
+
 // ---------------------------------------------------------------- Membros
 
 function renderMembersTab() {
@@ -289,11 +400,13 @@ function renderMembersTab() {
     const manageable = can(P.MANAGE_ROLES) && memberManageable(m);
     const roles = memberRoles(m);
     const missing = assignable.filter((r) => !m.roleIds.includes(r.id));
+    const mod = canModerate(m) && (can(P.KICK_MEMBERS) || can(P.BAN_MEMBERS) || can(P.MODERATE_MEMBERS));
     return h('div', { class: 'member-row' },
       avatar(m, { online: m.online ? presenceOf(m) : 'offline' }),
       h('div', { class: 'member-text' },
         h('strong', { class: 'truncate' }, m.displayName, isServerOwner ? ' 👑' : ''),
-        h('span', { class: 'muted small truncate' }, `@${m.username}`)),
+        h('span', { class: 'muted small truncate' }, `@${m.username}`),
+        m.timeoutUntil ? h('span', { class: 'timeout-tag' }, `⏳ castigo ${untilText(m.timeoutUntil)}`) : null),
       h('div', { class: 'role-chips' },
         roles.map((r) => h('span', { class: 'role-chip' },
           h('i', { style: `background:${r.color || 'var(--text-3)'}` }), r.name,
@@ -305,20 +418,217 @@ function renderMembersTab() {
           class: 'chip-add', title: 'Dar cargo',
           onclick: (e) => openMenu(e.currentTarget, missing.map((r) => ({ label: r.name, onClick: () => setRoles(m, [...m.roleIds, r.id]) }))),
         }, '+') : null),
-      can(P.KICK_MEMBERS) && !isServerOwner && m.id !== state.me.id && memberTop(m) < myTop()
-        ? h('button', {
-          class: 'btn small danger-ghost', onclick: () => confirmDialog({
-            title: `Expulsar ${m.displayName}`,
-            text: `${m.displayName} vai sair do servidor, mas pode voltar com um convite.`,
-            okLabel: 'Expulsar',
-            onConfirm: () => api(`/servers/${d.server.id}/members/${m.id}`, { method: 'DELETE' }),
-          }),
-        }, 'Expulsar')
-        : h('span', { class: 'kick-placeholder' }));
+      mod ? h('button', {
+        class: 'btn small', title: 'Moderar',
+        onclick: (e) => {
+          const anchor = e.currentTarget;
+          openMenu(anchor, [
+            can(P.MODERATE_MEMBERS) ? { label: m.timeoutUntil ? '⏳  Castigo…' : '⏳  Castigar…', onClick: () => timeoutMenu(anchor, m) } : null,
+            can(P.KICK_MEMBERS) ? { label: '👢  Expulsar', danger: true, onClick: () => kickDialog(m) } : null,
+            can(P.BAN_MEMBERS) ? { label: '🔨  Banir', danger: true, onClick: () => banDialog(m) } : null,
+          ], { align: 'end', className: 'popover-menu' });
+        },
+      }, 'Moderar ▾') : h('span', { class: 'kick-placeholder' }));
   });
 
   return h('div', { class: 'settings-page' },
     h('h2', {}, `Membros — ${d.members.length}`),
     search,
     h('div', { class: 'member-rows' }, rows.length ? rows : h('p', { class: 'muted' }, 'Ninguém encontrado.')));
+}
+
+// ---------------------------------------------------------------- Convites
+
+const AGES = [[1800, '30 minutos'], [3600, '1 hora'], [6 * 3600, '6 horas'], [12 * 3600, '12 horas'], [86400, '1 dia'], [7 * 86400, '7 dias'], [0, 'Nunca']];
+const USES = [[0, 'Sem limite'], [1, '1 uso'], [5, '5 usos'], [10, '10 usos'], [25, '25 usos'], [50, '50 usos'], [100, '100 usos']];
+
+export function inviteSummary(inv) {
+  const parts = [];
+  parts.push(inv.expiresAt ? `expira ${fullTime(new Date(inv.expiresAt)).replace(/^Hoje às /, 'hoje às ').replace(/^Ontem/, 'ontem')}` : 'nunca expira');
+  parts.push(inv.maxUses ? `${inv.uses}/${inv.maxUses} usos` : `${inv.uses} ${inv.uses === 1 ? 'uso' : 'usos'}`);
+  return parts.join(' · ');
+}
+
+// Janela "Convidar pessoas": cria (ou reaproveita) um link de 7 dias; dá para mudar as opções.
+export async function inviteDialog() {
+  const d = state.detail;
+  let inv;
+  try {
+    ({ invite: inv } = await api(`/servers/${d.server.id}/invites`, { method: 'POST', body: { reuse: true, maxAgeSeconds: 7 * 86400, maxUses: 0 } }));
+  } catch (err) { return toast(err.message); }
+  const field = h('input', { value: `${location.origin}/convite/${inv.code}`, readonly: true });
+  const info = h('p', { class: 'muted small' }, inviteSummary(inv));
+  const age = h('select', { class: 'select' }, AGES.map(([v, l]) => h('option', { value: String(v), selected: v === 7 * 86400 }, l)));
+  const uses = h('select', { class: 'select' }, USES.map(([v, l]) => h('option', { value: String(v) }, l)));
+  const options = h('div', { class: 'invite-options', hidden: true },
+    h('label', { class: 'field' }, 'Expira depois de', age),
+    h('label', { class: 'field' }, 'Número máximo de usos', uses),
+    h('button', {
+      type: 'button', class: 'btn small primary',
+      onclick: async () => {
+        try {
+          const { invite } = await api(`/servers/${d.server.id}/invites`, { method: 'POST', body: { maxAgeSeconds: Number(age.value), maxUses: Number(uses.value) } });
+          field.value = `${location.origin}/convite/${invite.code}`;
+          info.textContent = inviteSummary(invite);
+          options.hidden = true;
+          toast('Link novo criado!');
+        } catch (err) { toast(err.message); }
+      },
+    }, 'Gerar link novo'));
+  openDialog({
+    title: `Convide amigos para ${d.server.name}`,
+    text: 'Quem abrir o link (ou colar no botão ↪) entra no servidor.',
+    body: h('div', {}, field, info,
+      h('button', { type: 'button', class: 'link small', onclick: () => { options.hidden = !options.hidden; } }, '⚙️ Mudar validade e limite de usos'),
+      options),
+    actions: [
+      { label: 'Fechar' },
+      {
+        label: 'Copiar link', kind: 'primary', submit: true,
+        onClick: async () => {
+          if (await copyText(field.value, field)) toast('Link copiado!');
+          else throw new Error('Não deu para copiar automaticamente. Selecione e copie com Ctrl+C.');
+        },
+      },
+    ],
+  });
+}
+
+function renderInvites() {
+  const d = state.detail;
+  const page = h('div', { class: 'settings-page' },
+    h('h2', {}, 'Convites'),
+    h('p', { class: 'muted' }, can(P.MANAGE_SERVER) ? 'Todos os convites que ainda valem. Apagar um convite faz o link parar de funcionar.' : 'Os seus convites que ainda valem.'),
+    h('div', { class: 'row-actions' }, h('button', { class: 'btn primary small', onclick: () => inviteDialog() }, '+ Criar convite')));
+  const list = h('div', { class: 'invite-list' }, h('p', { class: 'muted' }, 'Carregando…'));
+  page.append(list);
+  api(`/servers/${d.server.id}/invites`).then(({ invites }) => {
+    if (!ui || ui.tab !== 'invites') return;
+    if (!invites.length) return list.replaceChildren(h('p', { class: 'muted' }, 'Nenhum convite ativo.'));
+    list.replaceChildren(...invites.map((inv) => h('div', { class: 'invite-row' },
+      h('div', { class: 'invite-main' },
+        h('code', {}, inv.code),
+        h('span', { class: 'muted small' }, `${inv.createdBy ? `por ${inv.createdBy.displayName} · ` : ''}${inviteSummary(inv)}`)),
+      h('button', {
+        class: 'icon-btn small', title: 'Copiar link',
+        onclick: async () => { if (await copyText(`${location.origin}/convite/${inv.code}`)) toast('Link copiado!'); },
+      }, '📋'),
+      (inv.createdBy && inv.createdBy.id === state.me.id) || can(P.MANAGE_SERVER) ? h('button', {
+        class: 'btn small danger-ghost',
+        onclick: async () => { try { await api(`/invites/${inv.code}`, { method: 'DELETE' }); toast('Convite apagado.'); render(); } catch (err) { toast(err.message); } },
+      }, 'Apagar') : null)));
+  }).catch((err) => list.replaceChildren(h('p', { class: 'form-error' }, err.message)));
+  return page;
+}
+
+// ---------------------------------------------------------------- Banimentos
+
+function renderBans() {
+  const d = state.detail;
+  const list = h('div', { class: 'member-rows' }, h('p', { class: 'muted' }, 'Carregando…'));
+  api(`/servers/${d.server.id}/bans`).then(({ bans }) => {
+    if (!ui || ui.tab !== 'bans') return;
+    if (!bans.length) return list.replaceChildren(h('p', { class: 'muted' }, 'Ninguém banido. 😇'));
+    list.replaceChildren(...bans.map((b) => h('div', { class: 'member-row' },
+      avatar(b.user),
+      h('div', { class: 'member-text wide' },
+        h('strong', { class: 'truncate' }, b.user.displayName),
+        h('span', { class: 'muted small truncate' }, `@${b.user.username} · ${fullTime(new Date(b.createdAt))}${b.bannedBy ? ` · por ${b.bannedBy}` : ''}`),
+        b.reason ? h('span', { class: 'small' }, `Motivo: ${b.reason}`) : null),
+      h('button', {
+        class: 'btn small',
+        onclick: () => confirmDialog({
+          title: `Tirar o ban de ${b.user.displayName}?`,
+          text: 'A pessoa poderá entrar de novo com um convite.',
+          okLabel: 'Tirar ban', danger: false,
+          onConfirm: async () => { await api(`/servers/${d.server.id}/bans/${b.user.id}`, { method: 'DELETE' }); render(); },
+        }),
+      }, 'Tirar ban'))));
+  }).catch((err) => list.replaceChildren(h('p', { class: 'form-error' }, err.message)));
+  return h('div', { class: 'settings-page' }, h('h2', {}, 'Banimentos'), list);
+}
+
+// ---------------------------------------------------------------- Registro de auditoria
+
+const PERM_NAMES = new Map(PERMISSION_INFO.map(([flag, label]) => [flag, label]));
+function permDiff(from, to) {
+  const added = [];
+  const removed = [];
+  for (const [flag, label] of PERM_NAMES) {
+    if ((to & flag) && !(from & flag)) added.push(label);
+    if (!(to & flag) && (from & flag)) removed.push(label);
+  }
+  return [added.length ? `+ ${added.join(', ')}` : '', removed.length ? `− ${removed.join(', ')}` : ''].filter(Boolean).join('; ');
+}
+const mins = (m) => (m >= 1440 ? `${Math.round(m / 1440)} dia(s)` : m >= 60 ? `${Math.round(m / 60)} hora(s)` : `${m} min`);
+
+function describe(e) {
+  const t = e.targetName ? `"${e.targetName}"` : '';
+  const who = e.targetName || 'alguém';
+  const x = e.details || {};
+  switch (e.action) {
+    case 'member_kick': return [`expulsou ${who}`, x.reason ? `Motivo: ${x.reason}` : ''];
+    case 'member_ban': return [`baniu ${who}`, [x.reason ? `Motivo: ${x.reason}` : '', x.deletedHours ? 'mensagens recentes apagadas' : ''].filter(Boolean).join(' · ')];
+    case 'member_unban': return [`tirou o ban de ${who}`];
+    case 'member_timeout': return [`castigou ${who} por ${mins(x.minutes)}`, x.reason ? `Motivo: ${x.reason}` : ''];
+    case 'member_timeout_remove': return [`tirou o castigo de ${who}`];
+    case 'member_roles': return [`mudou os cargos de ${who}`, [x.added && x.added.length ? `+ ${x.added.join(', ')}` : '', x.removed && x.removed.length ? `− ${x.removed.join(', ')}` : ''].filter(Boolean).join('; ')];
+    case 'role_create': return [`criou o cargo ${t}`];
+    case 'role_update': return [`editou o cargo ${t}`, [x.name ? `nome: ${x.name.from} → ${x.name.to}` : '', x.permissions ? permDiff(x.permissions.from, x.permissions.to) : '', 'color' in x ? 'cor mudou' : ''].filter(Boolean).join(' · ')];
+    case 'role_delete': return [`apagou o cargo ${t}`];
+    case 'role_reorder': return ['reordenou os cargos'];
+    case 'channel_create': return [`criou o canal ${t}`, x.private ? 'privado' : ''];
+    case 'channel_update': return [`editou o canal ${t}`, [x.name ? `nome: ${x.name.from} → ${x.name.to}` : '', 'private' in x ? (x.private ? 'ficou privado' : 'ficou público') : '', 'roles' in x ? 'cargos com acesso mudaram' : ''].filter(Boolean).join(' · ')];
+    case 'channel_delete': return [`apagou o canal ${t}`];
+    case 'category_create': return [`criou a categoria ${t}`];
+    case 'category_update': return [`editou a categoria ${t}`];
+    case 'category_delete': return [`apagou a categoria ${t}`];
+    case 'server_update': return ['renomeou o servidor', x.from ? `${x.from} → ${x.to}` : ''];
+    case 'server_icon': return ['mudou o ícone do servidor'];
+    case 'invite_create': return ['criou um convite', [x.code, x.maxUses ? `${x.maxUses} usos` : '', x.maxAgeSeconds ? `vale ${mins(Math.round(x.maxAgeSeconds / 60))}` : 'sem validade'].filter(Boolean).join(' · ')];
+    case 'invite_delete': return ['apagou um convite', x.code || ''];
+    case 'message_delete': return [`apagou uma mensagem de ${who}`, [x.channel ? `#${x.channel}` : '', x.preview ? `"${x.preview}"` : ''].filter(Boolean).join(' · ')];
+    case 'bot_add': return [`adicionou o bot ${who}`];
+    default: return [e.action];
+  }
+}
+
+const AUDIT_ICONS = {
+  member_kick: '👢', member_ban: '🔨', member_unban: '🕊️', member_timeout: '⏳', member_timeout_remove: '✅', member_roles: '🏷️',
+  role_create: '🏷️', role_update: '🏷️', role_delete: '🏷️', role_reorder: '↕️', channel_create: '#️⃣', channel_update: '#️⃣',
+  channel_delete: '#️⃣', category_create: '📁', category_update: '📁', category_delete: '📁', server_update: '⚙️', server_icon: '🖼️',
+  invite_create: '✉️', invite_delete: '✉️', message_delete: '🗑️', bot_add: '🤖',
+};
+
+function renderAudit() {
+  const d = state.detail;
+  const list = h('div', { class: 'audit-list' });
+  const more = h('button', { class: 'btn small', hidden: true }, 'Carregar mais');
+  let last = null;
+  const load = async () => {
+    more.disabled = true;
+    try {
+      const { entries, hasMore } = await api(`/servers/${d.server.id}/audit${last ? `?before=${last}` : ''}`);
+      if (!ui || ui.tab !== 'audit') return;
+      if (!last && !entries.length) list.append(h('p', { class: 'muted' }, 'Nada registrado ainda.'));
+      entries.forEach((e) => {
+        const [main, sub] = describe(e);
+        list.append(h('div', { class: 'audit-row' },
+          h('span', { class: 'audit-icon' }, AUDIT_ICONS[e.action] || '•'),
+          e.actor ? avatar(e.actor, { size: 'sm' }) : null,
+          h('div', { class: 'audit-text' },
+            h('div', {}, h('strong', {}, e.actor ? e.actor.displayName : 'Alguém'), ` ${main}`),
+            sub ? h('div', { class: 'muted small' }, sub) : null,
+            h('div', { class: 'muted small' }, fullTime(new Date(e.createdAt))))));
+      });
+      last = entries.length ? entries[entries.length - 1].id : last;
+      more.hidden = !hasMore;
+    } catch (err) { toast(err.message); } finally { more.disabled = false; }
+  };
+  more.addEventListener('click', load);
+  load();
+  return h('div', { class: 'settings-page' },
+    h('h2', {}, 'Registro de auditoria'),
+    h('p', { class: 'muted' }, 'Quem fez o quê no servidor (expulsões, bans, castigos, cargos, canais, convites…).'),
+    list, more);
 }

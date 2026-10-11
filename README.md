@@ -42,15 +42,22 @@ Chat em tempo real no estilo de servidores e canais. Projeto pessoal, construíd
 - **Backup diário** automático pelo Jenkins (banco + anexos), com restauração em um comando
 - **Acesso pela internet** com domínio + túnel da Cloudflare ([docs/acesso-externo.md](docs/acesso-externo.md)) e código de cadastro opcional
 
-**Fase 5A**
-- **App no celular e no PC** (PWA): ícone na tela inicial, abre em tela cheia
-- **Notificações push** com o Nexo fechado (DMs, menções e respostas), criptografadas de ponta a ponta até o aparelho
-- **Formatação**: `**negrito**`, `*itálico*`, `__sublinhado__`, `~~riscado~~`, `||spoiler||`, `` `código` ``, blocos de código, `> citação`, `# títulos` e listas
-- **Prévia de links** (título, descrição, imagem; vídeos do YouTube tocam na conversa). Imagens passam pelo servidor
-- **Mensagem de voz** 🎤 com ondinha e player
-- **Enquetes** 📊 com uma ou várias respostas, duração e resultado em tempo real
-- **Conta**: trocar senha, **verificação em duas etapas** (app autenticador + códigos de recuperação), sair de todos os aparelhos, excluir conta, transferir servidor
-- **Tema claro/escuro/automático** e cor de destaque
+**Fase 5**
+- **App no celular/computador (PWA)** 📲: instale pelo navegador (Android/PC: "Instalar app"; iPhone: Compartilhar → "Adicionar à Tela de Início"). Abre em tela cheia, com ícone próprio
+- **Notificações push** 🔔: avisam de mensagens diretas, menções, respostas e ligações mesmo com o Nexo fechado (precisa do endereço com HTTPS de verdade, ex.: o seu domínio; no iPhone, só com o app instalado). Ligue em ⚙️ → *Notificações e app*. As chaves são criadas sozinhas, sem mexer no `.env`
+- **Formatação**: `**negrito**`, `*itálico*`, `__sublinhado__`, `~~riscado~~`, `` `código` ``, blocos ```` ``` ````, `> citação` e `||spoiler||` (atalhos Ctrl+B / Ctrl+I / Ctrl+U)
+- **Prévias de link** 🔗: título, descrição e imagem dos sites; vídeos do YouTube tocam dentro do Nexo. Link entre `<sinais>` não ganha prévia. As imagens passam pelo servidor (os sites não veem o IP de quem lê) e endereços da rede local são bloqueados
+- **Mensagens de voz** 🎤: segure o microfone para gravar e solte para enviar (um toque rápido grava com botões Cancelar/Enviar). Player com ondinha e velocidade 1×/1,5×/2×
+- **Enquetes** 📊: botão ＋ → *Criar enquete* (até 10 opções, uma ou várias respostas, prazo de 1 hora a 1 semana)
+- **Categorias** 📁 e **canais privados** 🔒 (só alguns cargos veem — as threads deles também)
+- **Arrastar para reordenar** canais, categorias e cargos (no celular: segure e arraste)
+- **Moderação**: **banir** (com opção de apagar mensagens recentes), **castigo** (só ler por 1 min a 1 semana) e **registro de auditoria**. Novas permissões: *Banir membros*, *Castigar membros* e *Ver registro de auditoria*
+- **Convites com validade e limite de usos** (e lista de convites ativos para apagar)
+- **Ícone do servidor** e **"Sobre mim"** no perfil
+- **Chamadas de voz e vídeo nas DMs** 📞 (tocam no outro aparelho com Atender/Recusar) e **grupos de DM** (3 a 10 pessoas, com nome)
+- **Volume de cada pessoa**, **aperte para falar** (com tecla escolhida e botão "segure para falar" no celular) e **supressão de ruído**
+- **Segurança da conta**: trocar senha, **verificação em duas etapas** (app autenticador + códigos de recuperação), **sair de todos os aparelhos** e **apagar conta**
+- **Tema claro** ☀️ e **cor de destaque** (⚙️ → *Aparência*)
 
 ## Como rodar (no servidor Ubuntu com Docker)
 
@@ -118,12 +125,13 @@ Para programar o seu: edite `examples/bot-exemplo/index.js` (cada comando é uma
 | GET | `/api/servers` | Servidores onde o bot está |
 | GET | `/api/servers/:id` | Canais e membros |
 | GET | `/api/channels/:id/messages` | Histórico |
-| POST | `/api/channels/:id/messages` | Envia `{ content }` |
+| POST | `/api/channels/:id/messages` | Envia `{ content }` (ou uma enquete: `{ content, poll: { question, options: ["a","b"], multiple, hours } }`) |
 | PATCH/DELETE | `/api/messages/:id` | Edita/apaga as próprias mensagens |
 | PUT/DELETE | `/api/messages/:id/reactions/:emoji` | Reage |
 
 Tempo real: conecte no Socket.IO com `auth: { token: "Bot <token>" }` e escute `message:new`,
-`message:updated`, `message:deleted`, `message:reactions`, `presence`.
+`message:updated`, `message:deleted`, `message:reactions`, `message:poll`, `presence`.
+O texto das mensagens pode usar a mesma formatação das pessoas (`**negrito**`, `` `código` ``…).
 Bots não podem criar servidores, entrar por convite, ter amigos ou entrar em canais de voz.
 Limite: 5 mensagens a cada 5 segundos (acima disso a API responde 429).
 
@@ -192,9 +200,7 @@ nexo/
   O link de um anexo é um código aleatório impossível de adivinhar, mas quem tiver o link consegue abrir
   (igual ao Discord).
 - O Jenkins tem controle do Docker do servidor: use senha forte e não exponha o Jenkins na internet.
-- Login bloqueia por 15 minutos depois de 10 senhas erradas (por IP + usuário), contando também códigos de 2 etapas errados.
-- Prévia de links: o servidor só visita endereços públicos (recusa IPs da rede de casa/Docker), segue no máximo 4 redirecionamentos e lê no máximo 1 MB.
-- Notificações push: o conteúdo vai criptografado (RFC 8291); as chaves são geradas sozinhas e guardadas no banco.
+- Login bloqueia por 15 minutos depois de 10 senhas erradas (por IP + usuário).
 - Na internet, use `REGISTRATION_CODE` no `.env` para só quem tem o código conseguir criar conta.
 - Fotos de perfil: o servidor confere que o arquivo é mesmo PNG/JPG/GIF/WEBP (pelos bytes) e limita a 2 MB.
 

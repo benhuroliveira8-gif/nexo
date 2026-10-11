@@ -13,8 +13,10 @@ module.exports = function voiceRoutes(r) {
     }
     const channelId = parseId(req.params.channelId);
     const access = channelId && await channelAccess(channelId, req.userId);
-    if (!access || access.kind !== 'voice') fail(404, 'Canal de voz não encontrado.');
-    if (!access.can(P.CONNECT)) fail(403, 'Você não tem permissão para entrar neste canal de voz.');
+    if (!access || (access.kind !== 'voice' && access.kind !== 'dm')) fail(404, 'Canal de voz não encontrado.');
+    if (!access.can(P.CONNECT)) {
+      fail(403, access.timeoutUntil ? 'Você está de castigo e não pode entrar na voz agora.' : 'Você não tem permissão para entrar neste canal de voz.');
+    }
 
     const { rows } = await db.query('SELECT id, username, display_name, is_bot, avatar_id, status, status_text FROM users WHERE id = $1', [req.userId]);
     const user = S.user(rows[0]);

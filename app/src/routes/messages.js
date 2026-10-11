@@ -3,7 +3,8 @@ const db = require('../db');
 const events = require('../events');
 const M = require('../messages');
 const S = require('../serializers');
-const { P, channelAccess, memberContext } = require('../permissions');
+const { P, channelAccess, memberContext, visibleChannelIds } = require('../permissions');
+const { audit } = require('../audit');
 const { wrap, fail, parseId, parseBigId } = require('./util');
 
 const PAGE_SIZE = 50;
@@ -75,7 +76,7 @@ module.exports = function messageRoutes(r) {
 
   r.patch('/messages/:messageId', wrap(async (req, res) => {
     const { row, access } = await messageWithAccess(req);
-    if (row.author_id !== req.userId) fail(403, 'Você só pode editar as suas mensagens.');
+    if (row.author_id !== req.userId || row.kind !== 'default') fail(403, 'Você só pode editar as suas mensagens.');
     try {
       const message = await M.editMessage({ access, messageRow: row, content: req.body.content });
       events.emitTo(access.rooms, 'message:updated', message);
@@ -93,44 +94,16 @@ module.exports = function messageRoutes(r) {
       fail(403, 'Você não pode apagar essa mensagem.');
     }
     await M.deleteMessage(row.id);
+    if (!mine && access.serverId) {
+      const a = await db.query('SELECT display_name FROM users WHERE id = $1', [row.author_id]);
+      audit(access.serverId, req.userId, 'message_delete', {
+        targetId: row.author_id, targetName: a.rows[0] ? a.rows[0].display_name : null,
+        details: { channel: access.channel.name, preview: String(row.content || '').slice(0, 100) },
+      });
+    }
     events.emitTo(access.rooms, 'message:deleted', { id: String(row.id), channelId: row.channel_id });
     M.refreshThreadParent(access.channel).catch(() => {});
     res.json({ ok: true });
-  }));
-
-  // ---------- Enquetes
-  // Votar: manda a lista de opções escolhidas (lista vazia = tirar o voto).
-  r.put('/messages/:messageId/poll', wrap(async (req, res) => {
-    const { row, access } = await messageWithAccess(req);
-    const poll = await M.pollOf(row.id);
-    if (!poll) fail(404, 'Essa mensagem não tem enquete.');
-    if (poll.ended) fail(400, 'Essa enquete já terminou.');
-    const valid = new Set(poll.options.map((o) => o.id));
-    const chosen = [...new Set((Array.isArray(req.body.optionIds) ? req.body.optionIds : []).map(Number))];
-    if (chosen.some((id) => !valid.has(id))) fail(400, 'Opção inválida.');
-    if (!poll.multi && chosen.length > 1) fail(400, 'Essa enquete aceita só uma resposta.');
-    await db.transaction(async (c) => {
-      await c.query('DELETE FROM poll_votes WHERE message_id = $1 AND user_id = $2', [row.id, req.userId]);
-      for (const id of chosen) {
-        await c.query('INSERT INTO poll_votes (option_id, message_id, user_id) VALUES ($1, $2, $3)', [id, row.id, req.userId]);
-      }
-    });
-    const updated = await M.pollOf(row.id);
-    events.emitTo(access.rooms, 'message:poll', { id: String(row.id), channelId: row.channel_id, poll: updated });
-    res.json({ poll: updated });
-  }));
-
-  // Encerrar antes da hora: quem criou ou quem gerencia mensagens.
-  r.post('/messages/:messageId/poll/end', wrap(async (req, res) => {
-    const { row, access } = await messageWithAccess(req);
-    const poll = await M.pollOf(row.id);
-    if (!poll) fail(404, 'Essa mensagem não tem enquete.');
-    const allowed = row.author_id === req.userId || (M.isServerText(access.kind) && access.can(P.MANAGE_MESSAGES));
-    if (!allowed) fail(403, 'Só quem criou a enquete pode encerrá-la.');
-    if (!poll.ended) await db.query('UPDATE polls SET ends_at = now() WHERE message_id = $1', [row.id]);
-    const updated = await M.pollOf(row.id);
-    events.emitTo(access.rooms, 'message:poll', { id: String(row.id), channelId: row.channel_id, poll: updated });
-    res.json({ poll: updated });
   }));
 
   // ---------- Mensagens fixadas
@@ -211,8 +184,9 @@ module.exports = function messageRoutes(r) {
       const serverId = parseId(req.query.serverId);
       const ctx = serverId && await memberContext(serverId, req.userId);
       if (!ctx) fail(404, 'Servidor não encontrado.');
+      const visible = new Set(await visibleChannelIds(serverId, req.userId, ctx.isAdmin));
       const { rows } = await db.query("SELECT id FROM channels WHERE server_id = $1 AND kind IN ('text', 'thread')", [serverId]);
-      channelIds = rows.map((c) => c.id);
+      channelIds = rows.map((c) => c.id).filter((id) => visible.has(id));
     } else {
       const { rows } = await db.query('SELECT channel_id AS id FROM dm_members WHERE user_id = $1', [req.userId]);
       channelIds = rows.map((c) => c.id);
@@ -235,6 +209,43 @@ module.exports = function messageRoutes(r) {
     const channelInfo = new Map(names.rows.map((c) => [c.id, { id: c.id, name: c.name, kind: c.kind }]));
     const messages = (await M.hydrate(found.rows)).map((m) => ({ ...m, channel: channelInfo.get(m.channelId) || null }));
     res.json({ messages, total: total.rows[0].n, hasMore: found.rows.length === SEARCH_PAGE });
+  }));
+
+  // ---------- Enquetes: PUT com { options: [índices] } define o seu voto ([] tira o voto).
+  r.put('/messages/:messageId/poll', wrap(async (req, res) => {
+    const { row, access } = await messageWithAccess(req);
+    const p = await db.query('SELECT * FROM polls WHERE message_id = $1', [row.id]);
+    const poll = p.rows[0];
+    if (!poll) fail(404, 'Essa mensagem não tem enquete.');
+    if (poll.ends_at && new Date(poll.ends_at) <= new Date()) fail(400, 'Essa enquete já terminou.');
+    if (access.timeoutUntil && !access.isAdmin) fail(403, 'Você está de castigo e não pode votar agora.');
+    const wanted = [...new Set((Array.isArray(req.body.options) ? req.body.options : []).map(Number))];
+    if (wanted.some((i) => !Number.isInteger(i) || i < 0 || i >= poll.options.length)) fail(400, 'Opção inválida.');
+    if (!poll.multiple && wanted.length > 1) fail(400, 'Essa enquete aceita só uma opção.');
+    await db.transaction(async (c) => {
+      await c.query('DELETE FROM poll_votes WHERE message_id = $1 AND user_id = $2', [row.id, req.userId]);
+      for (const i of wanted) {
+        await c.query('INSERT INTO poll_votes (message_id, option_index, user_id) VALUES ($1, $2, $3)', [row.id, i, req.userId]);
+      }
+    });
+    const result = await M.pollOf(row.id);
+    events.emitTo(access.rooms, 'message:poll', { id: String(row.id), channelId: row.channel_id, poll: result });
+    res.json({ poll: result });
+  }));
+
+  // Encerrar a enquete antes da hora (quem criou ou quem gerencia mensagens).
+  r.post('/messages/:messageId/poll/end', wrap(async (req, res) => {
+    const { row, access } = await messageWithAccess(req);
+    const mine = row.author_id === req.userId;
+    if (!mine && !(M.isServerText(access.kind) && access.can(P.MANAGE_MESSAGES))) fail(403, 'Você não pode encerrar essa enquete.');
+    const { rowCount } = await db.query(
+      'UPDATE polls SET ends_at = now() WHERE message_id = $1 AND (ends_at IS NULL OR ends_at > now())',
+      [row.id],
+    );
+    if (!rowCount) fail(400, 'Essa enquete já terminou.');
+    const result = await M.pollOf(row.id);
+    events.emitTo(access.rooms, 'message:poll', { id: String(row.id), channelId: row.channel_id, poll: result });
+    res.json({ poll: result });
   }));
 
   // Reagir: PUT adiciona a sua reação, DELETE tira.

@@ -15,14 +15,15 @@ const me = (row) => ({
   ...user(row),
   status: row.status || 'online',
   statusText: row.status_text || null,
-  twoFactor: !!row.two_factor,
+  about: row.about || null,
+  twoFactor: !!row.totp_enabled,
 });
 
-const server = (row, { showInvite = true } = {}) => ({
+const server = (row) => ({
   id: row.id,
   name: row.name,
   ownerId: row.owner_id,
-  inviteCode: showInvite ? row.invite_code : null,
+  iconUrl: avatarUrl(row.icon_id),
 });
 
 const channel = (row) => ({
@@ -31,6 +32,8 @@ const channel = (row) => ({
   name: row.name,
   position: row.position,
   kind: row.kind || 'text',
+  categoryId: row.category_id || null,
+  private: !!row.private,
   parentChannelId: row.parent_channel_id || null,
   parentMessageId: row.parent_message_id ? String(row.parent_message_id) : null,
   createdBy: row.created_by || null,
@@ -46,8 +49,7 @@ const role = (row) => ({
 });
 
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
-const MEDIA_TYPES = new Set([...IMAGE_TYPES, 'video/mp4', 'video/webm', 'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm',
-  'audio/mp4', 'audio/aac', 'audio/x-m4a']);
+const MEDIA_TYPES = new Set([...IMAGE_TYPES, 'video/mp4', 'video/webm', 'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm', 'audio/mp4']);
 
 const attachment = (row) => ({
   id: row.id,
@@ -59,8 +61,7 @@ const attachment = (row) => ({
     : row.content_type.startsWith('video/') && MEDIA_TYPES.has(row.content_type) ? 'video'
     : row.content_type.startsWith('audio/') && MEDIA_TYPES.has(row.content_type) ? 'audio'
     : 'file',
-  // Mensagem de voz: duração e a "ondinha" (64 barrinhas de 0 a 255, em base64).
-  voice: row.duration_ms != null ? { durationMs: row.duration_ms, waveform: row.waveform || null } : null,
+  ...(row.is_voice ? { isVoice: true, duration: row.duration || 0, waveform: row.waveform || null } : {}),
 });
 
 // Espera colunas da mensagem + author_username/author_display_name (via JOIN).
@@ -74,10 +75,11 @@ const message = (row, extras = {}) => ({
   editedAt: row.edited_at || null,
   mentionEveryone: !!row.mention_everyone,
   pinnedAt: row.pinned_at || null,
+  kind: row.kind || 'default',
+  embeds: extras.embeds || [],
+  poll: extras.poll || null,
   replyTo: extras.replyTo || null,
   thread: extras.thread || null,
-  poll: extras.poll || null,
-  embeds: Array.isArray(row.embeds) ? row.embeds : [],
   mentions: extras.mentions || [],
   attachments: (extras.attachments || []).map(attachment),
   reactions: extras.reactions || [],

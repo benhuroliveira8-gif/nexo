@@ -4,24 +4,23 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Nexo</title>
-  <meta name="theme-color" content="#161920" />
-  <link rel="manifest" href="/manifest.webmanifest" />
-  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+  <meta name="theme-color" content="#0f1115" />
+  <meta name="description" content="Conversas, voz e vídeo com seus amigos." />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-title" content="Nexo" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Nexo" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png" />
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
   <script>
-    // Aplica tema e cor antes de desenhar (o resto fica em js/theme.js).
+    // Aplica o tema salvo antes de desenhar a página (evita "piscar" no tema errado).
     try {
       var t = localStorage.getItem('nexo.theme') || 'dark';
-      if (t === 'auto') t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      if (t === 'system') t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
       document.documentElement.dataset.theme = t;
-      var a = localStorage.getItem('nexo.accent');
-      if (a && /^#[0-9a-f]{6}$/i.test(a)) document.documentElement.style.setProperty('--accent', a);
-    } catch (e) {}
+    } catch (e) { document.documentElement.dataset.theme = 'dark'; }
   </script>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23ff7a45'/%3E%3Ctext x='16' y='22' font-family='Arial' font-weight='800' font-size='17' text-anchor='middle' fill='%231a0d06'%3EN%3C/text%3E%3C/svg%3E" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/styles.css" />
@@ -49,13 +48,14 @@
         <p class="form-error" id="auth-error" role="alert"></p>
         <button class="btn primary" type="submit" id="auth-submit">Entrar</button>
       </form>
-      <form id="auth-code-form" autocomplete="off" hidden>
-        <label>Código de 6 dígitos (ou de recuperação)
-          <input name="code" required maxlength="12" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" placeholder="123456" />
+      <form id="twofa-form" class="twofa-form" hidden autocomplete="off">
+        <label>Código de verificação
+          <input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="11" required placeholder="123 456" />
         </label>
-        <p class="form-error" id="auth-code-error" role="alert"></p>
-        <button class="btn primary" type="submit" id="auth-code-submit">Confirmar</button>
-        <button class="link back-link" type="button" id="auth-code-back">← Voltar</button>
+        <p class="muted small">Perdeu o celular? Digite um dos seus códigos de recuperação (ex.: a1b2c-3d4e5).</p>
+        <p class="form-error" id="twofa-error" role="alert"></p>
+        <button class="btn primary" type="submit" id="twofa-submit">Confirmar</button>
+        <button class="link" type="button" id="twofa-back">← Voltar</button>
       </form>
       <p class="auth-switch">
         <span id="auth-switch-text">Não tem conta?</span>
@@ -89,7 +89,7 @@
           </span>
         </button>
         <button class="icon-btn" id="btn-sound" title="Som de notificação">🔔</button>
-        <button class="icon-btn" id="btn-logout" title="Sair da conta">Sair</button>
+        <button class="icon-btn gear" id="btn-settings" title="Configurações do usuário">⚙️</button>
       </footer>
     </aside>
 
@@ -98,6 +98,7 @@
         <button class="icon-btn mobile-only" id="btn-toggle-sidebar" title="Canais">☰</button>
         <div class="chat-title" id="chat-title"></div>
         <span class="conn-status" id="conn-status" hidden>Reconectando…</span>
+        <span class="header-actions" id="header-actions"></span>
         <button class="icon-btn" id="btn-pins" title="Mensagens fixadas" hidden>📌</button>
         <div class="search-box">
           <input type="search" id="search-input" placeholder="Buscar" maxlength="200" autocomplete="off" aria-label="Buscar mensagens" />
@@ -106,6 +107,7 @@
       </header>
 
       <div class="main-body">
+        <div class="voice-stage call-stage" id="call-stage" hidden></div>
         <div class="messages" id="messages"></div>
         <div class="friends-page" id="friends-page" hidden></div>
         <div class="voice-stage" id="voice-stage" hidden></div>
@@ -117,13 +119,13 @@
         <div class="autocomplete" id="autocomplete" hidden></div>
         <div class="uploads" id="uploads" hidden></div>
         <div class="reply-bar" id="reply-bar" hidden></div>
-        <div class="recorder" id="recorder" hidden></div>
+        <div class="rec-bar" id="rec-bar" hidden></div>
         <form class="composer" id="composer">
-          <button type="button" class="composer-btn" id="btn-attach" title="Anexar arquivos">＋</button>
+          <button type="button" class="composer-btn" id="btn-attach" title="Arquivo, enquete ou áudio">＋</button>
           <input type="file" id="file-input" multiple hidden />
           <textarea id="composer-input" rows="1" maxlength="4000" placeholder="Mensagem"></textarea>
           <button type="button" class="composer-btn" id="btn-emoji" title="Emojis">😊</button>
-          <button type="button" class="composer-btn" id="btn-voice" title="Gravar mensagem de voz">🎤</button>
+          <button type="button" class="composer-btn mic" id="btn-mic" title="Segure para gravar um áudio (ou toque uma vez)" hidden>🎤</button>
           <button class="btn primary send" type="submit">Enviar</button>
         </form>
       </div>
@@ -137,6 +139,7 @@
   </div>
 
   <div class="toast" id="toast" role="status"></div>
+  <div class="incoming-calls" id="incoming-calls" aria-live="assertive"></div>
   <!-- O áudio de quem está na voz toca por aqui (invisível). -->
   <div id="voice-audio" hidden></div>
 

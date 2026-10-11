@@ -7,6 +7,7 @@ const db = require('./db');
 const files = require('./files');
 const events = require('./events');
 const buildApi = require('./routes');
+const previews = require('./linkpreview');
 const setupRealtime = require('./realtime');
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -25,10 +26,15 @@ app.use('/api', buildApi());
 app.get('/files/:id', files.serveFile);
 app.get('/files/:id/:name', files.serveFile);
 app.get('/avatars/:file', files.serveAvatar);
-// Imagens das prévias de link passam pelo servidor (o site do link não vê o IP de quem lê).
-app.get('/embed-img', require('./linkpreview').serveImage);
-// O "service worker" precisa sempre da versão mais nova (notificações e app no celular).
-app.get('/sw.js', (req, res, next) => { res.set('Cache-Control', 'no-cache'); next(); });
+// Imagens das prévias de link (passam pelo Nexo; o endereço é assinado).
+app.get('/link-image/:sig/:data', previews.serveImage);
+
+// App instalável (PWA): o "service worker" precisa vir da raiz e nunca ficar velho no cache.
+app.get('/sw.js', (req, res) => {
+  res.set({ 'Cache-Control': 'no-cache', 'Service-Worker-Allowed': '/' });
+  res.type('text/javascript');
+  res.sendFile(path.join(__dirname, '..', 'public', 'sw.js'));
+});
 
 // Biblioteca de voz/vídeo do navegador (livekit-client), servida daqui mesmo.
 function findLivekitClient() {
@@ -78,6 +84,7 @@ setupRealtime(io);
 db.init()
   .then(() => {
     files.startCleanup();
+    previews.startCleanup();
     server.listen(PORT, () => console.log(`Nexo rodando na porta ${PORT}`));
   })
   .catch((err) => {

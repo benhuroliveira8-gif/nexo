@@ -6,6 +6,9 @@ const path = require('path');
 const express = require('express');
 const db = require('./db');
 const S = require('./serializers');
+const events = require('./events');
+const { audit } = require('./audit');
+const { P, memberContext } = require('./permissions');
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
 const MAX_SIZE = (Number(process.env.MAX_UPLOAD_MB) || 8) * 1024 * 1024;
@@ -50,20 +53,15 @@ function uploadRouter(requireAuth) {
         try { name = decodeURIComponent(name); } catch { /* usa como veio */ }
 
         const id = crypto.randomBytes(16).toString('hex');
+        // Mensagem de voz: o navegador manda a duração e a "onda" (barrinhas) do áudio.
         const type = cleanType(req.get('x-file-type'));
-        // Mensagem de voz: o navegador manda a duração e a "ondinha" junto.
-        let duration = null;
-        let waveform = null;
-        if (type.startsWith('audio/') && req.get('x-voice-duration')) {
-          const ms = Number(req.get('x-voice-duration'));
-          if (Number.isInteger(ms) && ms > 0 && ms <= 10 * 60 * 1000) duration = ms;
-          const wf = String(req.get('x-voice-waveform') || '');
-          if (/^[A-Za-z0-9_-]{1,200}$/.test(wf)) waveform = wf;
-        }
+        const duration = Number(req.get('x-voice-duration'));
+        const isVoice = type.startsWith('audio/') && Number.isFinite(duration) && duration > 0 && duration <= 20 * 60;
+        const waveform = isVoice && /^[A-Za-z0-9_-]{1,200}$/.test(req.get('x-voice-waveform') || '') ? req.get('x-voice-waveform') : null;
         const { rows } = await db.query(
-          `INSERT INTO attachments (id, uploader_id, filename, content_type, size, duration_ms, waveform)
-           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-          [id, req.userId, cleanName(name), type, data.length, duration, duration ? waveform : null],
+          `INSERT INTO attachments (id, uploader_id, filename, content_type, size, is_voice, duration, waveform)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+          [id, req.userId, cleanName(name), type, data.length, isVoice, isVoice ? duration : null, waveform],
         );
         try {
           await fs.promises.writeFile(filePath(id), data);
@@ -93,12 +91,41 @@ function uploadRouter(requireAuth) {
           `UPDATE users u SET avatar_id = $2 FROM users old
            WHERE u.id = $1 AND old.id = u.id
            RETURNING old.avatar_id AS previous, u.id, u.username, u.display_name, u.is_bot,
-                     u.avatar_id, u.status, u.status_text, (u.totp_secret IS NOT NULL) AS two_factor`,
+                     u.avatar_id, u.status, u.status_text, u.about, u.totp_enabled`,
           [req.userId, id],
         );
         if (rows[0]?.previous) removeAvatar(rows[0].previous);
         res.json({ user: S.me(rows[0]) });
         avatarChanged(req.userId);
+      } catch (err) {
+        next(err);
+      }
+    });
+
+  // Ícone do servidor (quem pode gerenciar o servidor). Imagem crua, já reduzida pelo navegador.
+  r.post('/servers/:id/icon',
+    requireAuth,
+    express.raw({ type: 'application/octet-stream', limit: AVATAR_MAX }),
+    async (req, res, next) => {
+      try {
+        const serverId = Number(req.params.id);
+        const ctx = Number.isInteger(serverId) && serverId > 0 && await memberContext(serverId, req.userId);
+        if (!ctx) return res.status(404).json({ error: 'Servidor não encontrado.' });
+        if (!ctx.can(P.MANAGE_SERVER)) return res.status(403).json({ error: 'Você não tem permissão para isso.' });
+        const data = req.body;
+        const ext = Buffer.isBuffer(data) && imageExt(data);
+        if (!ext) return res.status(400).json({ error: 'Envie uma imagem PNG, JPG, GIF ou WEBP.' });
+        const id = `${crypto.randomBytes(12).toString('hex')}.${ext}`;
+        await fs.promises.writeFile(path.join(AVATAR_DIR, id), data);
+        const { rows } = await db.query(
+          `UPDATE servers s SET icon_id = $2 FROM servers old WHERE s.id = $1 AND old.id = s.id
+           RETURNING old.icon_id AS previous, s.*`,
+          [serverId, id],
+        );
+        if (rows[0]?.previous) removeAvatar(rows[0].previous);
+        audit(serverId, req.userId, 'server_icon');
+        events.serverChanged(serverId);
+        res.json({ server: S.server(rows[0]) });
       } catch (err) {
         next(err);
       }

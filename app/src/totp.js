@@ -1,13 +1,13 @@
-// Verificação em duas etapas (TOTP, RFC 6238): o mesmo código de 6 dígitos que
-// apps como Google Authenticator, Microsoft Authenticator e Authy mostram.
+// Verificação em duas etapas (2FA) com app autenticador (TOTP, RFC 6238):
+// código de 6 dígitos que muda a cada 30 segundos.
 const crypto = require('crypto');
 
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-const STEP = 30;   // um código novo a cada 30 segundos
-const WINDOW = 1;  // aceita o código anterior e o próximo (relógio um pouco atrasado/adiantado)
 
 function base32Encode(buf) {
-  let bits = 0; let value = 0; let out = '';
+  let bits = 0;
+  let value = 0;
+  let out = '';
   for (const byte of buf) {
     value = (value << 8) | byte;
     bits += 8;
@@ -20,9 +20,11 @@ function base32Encode(buf) {
   return out;
 }
 
-function base32Decode(str) {
-  const clean = String(str).toUpperCase().replace(/[^A-Z2-7]/g, '');
-  let bits = 0; let value = 0; const out = [];
+function base32Decode(text) {
+  const clean = String(text).toUpperCase().replace(/[^A-Z2-7]/g, '');
+  let bits = 0;
+  let value = 0;
+  const out = [];
   for (const ch of clean) {
     value = (value << 5) | ALPHABET.indexOf(ch);
     bits += 5;
@@ -35,44 +37,44 @@ function base32Decode(str) {
 }
 
 const newSecret = () => base32Encode(crypto.randomBytes(20));
+const currentStep = (now = Date.now()) => Math.floor(now / 1000 / 30);
 
 function codeAt(secret, step) {
-  const counter = Buffer.alloc(8);
-  counter.writeBigUInt64BE(BigInt(step));
-  const hmac = crypto.createHmac('sha1', base32Decode(secret)).update(counter).digest();
-  const offset = hmac[hmac.length - 1] & 15;
-  const num = (hmac.readUInt32BE(offset) & 0x7fffffff) % 1000000;
+  const msg = Buffer.alloc(8);
+  msg.writeBigUInt64BE(BigInt(step));
+  const hmac = crypto.createHmac('sha1', base32Decode(secret)).update(msg).digest();
+  const off = hmac[hmac.length - 1] & 15;
+  const num = (hmac.readUInt32BE(off) & 0x7fffffff) % 1000000;
   return String(num).padStart(6, '0');
 }
 
-const currentStep = (now = Date.now()) => Math.floor(now / 1000 / STEP);
-
-// Devolve o "passo" do código se ele for válido (e mais novo que lastStep), senão null.
-function verify(secret, code, lastStep = null, now = Date.now()) {
-  const c = String(code || '').replace(/\s/g, '');
-  if (!/^\d{6}$/.test(c) || !secret) return null;
-  const step = currentStep(now);
-  for (let d = -WINDOW; d <= WINDOW; d++) {
-    const s = step + d;
-    if (lastStep !== null && s <= Number(lastStep)) continue;
-    const expected = codeAt(secret, s);
-    if (crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(c))) return s;
+// Confere o código aceitando 30s de diferença no relógio (para trás e para frente).
+// Devolve o "passo" usado (para não aceitar o mesmo código duas vezes) ou null.
+function verify(secret, code, lastStep) {
+  const clean = String(code || '').replace(/\s+/g, '');
+  if (!/^\d{6}$/.test(clean)) return null;
+  const now = currentStep();
+  for (const step of [now, now - 1, now + 1]) {
+    if (lastStep != null && step <= Number(lastStep)) continue;
+    const expected = codeAt(secret, step);
+    if (crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(clean))) return step;
   }
   return null;
 }
 
-// Link que os apps autenticadores entendem (vira QR code no navegador).
-const otpauthUrl = (secret, account, issuer = 'Nexo') =>
-  `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(account)}?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=${STEP}`;
+// Endereço que o app autenticador entende (vira QR code no navegador).
+const otpauthUri = (secret, username) =>
+  `otpauth://totp/Nexo:${encodeURIComponent(username)}?secret=${secret}&issuer=Nexo&digits=6&period=30`;
 
-// Códigos de recuperação: usados uma vez cada, se a pessoa perder o celular.
+// Códigos de recuperação (para quando perder o celular): guardamos só o hash.
 function newRecoveryCodes(n = 8) {
-  return Array.from({ length: n }, () => {
-    const raw = base32Encode(crypto.randomBytes(5)).slice(0, 8).toLowerCase();
-    return `${raw.slice(0, 4)}-${raw.slice(4)}`;
-  });
+  const codes = [];
+  for (let i = 0; i < n; i++) {
+    const raw = crypto.randomBytes(5).toString('hex'); // 10 caracteres
+    codes.push(`${raw.slice(0, 5)}-${raw.slice(5)}`);
+  }
+  return codes;
 }
-const hashRecovery = (code) => crypto.createHash('sha256')
-  .update(String(code).toLowerCase().replace(/[^a-z2-7]/g, '')).digest('hex');
+const hashRecovery = (code) => crypto.createHash('sha256').update(String(code).toLowerCase().replace(/[^a-f0-9]/g, '')).digest('hex');
 
-module.exports = { newSecret, verify, codeAt, currentStep, otpauthUrl, newRecoveryCodes, hashRecovery, base32Decode };
+module.exports = { newSecret, codeAt, currentStep, verify, otpauthUri, newRecoveryCodes, hashRecovery, base32Encode, base32Decode };

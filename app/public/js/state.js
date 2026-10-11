@@ -16,17 +16,23 @@ export const P = {
   CONNECT: 1 << 11,
   SPEAK: 1 << 12,
   VIDEO: 1 << 13,
+  BAN_MEMBERS: 1 << 14,
+  MODERATE_MEMBERS: 1 << 15,
+  VIEW_AUDIT_LOG: 1 << 16,
 };
 
 export const PERMISSION_INFO = [
   [P.ADMINISTRATOR, 'Administrador', 'Libera todas as permissões. Dê só para quem você confia muito.'],
-  [P.MANAGE_SERVER, 'Gerenciar servidor', 'Renomear o servidor e gerar um novo convite.'],
-  [P.MANAGE_ROLES, 'Gerenciar cargos', 'Criar e editar cargos abaixo do seu e dá-los a membros.'],
-  [P.MANAGE_CHANNELS, 'Gerenciar canais', 'Criar, renomear e apagar canais.'],
+  [P.MANAGE_SERVER, 'Gerenciar servidor', 'Renomear o servidor, trocar o ícone e apagar convites dos outros.'],
+  [P.MANAGE_ROLES, 'Gerenciar cargos', 'Criar, editar e reordenar cargos abaixo do seu e dá-los a membros.'],
+  [P.MANAGE_CHANNELS, 'Gerenciar canais', 'Criar, renomear, reordenar e apagar canais e categorias.'],
   [P.KICK_MEMBERS, 'Expulsar membros', 'Remover membros com cargo abaixo do seu.'],
-  [P.MANAGE_MESSAGES, 'Gerenciar mensagens', 'Apagar mensagens de outras pessoas.'],
+  [P.BAN_MEMBERS, 'Banir membros', 'Expulsar e impedir de voltar (mesmo com convite).'],
+  [P.MODERATE_MEMBERS, 'Castigar membros', 'Deixar alguém só lendo por um tempo (sem escrever, reagir ou falar).'],
+  [P.VIEW_AUDIT_LOG, 'Ver registro de auditoria', 'Ver quem fez o quê no servidor.'],
+  [P.MANAGE_MESSAGES, 'Gerenciar mensagens', 'Apagar e fixar mensagens de outras pessoas.'],
   [P.MENTION_EVERYONE, 'Mencionar @everyone', 'Notificar todo mundo do servidor de uma vez.'],
-  [P.CREATE_INVITE, 'Convidar pessoas', 'Ver e compartilhar o convite do servidor.'],
+  [P.CREATE_INVITE, 'Convidar pessoas', 'Criar convites para o servidor.'],
   [P.SEND_MESSAGES, 'Enviar mensagens', 'Escrever nos canais de texto.'],
   [P.ATTACH_FILES, 'Anexar arquivos', 'Enviar imagens, vídeos e arquivos.'],
   [P.ADD_REACTIONS, 'Adicionar reações', 'Reagir às mensagens com emojis.'],
@@ -35,7 +41,7 @@ export const PERMISSION_INFO = [
   [P.VIDEO, 'Vídeo e tela', 'Ligar a câmera e compartilhar a tela nos canais de voz.'],
 ];
 
-const DM_PERMS = P.SEND_MESSAGES | P.ATTACH_FILES | P.ADD_REACTIONS;
+const DM_PERMS = P.SEND_MESSAGES | P.ATTACH_FILES | P.ADD_REACTIONS | P.CONNECT | P.SPEAK | P.VIDEO;
 
 export const state = {
   token: storage('nexo.token'),
@@ -46,7 +52,7 @@ export const state = {
   detail: null,              // detalhes do servidor aberto (canais, membros, cargos, me)
   detailVersion: 0,          // muda sempre que "detail" é recarregado (para refazer a tela)
   channelId: null,           // canal ou DM aberto (null na tela de amigos)
-  dms: [],                   // [{ channelId, user, lastMessageAt, unread, mentions }]
+  dms: [],                   // [{ channelId, isGroup, name, ownerId, user, users, voice, lastMessageAt, unread, mentions }]
   friends: { friends: [], incoming: [], outgoing: [] },
   friendsTab: 'online',
   messages: new Map(),       // channelId -> { items, hasMore, loading, nodes }
@@ -105,12 +111,21 @@ export function knownUsers() {
   const add = (u) => { if (u && !map.has(u.username)) map.set(u.username, u); };
   add(state.me);
   if (state.detail && state.view !== 'home') state.detail.members.forEach(add);
-  state.dms.forEach((d) => add(d.user));
+  state.dms.forEach((d) => (d.users || [d.user]).forEach(add));
   state.friends.friends.forEach(add);
   return map;
 }
 
 export const currentDm = () => state.dms.find((d) => d.channelId === state.channelId) || null;
+
+// Nome de uma conversa: o da pessoa (DM) ou o do grupo (ou os nomes de quem está nele).
+export function dmName(dm) {
+  if (!dm) return '';
+  if (!dm.isGroup) return dm.user ? dm.user.displayName : '';
+  if (dm.name) return dm.name;
+  const names = dm.users.map((u) => u.displayName);
+  return names.length ? names.join(', ') : 'Grupo vazio';
+}
 
 export function currentChannel() {
   if (state.view === 'home') return null;

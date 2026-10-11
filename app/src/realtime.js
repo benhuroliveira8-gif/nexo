@@ -6,6 +6,7 @@ const events = require('./events');
 const S = require('./serializers');
 const M = require('./messages');
 const voice = require('./voice');
+const push = require('./push');
 const { P, channelAccess } = require('./permissions');
 
 const validId = (v) => Number.isInteger(v) && v > 0 && v < 2 ** 31;
@@ -88,10 +89,6 @@ module.exports = function setupRealtime(io) {
       }
     });
 
-    // O navegador avisa se o Nexo está na tela (para decidir se manda notificação push).
-    presence.setVisible(user.id, socket.id, true);
-    socket.on('visibility', (visible) => presence.setVisible(user.id, socket.id, !!visible));
-
     // "Fulano está digitando..."
     socket.on('typing', async (payload) => {
       const channelId = Number(payload && payload.channelId);
@@ -132,10 +129,27 @@ module.exports = function setupRealtime(io) {
         const channelId = Number(payload && payload.channelId);
         if (!validId(channelId) || user.isBot) return reply({ ok: false, error: 'Canal inválido.' });
         const access = await channelAccess(channelId, user.id);
-        if (!access || access.kind !== 'voice') return reply({ ok: false, error: 'Canal de voz não encontrado.' });
+        if (!access || (access.kind !== 'voice' && access.kind !== 'dm')) return reply({ ok: false, error: 'Canal de voz não encontrado.' });
         if (!access.can(P.CONNECT)) return reply({ ok: false, error: 'Você não pode entrar neste canal de voz.' });
-        voice.join({ userId: user.id, serverId: access.serverId, channelId, socketId: socket.id, flags: payload || {} });
+        const { firstHere } = voice.join({
+          userId: user.id, serverId: access.serverId, channelId, socketId: socket.id, flags: payload || {}, rooms: access.rooms,
+        });
         reply({ ok: true });
+        // Chamada em mensagem direta: quem começou "liga" para os outros.
+        if (access.kind === 'dm' && firstHere) {
+          const others = access.memberIds.filter((id) => id !== user.id);
+          events.emitTo(others.map((id) => `user:${id}`), 'call:ring', { channelId, from: user, video: !!(payload && payload.video) });
+          const offline = others.filter((id) => !presence.isActive(id));
+          db.query("SELECT id FROM users WHERE id = ANY($1::int[]) AND status <> 'dnd'", [offline])
+            .then(({ rows }) => push.sendToUsers(rows.map((r) => r.id), {
+              title: `📞 ${user.displayName} está te ligando`,
+              body: access.isGroup ? 'Chamada no grupo. Toque para atender.' : 'Toque para atender.',
+              url: `/?canal=${channelId}&atender=1`,
+              tag: `chamada-${channelId}`,
+              kind: 'call',
+            }))
+            .catch((err) => console.error('Erro no push da chamada:', err.message));
+        }
       } catch (err) {
         console.error('Erro ao entrar na voz:', err);
         reply({ ok: false, error: 'Não foi possível entrar na voz.' });
@@ -147,6 +161,19 @@ module.exports = function setupRealtime(io) {
     });
 
     socket.on('voice:leave', () => voice.disconnect(user.id, socket.id));
+
+    // Recusar uma chamada: avisa quem está na chamada (e as suas outras abas, para parar de tocar).
+    socket.on('call:decline', async (payload) => {
+      const channelId = Number(payload && payload.channelId);
+      if (!validId(channelId)) return;
+      const access = await channelAccess(channelId, user.id).catch(() => null);
+      if (!access || access.kind !== 'dm') return;
+      const inCall = voice.peopleIn(channelId);
+      events.emitTo([...inCall, user.id].map((id) => `user:${id}`), 'call:declined', { channelId, user });
+    });
+
+    // A aba está aparecendo na tela? (se nenhuma estiver, mandamos notificação push)
+    socket.on('client:visible', (visible) => presence.setVisible(user.id, socket.id, !!visible));
 
     socket.on('disconnect', () => {
       presence.setVisible(user.id, socket.id, false);

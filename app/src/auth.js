@@ -12,17 +12,30 @@ if (!JWT_SECRET || JWT_SECRET.length < 16) {
 const hashPassword = (password) => bcrypt.hash(password, 10);
 const checkPassword = (password, hash) => bcrypt.compare(password, hash);
 
-// "tv" é a versão do token: quando a pessoa troca a senha ou clica em
-// "sair de todos os aparelhos", a versão sobe e os tokens antigos param de valer.
+// O token de login leva a "versão" da conta: trocar a senha ou "sair de todos os
+// aparelhos" aumenta a versão, e os tokens antigos param de valer.
 const signToken = (user) =>
-  jwt.sign({ sub: user.id, tv: user.token_version || 0 }, JWT_SECRET, { expiresIn: '7d' });
+  jwt.sign({ sub: user.id, ver: Number(user.token_version) || 0 }, JWT_SECRET, { expiresIn: '7d' });
 
-// Devolve { userId, tv }, ou null se o token for inválido/expirado.
+// Devolve { userId, ver }, ou null se o token for inválido/expirado.
+// Tokens com "purpose" são de uso especial (ex.: etapa do 2FA) e não servem para login.
 function verifyToken(token) {
   try {
     const payload = jwt.verify(token, JWT_SECRET);
+    if (payload.purpose) return null;
     const userId = Number(payload.sub) || null;
-    return userId ? { userId, tv: Number(payload.tv) || 0 } : null;
+    return userId ? { userId, ver: Number(payload.ver) || 0 } : null;
+  } catch {
+    return null;
+  }
+}
+
+// Ticket curto (5 min) entre "senha certa" e "código do 2FA".
+const signTicket = (userId, purpose) => jwt.sign({ sub: userId, purpose }, JWT_SECRET, { expiresIn: '5m' });
+function verifyTicket(token, purpose) {
+  try {
+    const payload = jwt.verify(String(token || ''), JWT_SECRET);
+    return payload.purpose === purpose ? Number(payload.sub) || null : null;
   } catch {
     return null;
   }
@@ -47,11 +60,11 @@ async function authenticate(value) {
     return rows[0] ? { userId: rows[0].id, isBot: true } : null;
   }
   const token = raw.startsWith('Bearer ') ? raw.slice(7) : raw;
-  const v = token && verifyToken(token);
-  if (!v) return null;
-  const { rows } = await db.query('SELECT token_version FROM users WHERE id = $1 AND NOT is_bot', [v.userId]);
-  if (!rows[0] || rows[0].token_version !== v.tv) return null;
-  return { userId: v.userId, isBot: false };
+  const t = token && verifyToken(token);
+  if (!t) return null;
+  const { rows } = await db.query('SELECT token_version FROM users WHERE id = $1 AND NOT is_bot', [t.userId]);
+  if (!rows[0] || Number(rows[0].token_version) !== t.ver) return null;
+  return { userId: t.userId, isBot: false };
 }
 
 // Middleware do Express: exige login (pessoa ou bot).
@@ -73,6 +86,6 @@ function humansOnly(req, res, next) {
 }
 
 module.exports = {
-  hashPassword, checkPassword, signToken, verifyToken,
+  hashPassword, checkPassword, signToken, verifyToken, signTicket, verifyTicket,
   hashBotToken, newBotToken, authenticate, requireAuth, humansOnly,
 };

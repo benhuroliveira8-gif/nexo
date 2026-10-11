@@ -40,16 +40,20 @@ function livekitToken({ user, channelId, canSpeak, canVideo }) {
 }
 
 // ---------- Quem está em cada canal
-// channelId -> Map(userId -> { userId, serverId, socketId, muted, deafened, video, screen })
+// channelId -> Map(userId -> { userId, serverId, socketId, rooms, muted, deafened, video, screen })
+// serverId = null nas chamadas de mensagem direta. "rooms" = quem deve saber quem está na chamada.
 const channels = new Map();
 const userChannel = new Map(); // userId -> channelId
 
 function statesOf(channelId) {
-  return [...(channels.get(channelId) || new Map()).values()].map(({ socketId, ...s }) => s);
+  return [...(channels.get(channelId) || new Map()).values()].map(({ socketId, rooms, ...s }) => s);
 }
 
+const roomsOf = new Map(); // channelId -> salas avisadas (as da última entrada)
 function broadcast(serverId, channelId) {
-  events.emitTo([`server:${serverId}`], 'voice:update', { serverId, channelId, states: statesOf(channelId) });
+  const rooms = roomsOf.get(channelId) || (serverId ? [`server:${serverId}`] : []);
+  events.emitTo(rooms, 'voice:update', { serverId, channelId, states: statesOf(channelId) });
+  if (!channels.has(channelId)) roomsOf.delete(channelId);
 }
 
 // Estados de voz de vários canais (para a tela do servidor).
@@ -75,8 +79,10 @@ function leave(userId) {
   if (state) broadcast(state.serverId, channelId);
 }
 
-function join({ userId, serverId, channelId, socketId, flags }) {
+function join({ userId, serverId, channelId, socketId, flags, rooms }) {
   if (userChannel.get(userId) !== channelId) leave(userId); // trocou de canal
+  const firstHere = !channels.has(channelId) || channels.get(channelId).size === 0;
+  if (rooms) roomsOf.set(channelId, rooms);
   if (!channels.has(channelId)) channels.set(channelId, new Map());
   channels.get(channelId).set(userId, {
     userId, serverId, socketId,
@@ -84,6 +90,7 @@ function join({ userId, serverId, channelId, socketId, flags }) {
   });
   userChannel.set(userId, channelId);
   broadcast(serverId, channelId);
+  return { firstHere };
 }
 
 function update(userId, socketId, flags) {
@@ -115,8 +122,9 @@ function clearChannel(channelId) {
 }
 
 const currentChannelOf = (userId) => userChannel.get(userId);
+const peopleIn = (channelId) => statesOf(channelId).map((s) => s.userId);
 
 module.exports = {
   P, configured, livekitToken, roomName,
-  statesForChannels, join, update, leave, disconnect, leaveServer, clearChannel, currentChannelOf,
+  statesForChannels, join, update, leave, disconnect, leaveServer, clearChannel, currentChannelOf, peopleIn,
 };

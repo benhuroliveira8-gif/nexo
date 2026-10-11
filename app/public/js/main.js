@@ -1,4 +1,5 @@
 // Nexo — frontend (Fase 5). JavaScript puro em módulos, sem etapa de build.
+import { effectiveTheme, onThemeChange } from './theme.js';
 import {
   $, h, storage, api, setToken, setUnauthorizedHandler, uploadFile, formatTime, dayLabel, fullTime,
   formatSize, avatar, badge, toast, copyText, openDialog, ask, confirmDialog, openPopover,
@@ -7,27 +8,26 @@ import {
 import { openEmojiPicker } from './emoji.js';
 import {
   state, P, can, isOwner, myTop, memberById, memberRoles, memberTop, roleColor, knownUsers,
-  currentDm, currentChannel,
+  currentDm, currentChannel, dmName,
 } from './state.js';
 import { renderFriendsPage } from './home.js';
-import { openServerSettings, refreshSettings, closeServerSettings } from './settings.js';
+import {
+  openServerSettings, refreshSettings, closeServerSettings, serverIcon, inviteDialog, timeoutMenu, kickDialog, banDialog,
+} from './settings.js';
 import {
   initVoice, voiceState, inVoice, joinVoice, leaveVoice, resyncAfterReconnect, renderVoicePanel, renderStage,
+  openVolumePopover,
 } from './voice.js';
 import { openDeveloper } from './developer.js';
-import { renderMarkdown, isJumboEmoji } from './markdown.js';
-import { openUserSettings, closeUserSettings, refreshUserSettings } from './usersettings.js';
-import { registerServiceWorker, resyncPush, disablePush } from './push.js';
-import { applyTheme } from './theme.js';
-import { canRecord, startRecording, formatDuration, voicePlayer, MAX_VOICE_MS } from './voicemsg.js';
-
-applyTheme();
-
-// "Instalar app" (Chrome/Edge/Android): guardamos o convite para mostrar nas Configurações.
-let deferredInstall = null;
-window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferredInstall = e; });
-window.addEventListener('appinstalled', () => { deferredInstall = null; });
-const installPrompt = () => deferredInstall;
+import { renderMarkdown, isJumbo, stripMarkdown } from './markdown.js';
+import {
+  createPollDialog, buildPoll, buildVoicePlayer, buildEmbeds, startRecording, canRecord, liveBars, fmtDuration,
+} from './extras.js';
+import { initAccount, openAccountSettings, closeAccountSettings, refreshAccountSettings } from './account.js';
+import {
+  registerServiceWorker, syncPushAfterLogin, forgetPushOnLogout, pushStatus, canPromptInstall, promptInstall, onPwaChange,
+} from './pwa.js';
+import { sortable } from './sortable.js';
 
 const isVisible = () => document.visibilityState === 'visible';
 let tempSeq = 0;
@@ -69,50 +69,6 @@ function showAuth(mode = 'login') {
 
 $('#auth-switch').addEventListener('click', () => showAuth(authMode === 'login' ? 'register' : 'login'));
 
-// Segunda etapa do login: a senha estava certa, falta o código do app autenticador.
-let pendingLogin = null;
-function showCodeStep(body) {
-  pendingLogin = body;
-  $('#auth-form').hidden = true;
-  $('#auth-code-form').hidden = false;
-  $('.auth-switch').hidden = true;
-  $('#auth-title').textContent = 'Verificação em duas etapas';
-  $('#auth-subtitle').textContent = 'Digite o código de 6 dígitos do seu app autenticador.';
-  $('#auth-code-error').textContent = '';
-  $('#auth-code-form [name=code]').value = '';
-  $('#auth-code-form [name=code]').focus();
-}
-function hideCodeStep() {
-  pendingLogin = null;
-  $('#auth-form').hidden = false;
-  $('#auth-code-form').hidden = true;
-  $('.auth-switch').hidden = false;
-}
-$('#auth-code-back').addEventListener('click', () => { hideCodeStep(); showAuth('login'); });
-$('#auth-code-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const btn = $('#auth-code-submit');
-  btn.disabled = true;
-  $('#auth-code-error').textContent = '';
-  try {
-    const data = await api('/auth/login', { method: 'POST', body: { ...pendingLogin, code: e.currentTarget.code.value.trim() } });
-    hideCodeStep();
-    finishLogin(data);
-  } catch (err) {
-    $('#auth-code-error').textContent = err.message;
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-function finishLogin(data) {
-  state.token = data.token;
-  setToken(data.token);
-  storage('nexo.token', data.token);
-  $('#auth-form').reset();
-  start(data.user);
-}
-
 $('#auth-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.currentTarget;
@@ -126,8 +82,13 @@ $('#auth-form').addEventListener('submit', async (e) => {
   $('#auth-error').textContent = '';
   try {
     const data = await api(`/auth/${authMode}`, { method: 'POST', body });
-    if (data.twoFactorRequired) return showCodeStep(body);
-    finishLogin(data);
+    if (data.twoFactorRequired) {
+      form.reset();
+      showTwoFactor(data.ticket);
+      return;
+    }
+    beginSession(data.token, data.user);
+    form.reset();
   } catch (err) {
     $('#auth-error').textContent = err.message;
   } finally {
@@ -135,16 +96,63 @@ $('#auth-form').addEventListener('submit', async (e) => {
   }
 });
 
-function logout({ skipServer = false } = {}) {
+function beginSession(token, user) {
+  state.token = token;
+  setToken(token);
+  storage('nexo.token', token);
+  start(user);
+}
+
+// Segunda etapa do login (2FA): código do app autenticador.
+let twoFactorTicket = null;
+function showTwoFactor(ticket) {
+  twoFactorTicket = ticket;
+  $('#auth-form').hidden = true;
+  $('#auth-switch').parentElement.hidden = true;
+  $('#twofa-form').hidden = false;
+  $('#auth-title').textContent = 'Verificação em duas etapas';
+  $('#auth-subtitle').textContent = 'Abra o app autenticador no celular e digite o código de 6 dígitos do Nexo.';
+  $('#twofa-error').textContent = '';
+  $('#twofa-form [name=code]').value = '';
+  $('#twofa-form [name=code]').focus();
+}
+function hideTwoFactor() {
+  twoFactorTicket = null;
+  $('#twofa-form').hidden = true;
+  $('#auth-form').hidden = false;
+  $('#auth-switch').parentElement.hidden = false;
+}
+$('#twofa-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = $('#twofa-submit');
+  btn.disabled = true;
+  $('#twofa-error').textContent = '';
+  try {
+    const data = await api('/auth/2fa', { method: 'POST', body: { ticket: twoFactorTicket, code: $('#twofa-form [name=code]').value } });
+    hideTwoFactor();
+    beginSession(data.token, data.user);
+    if (data.usedRecovery) setTimeout(() => toast('Você usou um código de recuperação. Ele não vale mais.'), 800);
+  } catch (err) {
+    $('#twofa-error').textContent = err.message;
+    if (/acabou/.test(err.message)) setTimeout(() => { hideTwoFactor(); showAuth('login'); }, 1500);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$('#twofa-back').addEventListener('click', () => { hideTwoFactor(); showAuth('login'); });
+
+let loggingOut = false;
+async function logout({ skipServer = false } = {}) {
+  if (loggingOut) return;
+  loggingOut = true;
   if (inVoice()) leaveVoice();
-  // Este aparelho para de receber notificações desta conta.
-  if (!skipServer && state.token) disablePush().catch(() => {});
-  closeUserSettings();
-  stopRecording(false);
+  if (state.token && !skipServer) await Promise.race([forgetPushOnLogout(), new Promise((r) => setTimeout(r, 1500))]);
   storage('nexo.token', null);
   if (state.socket) state.socket.disconnect();
   closeServerSettings();
+  closeAccountSettings();
   closePopover();
+  stopRinging();
   Object.assign(state, {
     token: null, me: null, socket: null, servers: [], view: 'home', detail: null, channelId: null,
     dms: [], friends: { friends: [], incoming: [], outgoing: [] }, editingId: null, replyTo: null,
@@ -156,9 +164,22 @@ function logout({ skipServer = false } = {}) {
   clearUploads();
   document.title = 'Nexo';
   showAuth('login');
+  loggingOut = false;
 }
 
 setUnauthorizedHandler(() => logout({ skipServer: true }));
+
+// Senha trocada, 2FA ligado, "sair de todos": o servidor devolve um token novo para este aparelho.
+function setSession(token, user) {
+  state.token = token;
+  setToken(token);
+  storage('nexo.token', token);
+  if (state.socket) {
+    state.socket.auth = { token };
+    if (!state.socket.connected) state.socket.connect();
+  }
+  if (user) applyMe(user);
+}
 
 // ================================================================ Início
 
@@ -166,47 +187,28 @@ async function boot() {
   // Link de convite: /convite/CODIGO
   const m = /^\/convite\/([\w-]{4,32})\/?$/.exec(location.pathname);
   if (m) sessionStorage.setItem('nexo.pendingInvite', m[1]);
-  pendingOpen = parseOpenUrl(location.href);
+  // Veio de uma notificação: /?servidor=1&canal=2&msg=3 (ou &atender=1 numa ligação).
+  if (location.search) {
+    const q = new URLSearchParams(location.search);
+    if (q.get('canal')) sessionStorage.setItem('nexo.pendingOpen', `/?${q}`);
+  }
   if (m || location.pathname !== '/' || location.search) history.replaceState(null, '', '/');
-  registerServiceWorker();
+  registerServiceWorker((url) => openFromUrl(url));
 
   if (!state.token) return showAuth('login');
   setToken(state.token);
-  try {
-    const { user } = await api('/me');
-    start(user);
-  } catch {
-    logout();
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const { user } = await api('/me');
+      return start(user);
+    } catch (err) {
+      // Só sai da conta se o servidor disse que o login não vale mais.
+      // Sem internet (ou servidor reiniciando), tenta de novo.
+      if (err.status === 401) return logout({ skipServer: true });
+      if (attempt === 0) toast('Sem conexão com o Nexo. Tentando de novo…');
+      await new Promise((r) => setTimeout(r, Math.min(2000 + attempt * 1000, 10000)));
+    }
   }
-}
-
-// Notificação clicada: /?canal=ID&servidor=ID&msg=ID
-let pendingOpen = null;
-function parseOpenUrl(href) {
-  try {
-    const u = new URL(href, location.origin);
-    const channelId = Number(u.searchParams.get('canal'));
-    if (!channelId) return null;
-    return { channelId, serverId: Number(u.searchParams.get('servidor')) || null, messageId: u.searchParams.get('msg') || null };
-  } catch {
-    return null;
-  }
-}
-async function openFromNotification(target) {
-  if (!target) return;
-  if (target.serverId) {
-    if (!state.servers.some((s) => s.id === target.serverId)) return;
-    if (state.view !== target.serverId) await selectServer(target.serverId, target.channelId);
-    else await selectChannel(target.channelId);
-  } else if (state.dms.some((d) => d.channelId === target.channelId)) {
-    await goHome(target.channelId);
-  } else return;
-  if (target.messageId) jumpToMessage(target.channelId, target.messageId);
-}
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.addEventListener('message', (e) => {
-    if (e.data && e.data.type === 'open' && state.me) openFromNotification(parseOpenUrl(e.data.url));
-  });
 }
 
 async function start(user) {
@@ -221,8 +223,7 @@ async function start(user) {
 
   const savedView = storage('nexo.view');
   const savedServer = state.servers.find((s) => String(s.id) === savedView);
-  if (pendingOpen && pendingOpen.serverId && state.servers.some((s) => s.id === pendingOpen.serverId)) await selectServer(pendingOpen.serverId, pendingOpen.channelId);
-  else if (savedServer) await selectServer(savedServer.id);
+  if (savedServer) await selectServer(savedServer.id);
   else {
     const homeChannel = Number(storage('nexo.homeChannel'));
     await goHome(state.dms.some((d) => d.channelId === homeChannel) ? homeChannel : null);
@@ -233,9 +234,41 @@ async function start(user) {
     sessionStorage.removeItem('nexo.pendingInvite');
     showInvitePreview(invite);
   }
-  if (pendingOpen) { const t = pendingOpen; pendingOpen = null; openFromNotification(t); }
-  resyncPush();
+  const pendingOpen = sessionStorage.getItem('nexo.pendingOpen');
+  if (pendingOpen) {
+    sessionStorage.removeItem('nexo.pendingOpen');
+    openFromUrl(pendingOpen);
+  }
+  syncPushAfterLogin().then(refreshPushFlag);
 }
+
+// Abre o lugar de uma notificação.
+async function openFromUrl(url) {
+  if (!state.me) { sessionStorage.setItem('nexo.pendingOpen', url); return; }
+  const q = new URL(url, location.origin).searchParams;
+  const channelId = Number(q.get('canal'));
+  const serverId = Number(q.get('servidor'));
+  const msgId = q.get('msg');
+  if (!channelId) return;
+  if (serverId) {
+    if (!state.servers.some((s) => s.id === serverId)) return toast('Você não está mais nesse servidor.');
+    await selectServer(serverId, channelId);
+  } else {
+    if (!state.dms.some((d) => d.channelId === channelId)) await loadDms().catch(() => {});
+    if (!state.dms.some((d) => d.channelId === channelId)) return toast('Essa conversa não existe mais.');
+    await goHome(channelId);
+    if (q.get('atender')) {
+      const dm = currentDm();
+      if (dm && dm.voice && dm.voice.length) answerCall(channelId, false);
+    }
+  }
+  if (msgId && /^\d+$/.test(msgId)) jumpToMessage(channelId, msgId);
+}
+
+// Notificações deste aparelho já chegam pelo push? Então não repetimos com o aviso do navegador.
+let pushOn = false;
+const refreshPushFlag = () => pushStatus().then((s) => { pushOn = s === 'on'; }).catch(() => {});
+onPwaChange(refreshPushFlag);
 
 // ================================================================ Carregar dados
 
@@ -251,7 +284,15 @@ async function loadDms() {
   const { dms } = await api('/dms');
   state.dms = dms;
   renderRail();
-  if (state.view === 'home') { renderSidebar(); renderHeader(); }
+  if (state.view === 'home') {
+    if (state.channelId && !dms.some((d) => d.channelId === state.channelId)) return goHome();
+    renderSidebar();
+    renderHeader();
+    renderMembers();
+    renderCallStage();
+    renderComposerState();
+    $('#app').classList.toggle('home-view', !(currentDm() && currentDm().isGroup));
+  }
   updateTitle();
 }
 
@@ -302,11 +343,18 @@ async function fetchDetail(serverId) {
   }
 }
 
+let timeoutTimer = null;
 function setDetail(detail, replay) {
   state.detail = detail;
   replay.forEach((fn) => fn());
   state.detailVersion++;
   syncServerFromDetail();
+  // Castigo acabando: recarrega na hora certa para liberar o envio.
+  clearTimeout(timeoutTimer);
+  if (detail.me.timeoutUntil) {
+    const ms = new Date(detail.me.timeoutUntil) - Date.now() + 1000;
+    if (ms > 0 && ms < 2 ** 31) timeoutTimer = setTimeout(() => refreshDetail(), ms);
+  }
 }
 
 const refreshDetailSoon = debounce(refreshDetail, 150);
@@ -332,13 +380,20 @@ function connectSocket() {
 
   socket.on('connect', () => {
     $('#conn-status').hidden = true;
-    socket.emit('visibility', isVisible());
+    socket.emit('client:visible', isVisible());
     if (connectedBefore) refreshAfterReconnect();
     connectedBefore = true;
   });
-  socket.on('disconnect', () => { $('#conn-status').hidden = false; });
+  socket.on('disconnect', (reason) => {
+    $('#conn-status').hidden = false;
+    // O servidor derrubou a conexão (ex.: senha trocada): tenta de novo com o token atual.
+    // Se o token não valer mais, o "connect_error" leva para o login.
+    if (reason === 'io server disconnect' && state.token) {
+      setTimeout(() => { if (state.socket === socket && state.token) { socket.auth = { token: state.token }; socket.connect(); } }, 400);
+    }
+  });
   socket.on('connect_error', (err) => {
-    if (err.message === 'unauthorized') logout();
+    if (err.message === 'unauthorized') logout({ skipServer: true });
     else $('#conn-status').hidden = false;
   });
 
@@ -349,8 +404,23 @@ function connectSocket() {
     patchReplies(msg.channelId, msg.id, (r) => ({ ...r, content: msg.content.slice(0, 120), hasAttachments: msg.attachments.length > 0 }));
   });
   socket.on('channel:pins', ({ channelId }) => { if (pinsOpenFor === channelId) openPins(); });
-  socket.on('message:reactions', ({ id, channelId, reactions }) => updateMessage(channelId, id, { reactions }));
   socket.on('message:poll', ({ id, channelId, poll }) => updateMessage(channelId, id, { poll }));
+  socket.on('dms:changed', () => loadDmsSoon());
+  socket.on('dm:removed', ({ channelId, reason }) => {
+    const dm = state.dms.find((d) => d.channelId === channelId);
+    state.dms = state.dms.filter((d) => d.channelId !== channelId);
+    state.messages.delete(channelId);
+    if (voiceState().channelId === channelId) leaveVoice({ silent: true });
+    if (reason === 'removed' && dm) toast(`Você foi removido do grupo "${dmName(dm)}".`);
+    if (state.view === 'home' && state.channelId === channelId) goHome();
+    else renderAll();
+  });
+  socket.on('call:ring', onCallRing);
+  socket.on('call:declined', ({ channelId, user }) => {
+    stopRinging(channelId);
+    if (voiceState().channelId === channelId && user.id !== state.me.id) toast(`${user.displayName} recusou a chamada.`);
+  });
+  socket.on('message:reactions', ({ id, channelId, reactions }) => updateMessage(channelId, id, { reactions }));
   socket.on('message:deleted', ({ id, channelId }) => {
     const bucket = state.messages.get(channelId);
     if (!bucket) return;
@@ -372,6 +442,7 @@ function connectSocket() {
   });
 
   socket.on('voice:update', ({ serverId, channelId, states }) => {
+    if (serverId === null) return onDmVoiceUpdate(channelId, states);
     applyLive(() => {
       if (!state.detail || state.detail.server.id !== serverId) return;
       if (!state.detail.voice) state.detail.voice = {};
@@ -388,6 +459,7 @@ function connectSocket() {
     const s = state.servers.find((x) => x.id === serverId);
     state.servers = state.servers.filter((x) => x.id !== serverId);
     if (s && reason === 'kicked') toast(`Você foi expulso de "${s.name}".`);
+    if (s && reason === 'banned') toast(`Você foi banido de "${s.name}".`);
     if (s && reason === 'deleted') toast(`O servidor "${s.name}" foi apagado.`);
     if (state.view === serverId) {
       closeServerSettings();
@@ -405,7 +477,7 @@ function connectSocket() {
       if (m) Object.assign(m, p);
     });
     for (const list of Object.values(state.friends)) list.forEach((f) => { if (f.id === userId) Object.assign(f, p); });
-    state.dms.forEach((d) => { if (d.user.id === userId) Object.assign(d.user, p); });
+    state.dms.forEach((d) => (d.users || []).forEach((u) => { if (u.id === userId) Object.assign(u, p); }));
     if (state.view === 'home') {
       renderSidebar();
       renderHeader();
@@ -461,7 +533,7 @@ function onMessageNew(msg) {
 
   const mine = msg.author.id === state.me.id;
   const isDm = msg.serverId === null;
-  const notify = !mine && (isDm || msg.mentionEveryone || msg.mentions.includes(state.me.id));
+  const notify = !mine && msg.kind !== 'system' && (isDm || msg.mentionEveryone || msg.mentions.includes(state.me.id));
   const active = msg.channelId === state.channelId && isVisible();
 
   if (isDm) {
@@ -520,9 +592,11 @@ function clearLocalUnread(channelId) {
 function notifyUser(msg) {
   if (state.me.status === 'dnd') return; // "Não perturbe": sem som nem aviso
   if (state.soundOn) playPing();
-  if ('Notification' in window && window.isSecureContext && Notification.permission === 'granted' && !isVisible()) {
+  // Com o push ligado, o aviso já chega pelo celular/computador; não repete.
+  if (!pushOn && 'Notification' in window && window.isSecureContext && Notification.permission === 'granted' && !isVisible()) {
     const where = msg.serverId === null ? 'mensagem direta' : 'menção';
-    try { new Notification(`${msg.author.displayName} (${where})`, { body: msg.content.slice(0, 120) || '📎 Anexo' }); } catch { /* ignora */ }
+    const body = stripMarkdown(msg.content).slice(0, 120) || (msg.poll ? `📊 ${msg.poll.question}` : '📎 Anexo');
+    try { new Notification(`${msg.author.displayName} (${where})`, { body, icon: '/icons/icon-192.png' }); } catch { /* ignora */ }
   }
 }
 
@@ -547,7 +621,7 @@ function markReadNow() {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (state.socket) state.socket.emit('visibility', isVisible());
+  if (state.socket) state.socket.emit('client:visible', isVisible());
   if (isVisible() && state.me) scheduleMarkRead();
 });
 
@@ -596,7 +670,6 @@ async function selectChannel(channelId) {
     clearUploads();
     setReply(null, { render: false });
     pinsOpenFor = null;
-    if (state.recording) stopRecording(false);
   }
   state.channelId = channelId;
   if (state.view === 'home') storage('nexo.homeChannel', String(channelId));
@@ -621,7 +694,7 @@ async function openDm(userId) {
   try {
     const { channelId, user } = await api('/dms', { method: 'POST', body: { userId } });
     if (!state.dms.some((d) => d.channelId === channelId)) {
-      state.dms.unshift({ channelId, user, lastMessageAt: null, unread: false, mentions: 0 });
+      state.dms.unshift({ channelId, isGroup: false, name: null, ownerId: null, user, users: [user], voice: [], lastMessageAt: null, unread: false, mentions: 0 });
     }
     closePopover();
     await goHome(channelId);
@@ -664,19 +737,37 @@ function renderRail() {
 
   $('#server-list').replaceChildren(...state.servers.map((s) => {
     const btn = h('button', {
-      class: `rail-btn${s.id === state.view ? ' active' : ''}${s.unread ? ' unread' : ''}`,
+      class: `rail-btn${s.id === state.view ? ' active' : ''}${s.unread ? ' unread' : ''}${s.iconUrl ? ' has-icon' : ''}`,
       title: s.name,
       onclick: () => selectServer(s.id),
-    }, initialsOf(s.name), h('span', { class: 'badge-slot' }, badge(s.mentions) || ''));
+    }, serverIcon(s), h('span', { class: 'badge-slot' }, badge(s.mentions) || ''));
     return btn;
   }));
 }
 
-const initialsOf = (name) => String(name || '?').trim().split(/\s+/).slice(0, 2).map((p) => [...p][0]).join('').toUpperCase();
-
 // ---------------------------------------------------------------- Barra lateral
 
+const collapsed = new Set(JSON.parse(storage('nexo.collapsed') || '[]'));
+function toggleCategory(id) {
+  if (collapsed.has(id)) collapsed.delete(id); else collapsed.add(id);
+  storage('nexo.collapsed', JSON.stringify([...collapsed]));
+  renderSidebar();
+}
+
+// Avatar de uma conversa: a pessoa (DM) ou um ícone de grupo.
+function dmAvatar(d, size = 'sm') {
+  if (!d.isGroup) return avatar(d.user, { size, online: d.user.online ? presenceOf(d.user) : 'offline' });
+  const hue = hueFor(d.channelId * 7 + 3);
+  return h('div', { class: `avatar group ${size}`, style: `--hue:${hue}`, title: `${d.users.length + 1} pessoas` }, '👥');
+}
+
+let sidebarPending = false;
 function renderSidebar() {
+  // Não redesenha no meio de um arrastar (redesenha quando soltar).
+  if (document.body.classList.contains('is-dragging')) {
+    if (!sidebarPending) { sidebarPending = true; window.addEventListener('pointerup', () => { sidebarPending = false; setTimeout(renderSidebar, 0); }, { once: true }); }
+    return;
+  }
   const header = $('#sidebar-header');
   const body = $('#sidebar-body');
 
@@ -691,14 +782,20 @@ function renderSidebar() {
         onclick: () => goHome(),
       }, h('span', { class: 'side-icon' }, '👥'), h('span', { class: 'truncate' }, 'Amigos'), badge(pending)),
       h('div', { class: 'section-title' }, h('span', {}, 'Conversas'),
-        h('button', { class: 'icon-btn small', title: 'Nova conversa', onclick: newDmDialog }, '+')),
+        h('button', { class: 'icon-btn small', title: 'Nova conversa ou grupo', onclick: newDmDialog }, '+')),
       state.dms.length === 0
         ? h('p', { class: 'muted side-empty' }, 'Nenhuma conversa ainda. Abra uma pelo perfil de alguém ou pela lista de amigos.')
         : h('ul', { class: 'side-list' }, state.dms.map((d) => h('li', {},
           h('button', {
             class: `side-item dm${d.channelId === state.channelId ? ' active' : ''}${d.unread ? ' unread' : ''}`,
             onclick: () => selectChannel(d.channelId),
-          }, avatar(d.user, { size: 'sm', online: d.user.online ? presenceOf(d.user) : 'offline' }), h('span', { class: 'truncate' }, d.user.displayName), badge(d.mentions))))),
+          },
+          dmAvatar(d),
+          h('span', { class: 'dm-label' },
+            h('span', { class: 'truncate' }, dmName(d)),
+            d.isGroup ? h('span', { class: 'dm-sub muted truncate' }, `${d.users.length + 1} pessoas`) : null),
+          d.voice && d.voice.length ? h('span', { class: 'call-dot', title: 'Chamada em andamento' }, '📞') : null,
+          badge(d.mentions))))),
     );
     return;
   }
@@ -717,14 +814,15 @@ function renderSidebar() {
   header.onclick = () => openServerMenu(header);
 
   const manage = can(P.MANAGE_CHANNELS);
-  const channels = [...state.detail.channels].sort((a, b) => a.position - b.position || a.id - b.id);
-  const text = channels.filter((c) => c.kind === 'text');
-  const voiceChannels = channels.filter((c) => c.kind === 'voice');
-  const threadsOf = (parentId) => channels
+  const all = [...state.detail.channels].sort((a, b) => a.position - b.position || a.id - b.id);
+  const categories = all.filter((c) => c.kind === 'category');
+  const listed = all.filter((c) => c.kind === 'text' || c.kind === 'voice');
+  const catIds = new Set(categories.map((c) => c.id));
+  const threadsOf = (parentId) => all
     .filter((t) => t.kind === 'thread' && t.parentChannelId === parentId && threadVisible(t))
     .sort((a, b) => new Date(b.lastMessageAt || 0) - new Date(a.lastMessageAt || 0));
   const gear = (c) => (manage || (c.kind === 'thread' && c.createdBy === state.me.id)
-    ? h('button', { class: 'icon-btn small channel-gear', title: c.kind === 'thread' ? 'Editar thread' : 'Editar canal', onclick: () => editChannelDialog(c) }, '⚙')
+    ? h('button', { class: 'icon-btn small channel-gear no-drag', title: c.kind === 'thread' ? 'Editar thread' : 'Editar canal', onclick: () => editChannelDialog(c) }, '⚙')
     : null);
   const threadRow = (t) => h('li', { class: 'channel-row thread' },
     h('button', {
@@ -735,42 +833,111 @@ function renderSidebar() {
     gear(t));
   const vs = voiceState();
 
-  body.replaceChildren(...[
-    h('div', { class: 'section-title' },
-      h('span', {}, 'Canais de texto'),
-      manage ? h('button', { class: 'icon-btn small', title: 'Criar canal', onclick: () => createChannelDialog('text') }, '+') : null),
-    h('ul', { class: 'side-list' }, text.flatMap((c) => [h('li', { class: 'channel-row' },
-      h('button', {
-        class: `side-item channel${c.id === state.channelId ? ' active' : ''}${c.unread ? ' unread' : ''}`,
-        onclick: () => selectChannel(c.id),
-      }, h('span', { class: 'hash' }, '#'), h('span', { class: 'truncate' }, c.name), badge(c.mentions)),
-      gear(c)), ...threadsOf(c.id).map(threadRow)])),
-    voiceChannels.length || manage ? h('div', { class: 'section-title' },
-      h('span', {}, 'Canais de voz'),
-      manage ? h('button', { class: 'icon-btn small', title: 'Criar canal de voz', onclick: () => createChannelDialog('voice') }, '+') : null) : null,
-    h('ul', { class: 'side-list' }, voiceChannels.map((c) => {
+  const channelRow = (c) => {
+    if (c.kind === 'voice') {
       const people = (state.detail.voice && state.detail.voice[c.id]) || [];
       const connectedHere = vs.channelId === c.id;
-      return h('li', { class: 'channel-row voice' },
+      return [h('li', { class: 'channel-row voice', dataset: { channelId: String(c.id), dragId: manage ? String(c.id) : '' } },
         h('button', {
           class: `side-item channel voice${c.id === state.channelId ? ' active' : ''}${connectedHere ? ' connected' : ''}`,
           title: connectedHere ? 'Você está aqui' : 'Clique para entrar',
           onclick: () => openVoiceChannel(c),
-        }, h('span', { class: 'hash' }, '🔊'), h('span', { class: 'truncate' }, c.name)),
+        }, h('span', { class: 'hash' }, '🔊'), h('span', { class: 'truncate' }, c.name), c.private ? lockIcon() : null),
         gear(c),
         people.length ? h('ul', { class: 'voice-people' }, people.map((p) => {
           const m = memberById(p.userId);
           if (!m) return null;
-          return h('li', { class: 'voice-person' },
-            avatar(m, { size: 'xs' }),
-            h('span', { class: 'truncate' }, m.displayName),
-            h('span', { class: 'vp-icons' },
-              p.screen ? h('span', { title: 'Compartilhando a tela', class: 'live' }, 'AO VIVO') : null,
-              p.video ? h('span', { title: 'Câmera ligada' }, '📹') : null,
-              p.deafened ? h('span', { title: 'Ensurdecido' }, '🙉') : p.muted ? h('span', { title: 'Mutado' }, '🔇') : null));
-        })) : null);
-    })),
-  ].filter(Boolean));
+          const me = p.userId === state.me.id;
+          return h('li', {
+            class: `voice-person${!me ? ' clickable' : ''}`,
+            title: !me ? 'Clique para ajustar o volume' : null,
+            onclick: !me ? (e) => openVolumePopover(e.currentTarget, m) : null,
+          },
+          avatar(m, { size: 'xs' }),
+          h('span', { class: 'truncate' }, m.displayName),
+          h('span', { class: 'vp-icons' },
+            p.screen ? h('span', { title: 'Compartilhando a tela', class: 'live' }, 'AO VIVO') : null,
+            p.video ? h('span', { title: 'Câmera ligada' }, '📹') : null,
+            p.deafened ? h('span', { title: 'Ensurdecido' }, '🙉') : p.muted ? h('span', { title: 'Mutado' }, '🔇') : null));
+        })) : null)];
+    }
+    return [h('li', { class: 'channel-row', dataset: { channelId: String(c.id), dragId: manage ? String(c.id) : '' } },
+      h('button', {
+        class: `side-item channel${c.id === state.channelId ? ' active' : ''}${c.unread ? ' unread' : ''}`,
+        onclick: () => selectChannel(c.id),
+      }, h('span', { class: 'hash' }, '#'), h('span', { class: 'truncate' }, c.name), c.private ? lockIcon() : null, badge(c.mentions)),
+      gear(c)), ...threadsOf(c.id).map(threadRow)];
+  };
+
+  const blocks = [];
+  // Canais sem categoria ficam no topo.
+  const loose = listed.filter((c) => !c.categoryId || !catIds.has(c.categoryId));
+  blocks.push(h('ul', { class: 'side-list cat-body', dataset: { categoryId: '' } }, loose.flatMap(channelRow),
+    manage ? h('li', { class: 'drop-end', dataset: { categoryId: '', end: '1' } }) : null));
+  for (const cat of categories) {
+    const inside = listed.filter((c) => c.categoryId === cat.id);
+    const isCollapsed = collapsed.has(cat.id);
+    // Categoria fechada continua mostrando o canal aberto e os com menção.
+    const shown = isCollapsed ? inside.filter((c) => c.id === state.channelId || c.mentions || (c.kind === 'voice' && (state.detail.voice || {})[c.id])) : inside;
+    const unread = isCollapsed && inside.some((c) => c.unread);
+    blocks.push(h('div', {
+      class: `section-title category${isCollapsed ? ' collapsed' : ''}${unread ? ' unread' : ''}`,
+      dataset: { categoryId: String(cat.id), dragId: manage ? String(cat.id) : '', category: '1' },
+    },
+    h('button', { class: 'cat-toggle', onclick: () => toggleCategory(cat.id), title: isCollapsed ? 'Abrir categoria' : 'Fechar categoria' },
+      h('span', { class: 'cat-arrow' }, '▾'), h('span', { class: 'truncate' }, cat.name)),
+    manage ? h('span', { class: 'cat-actions no-drag' },
+      h('button', { class: 'icon-btn small', title: 'Editar categoria', onclick: () => editCategoryDialog(cat) }, '⚙'),
+      h('button', { class: 'icon-btn small', title: 'Criar canal aqui', onclick: () => createChannelDialog('text', cat.id) }, '+')) : null));
+    blocks.push(h('ul', { class: 'side-list cat-body', dataset: { categoryId: String(cat.id) } }, shown.flatMap(channelRow),
+      manage && !isCollapsed ? h('li', { class: 'drop-end', dataset: { categoryId: String(cat.id), end: '1' } }) : null));
+  }
+  if (!categories.length && !loose.length) blocks.push(h('p', { class: 'muted side-empty' }, 'Nenhum canal.'));
+  body.replaceChildren(...blocks);
+  if (manage) enableChannelDrag(body);
+}
+
+const lockIcon = () => h('span', { class: 'lock', title: 'Canal privado' }, '🔒');
+
+// Arrastar canais (entre categorias) e categorias (entre si).
+function enableChannelDrag(body) {
+  sortable(body, {
+    handle: '.channel-row[data-drag-id]:not([data-drag-id=""]), .section-title.category[data-drag-id]:not([data-drag-id=""])',
+    targets: '.channel-row:not(.thread), .section-title.category, .drop-end',
+    canDrop: (dragEl, target, before) => {
+      const draggingCategory = !!dragEl.dataset.category;
+      if (draggingCategory) return !!target.dataset.category && target !== dragEl;
+      if (target.dataset.end) return true;
+      if (target.dataset.category) return !before; // logo abaixo do título = começo da categoria
+      return true;
+    },
+    onDrop: async (dragEl, target, before) => {
+      const id = Number(dragEl.dataset.dragId);
+      let body2;
+      if (dragEl.dataset.category) {
+        const cats = [...$('#sidebar-body').querySelectorAll('.section-title.category')].map((x) => Number(x.dataset.categoryId)).filter((x) => x !== id);
+        const tId = Number(target.dataset.categoryId);
+        const idx = cats.indexOf(tId) + (before ? 0 : 1);
+        body2 = { beforeId: cats[idx] || null };
+      } else if (target.dataset.end) {
+        body2 = { categoryId: target.dataset.categoryId ? Number(target.dataset.categoryId) : null, beforeId: null };
+      } else if (target.dataset.category) {
+        const catId = Number(target.dataset.categoryId);
+        const first = state.detail.channels.filter((c) => c.categoryId === catId && (c.kind === 'text' || c.kind === 'voice') && c.id !== id)
+          .sort((a, b) => a.position - b.position || a.id - b.id)[0];
+        body2 = { categoryId: catId, beforeId: first ? first.id : null };
+      } else {
+        const tId = Number(target.dataset.channelId);
+        const t = state.detail.channels.find((c) => c.id === tId);
+        const catId = t.categoryId || null;
+        const siblings = state.detail.channels.filter((c) => (c.categoryId || null) === catId && (c.kind === 'text' || c.kind === 'voice') && c.id !== id)
+          .sort((a, b) => a.position - b.position || a.id - b.id);
+        const idx = siblings.findIndex((c) => c.id === tId) + (before ? 0 : 1);
+        body2 = { categoryId: catId, beforeId: siblings[idx] ? siblings[idx].id : null };
+      }
+      try { await api(`/channels/${id}/move`, { method: 'POST', body: body2 }); } catch (err) { toast(err.message); }
+    },
+  });
 }
 
 // Threads aparecem na lista enquanto estão ativas (última semana), com algo
@@ -790,7 +957,14 @@ function openVoiceChannel(channel) {
 
 function onVoiceChange() {
   renderVoicePanel($('#voice-panel'));
-  if (state.view !== 'home' && state.detail) {
+  const vs = voiceState();
+  if (vs.channelId) stopRinging(vs.channelId);
+  if (state.view === 'home') {
+    renderHeader();
+    renderCallStage();
+    return;
+  }
+  if (state.detail) {
     renderSidebar();
     const c = currentChannel();
     if (c && c.kind === 'voice') renderMain();
@@ -803,28 +977,55 @@ function renderHeader() {
   const title = $('#chat-title');
   const dm = state.view === 'home' ? currentDm() : null;
   const channel = currentChannel();
+  const actions = $('#header-actions');
+  actions.replaceChildren();
   if (state.view === 'home' && !state.channelId) {
     title.replaceChildren(h('span', { class: 'side-icon' }, '👥'), h('span', { class: 'truncate' }, 'Amigos'));
-  } else if (dm) {
+  } else if (dm && !dm.isGroup) {
     title.replaceChildren(
       h('button', { class: 'header-user', onclick: (e) => openProfile(e.currentTarget, dm.user) },
         avatar(dm.user, { size: 'xs', online: dm.user.online ? presenceOf(dm.user) : 'offline' }), h('span', { class: 'truncate' }, dm.user.displayName)),
     );
+  } else if (dm) {
+    title.replaceChildren(
+      dmAvatar(dm, 'xs'),
+      h('button', { class: 'header-user group-name', title: 'Mudar o nome do grupo', onclick: () => renameGroupDialog(dm) }, h('span', { class: 'truncate' }, dmName(dm))),
+    );
   } else if (channel && channel.kind === 'thread') {
     const parent = state.detail.channels.find((c) => c.id === channel.parentChannelId);
-    title.replaceChildren(
+    title.replaceChildren(...[
       parent ? h('button', { class: 'crumb', onclick: () => selectChannel(parent.id) }, h('span', { class: 'hash' }, '#'), h('span', { class: 'truncate' }, parent.name)) : null,
       parent ? h('span', { class: 'crumb-sep' }, '›') : null,
       h('span', { class: 'hash thread-icon' }, '🧵'), h('span', { class: 'truncate' }, channel.name),
-    );
+    ].filter(Boolean));
   } else {
-    title.replaceChildren(h('span', { class: 'hash' }, channel && channel.kind === 'voice' ? '🔊' : '#'), h('span', { class: 'truncate' }, channel ? channel.name : ''));
+    title.replaceChildren(...[h('span', { class: 'hash' }, channel && channel.kind === 'voice' ? '🔊' : '#'), h('span', { class: 'truncate' }, channel ? channel.name : ''),
+      channel && channel.private ? lockIcon() : null].filter(Boolean));
+  }
+  if (dm) {
+    const inThisCall = voiceState().channelId === dm.channelId;
+    const callActive = dm.voice && dm.voice.length > 0;
+    if (!inThisCall) {
+      actions.append(
+        h('button', { class: 'icon-btn call-btn', title: callActive ? 'Entrar na chamada' : 'Ligar (voz)', onclick: () => startDmCall(dm, false) }, '📞'),
+        h('button', { class: 'icon-btn call-btn', title: 'Chamada de vídeo', onclick: () => startDmCall(dm, true) }, '📹'),
+      );
+    }
+    actions.append(h('button', { class: 'icon-btn mobile-hide', title: 'Adicionar pessoas', onclick: () => addToGroupDialog(dm) }, '➕👤'));
+    if (dm.isGroup) {
+      actions.append(h('button', { class: 'icon-btn', title: 'Opções do grupo', onclick: (e) => groupMenu(e.currentTarget, dm) }, '⋯'));
+    } else {
+      actions.append(h('button', {
+        class: 'icon-btn mobile-only', title: 'Mais opções',
+        onclick: (e) => openMenu(e.currentTarget, [{ label: '➕  Criar grupo com mais amigos', onClick: () => addToGroupDialog(dm) }], { align: 'end', className: 'popover-menu' }),
+      }, '⋯'));
+    }
   }
   const textual = !!state.channelId && !(channel && channel.kind === 'voice');
   $('#btn-pins').hidden = !textual;
-  $('#btn-toggle-members').hidden = state.view === 'home';
+  $('#btn-toggle-members').hidden = !(state.view !== 'home' || (dm && dm.isGroup));
   $('#search-input').placeholder = state.view === 'home'
-    ? (dm ? `Buscar com @${dm.user.username}` : 'Buscar nas conversas')
+    ? (dm ? (dm.isGroup ? 'Buscar no grupo' : `Buscar com @${dm.user.username}`) : 'Buscar nas conversas')
     : `Buscar em ${state.detail ? state.detail.server.name : 'servidor'}`;
 }
 
@@ -835,7 +1036,8 @@ function renderMain() {
   $('#friends-page').hidden = !friendsPage;
   $('#voice-stage').hidden = !voicePage;
   $('#messages').hidden = friendsPage || voicePage;
-  $('#app').classList.toggle('home-view', state.view === 'home');
+  $('#app').classList.toggle('home-view', state.view === 'home' && !(currentDm() && currentDm().isGroup));
+  renderCallStage();
   if (friendsPage) renderFriendsPage($('#friends-page'));
   else if (voicePage) {
     renderStage($('#voice-stage'), {
@@ -848,10 +1050,50 @@ function renderMain() {
   } else renderMessages(); // cores/permissões podem ter mudado
 }
 
+// Chamada numa DM/grupo: aparece em cima das mensagens.
+function renderCallStage() {
+  const el = $('#call-stage');
+  const dm = state.view === 'home' ? currentDm() : null;
+  const inThisCall = dm && voiceState().channelId === dm.channelId && (inVoice() || voiceState().connecting);
+  const active = dm && ((dm.voice && dm.voice.length) || inThisCall);
+  el.hidden = !active;
+  if (!active) { el.replaceChildren(); return; }
+  if (voiceState().connecting && !inVoice()) {
+    el.replaceChildren(h('div', { class: 'stage-lobby small' }, h('p', { class: 'muted' }, 'Conectando…')));
+    return;
+  }
+  renderStage(el, {
+    channel: { id: dm.channelId, name: dmName(dm) },
+    serverId: null,
+    serverName: '',
+    others: dm.voice || [],
+    members: [state.me, ...dm.users],
+    isDm: true,
+    compact: true,
+  });
+}
+
 // ---------------------------------------------------------------- Membros
 
 function renderMembers() {
   const panel = $('#member-list');
+  const dm = state.view === 'home' ? currentDm() : null;
+  if (dm && dm.isGroup) {
+    const people = [state.me, ...dm.users];
+    panel.replaceChildren(h('div', { class: 'member-group' },
+      h('div', { class: 'section-title' }, `Membros — ${people.length}`),
+      people.map((m) => {
+        const online = m.id === state.me.id ? true : m.online;
+        return h('button', { class: `member${online ? '' : ' off'}`, onclick: (e) => openProfile(e.currentTarget, m) },
+          avatar(m, { size: 'sm', online: m.id === state.me.id ? (state.me.status || 'online') : (online ? presenceOf(m) : 'offline') }),
+          h('span', { class: 'member-info' },
+            h('span', { class: 'member-name' },
+              h('span', { class: 'name truncate' }, m.displayName),
+              m.id === dm.ownerId ? h('span', { class: 'owner-badge', title: 'Dono do grupo' }, '👑') : null),
+            online && m.statusText ? h('span', { class: 'member-status truncate' }, m.statusText) : null));
+      })));
+    return;
+  }
   if (state.view === 'home' || !state.detail) return panel.replaceChildren();
   const ownerId = state.detail.server.ownerId;
   const online = state.detail.members.filter((m) => m.online);
@@ -868,6 +1110,7 @@ function renderMembers() {
             h('span', { class: 'member-name' },
               h('span', { class: 'name truncate', style: color ? `color:${color}` : null }, m.displayName),
               m.isBot ? botTag() : null,
+              m.timeoutUntil ? h('span', { class: 'timeout-mark', title: 'De castigo' }, '⏳') : null,
               m.id === ownerId ? h('span', { class: 'owner-badge', title: 'Dono do servidor' }, '👑') : null),
             isOnline ? statusLine(m) : null));
       })));
@@ -962,7 +1205,11 @@ function renderMessages({ stick = 'if-near' } = {}) {
   } else {
     const dm = currentDm();
     const channel = currentChannel();
-    nodes.push(cached('top', `start|${dm ? dm.user.displayName : channel && channel.name}|${dm && dm.user.avatarUrl}`, () => {
+    nodes.push(cached('top', `start|${dm ? dmName(dm) : channel && channel.name}|${dm && dm.user && dm.user.avatarUrl}`, () => {
+      if (dm && dm.isGroup) {
+        return h('div', { class: 'channel-start' }, dmAvatar(dm, 'lg'), h('h2', {}, dmName(dm)),
+          h('p', { class: 'muted' }, 'Este é o começo do grupo. ', h('button', { class: 'link', onclick: () => addToGroupDialog(dm) }, 'Chamar mais amigos')));
+      }
       if (dm) {
         return h('div', { class: 'channel-start' }, avatar(dm.user, { size: 'lg' }), h('h2', {}, dm.user.displayName),
           h('p', { class: 'muted' }, `Este é o começo da sua conversa com @${dm.user.username}.`));
@@ -982,7 +1229,7 @@ function renderMessages({ stick = 'if-near' } = {}) {
     }));
   }
 
-  const view = `${state.detailVersion}|${state.view}`;
+  const view = `${state.detailVersion}|${state.view}|${effectiveTheme()}`;
   let prev = null;
   for (const m of bucket.items) {
     const date = new Date(m.createdAt);
@@ -992,6 +1239,7 @@ function renderMessages({ stick = 'if-near' } = {}) {
       nodes.push(cached(key, dayLabel(date), () => h('div', { class: 'day-sep' }, dayLabel(date))));
     }
     const grouped = !!prev && !newDay && prev.author.id === m.author.id && !prev.failed && !m.replyTo &&
+      prev.kind !== 'system' && m.kind !== 'system' &&
       date - new Date(prev.createdAt) < 7 * 60 * 1000;
     const replying = !!(state.replyTo && state.replyTo.message.id === m.id);
     const sig = [m._v || 0, grouped, !!m.pending, !!m.failed, state.editingId === m.id, replying, view].join('|');
@@ -1031,8 +1279,11 @@ function freshUser(u) {
   if (u.id === state.me.id) return { ...u, displayName: state.me.displayName, avatarUrl: state.me.avatarUrl };
   const m = memberById(u.id);
   if (m) return m;
-  const dm = state.dms.find((d) => d.user.id === u.id);
-  return dm ? dm.user : u;
+  for (const d of state.dms) {
+    const found = (d.users || []).find((x) => x.id === u.id);
+    if (found) return found;
+  }
+  return u;
 }
 
 // A linha "↱ Fulano: texto" acima de uma resposta.
@@ -1041,7 +1292,7 @@ function buildReplyRef(m) {
   if (r.deleted) return h('div', { class: 'reply-ref deleted' }, h('span', { class: 'reply-spine' }), h('em', {}, 'A mensagem original foi apagada'));
   const author = freshUser(r.author);
   const color = (r.author.id && roleColor(r.author.id)) || null;
-  const text = r.content ? r.content.replace(/\s+/g, ' ') : (r.hasAttachments ? '📎 Clique para ver o anexo' : '');
+  const text = r.content ? stripMarkdown(r.content) : (r.hasAttachments ? '📎 Clique para ver o anexo' : '');
   return h('button', { class: 'reply-ref', type: 'button', title: 'Ir para a mensagem', onclick: () => jumpToMessage(m.channelId, r.id) },
     h('span', { class: 'reply-spine' }),
     avatar(author, { size: 'xxs' }),
@@ -1060,7 +1311,17 @@ function buildThreadChip(m) {
     last ? h('span', { class: 'muted' }, `· ${fullTime(last)}`) : null);
 }
 
+// Aviso do sistema ("Ana adicionou Bia ao grupo").
+function buildSystemMessage(m) {
+  const date = new Date(m.createdAt);
+  return h('div', { class: 'msg system', dataset: { id: m.id } },
+    h('div', { class: 'msg-left' }, h('span', { class: 'sys-icon' }, '➜')),
+    h('div', { class: 'msg-body' }, h('span', { class: 'sys-text' }, m.content), ' ',
+      h('span', { class: 'msg-time', title: fullTime(date) }, fullTime(date))));
+}
+
 function buildMessage(m, grouped) {
+  if (m.kind === 'system') return buildSystemMessage(m);
   const date = new Date(m.createdAt);
   const mine = m.author.id === state.me.id;
   const mentionsMe = !mine && (m.mentions.includes(state.me.id) || m.mentionEveryone);
@@ -1073,7 +1334,7 @@ function buildMessage(m, grouped) {
 
   const body = h('div', { class: 'msg-body' });
   if (!grouped) {
-    const color = roleColor(m.author.id) || `hsl(${hueFor(m.author.id)} 75% 72%)`;
+    const color = roleColor(m.author.id) || (effectiveTheme() === 'light' ? `hsl(${hueFor(m.author.id)} 60% 36%)` : `hsl(${hueFor(m.author.id)} 75% 72%)`);
     body.append(h('div', { class: 'msg-head' },
       h('button', { class: 'msg-author', style: `color:${color}`, onclick: (e) => openProfile(e.currentTarget, authorUser) }, m.author.displayName),
       m.author.isBot ? botTag() : null,
@@ -1085,14 +1346,27 @@ function buildMessage(m, grouped) {
 
   if (editing) body.append(buildEditor(m));
   else if (m.content) {
-    body.append(h('div', { class: `msg-text${m.pending ? ' pending' : ''}${m.failed ? ' failed' : ''}${isJumboEmoji(m.content) ? ' jumbo' : ''}` },
-      renderMarkdown(m.content, renderContent),
+    body.append(h('div', { class: `msg-text${m.pending ? ' pending' : ''}${m.failed ? ' failed' : ''}${isJumbo(m.content) ? ' jumbo' : ''}` },
+      renderContent(m.content),
       m.editedAt ? h('span', { class: 'edited', title: fullTime(new Date(m.editedAt)) }, ' (editado)') : null));
   }
 
-  if (m.poll) body.append(buildPoll(m));
+  if (m.poll) {
+    body.append(buildPoll(m, {
+      meId: state.me.id,
+      nameOf: (id) => { const u = id === state.me.id ? state.me : freshUser({ id }); return u && u.displayName; },
+      canVote: !m.pending && (state.view === 'home' || !(state.detail && state.detail.me.timeoutUntil)),
+      canEnd: m.author.id === state.me.id || (state.view !== 'home' && can(P.MANAGE_MESSAGES)),
+      onVote: (options) => api(`/messages/${m.id}/poll`, { method: 'PUT', body: { options } })
+        .then(({ poll }) => updateMessage(m.channelId, m.id, { poll })).catch((err) => toast(err.message)),
+      onEnd: () => confirmDialog({
+        title: 'Encerrar a enquete agora?', text: 'Ninguém mais poderá votar.', okLabel: 'Encerrar',
+        onConfirm: () => api(`/messages/${m.id}/poll/end`, { method: 'POST' }),
+      }),
+    }));
+  }
   if (m.attachments.length) body.append(h('div', { class: 'attachments' }, m.attachments.map((a) => buildAttachment(a, m.pending))));
-  if (m.embeds && m.embeds.length && !editing) body.append(h('div', { class: 'embeds' }, m.embeds.map(buildEmbed)));
+  if (m.embeds && m.embeds.length && !editing) body.append(buildEmbeds(m.embeds, { onImageLoad: keepBottom }));
   if (m.failed) body.append(h('div', { class: 'msg-failed' }, 'Não foi enviada.'));
   if (m.reactions.length) body.append(buildReactions(m));
   if (m.thread) body.append(buildThreadChip(m));
@@ -1120,54 +1394,30 @@ function buildMessage(m, grouped) {
   return el;
 }
 
-// Texto com links e @menções destacados (sempre como texto, nunca HTML).
-const TOKEN_RE = /(https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]}'"])|(^|[^\w@])(@[a-z0-9_.]{3,32})/gi;
-
+// Texto com formatação, links e @menções (sempre montado como elementos, nunca HTML).
 function renderContent(text) {
-  const out = [];
-  const users = knownUsers();
-  let last = 0;
-  let match;
-  TOKEN_RE.lastIndex = 0;
-  while ((match = TOKEN_RE.exec(text))) {
-    if (match[1]) {
-      out.push(text.slice(last, match.index));
-      out.push(h('a', { href: match[1], target: '_blank', rel: 'noopener noreferrer nofollow' }, match[1]));
-      last = match.index + match[1].length;
-    } else {
-      const start = match.index + match[2].length;
-      const raw = match[3];
-      const name = raw.slice(1).toLowerCase().replace(/\.+$/, '');
-      const user = users.get(name);
-      if (name === 'everyone' || user) {
-        out.push(text.slice(last, start));
-        const shown = name === 'everyone' ? '@everyone' : `@${user.displayName}`;
-        out.push(h('span', {
-          class: `mention${user && user.id === state.me.id ? ' me' : ''}`,
-          title: user ? `@${user.username}` : null,
-          onclick: user ? (e) => openProfile(e.currentTarget, memberById(user.id) || user) : null,
-        }, shown));
-        // Mantém o ponto final que veio grudado no nome (ex.: "@ana.")
-        const consumed = `@${name}`.length;
-        last = start + consumed;
-      }
-    }
-  }
-  out.push(text.slice(last));
-  return out.filter((x) => x !== '');
+  return renderMarkdown(text, {
+    users: knownUsers(),
+    meId: state.me.id,
+    onMention: (el, user) => openProfile(el, memberById(user.id) || user),
+  });
+}
+
+// Imagem/prévia carregou: se a conversa estava no fim, continua no fim.
+function keepBottom() {
+  const box = $('#messages');
+  if (stickToBottom) box.scrollTop = box.scrollHeight;
 }
 
 function buildAttachment(a, pending) {
-  if (a.voice && !pending && !a.local) return voicePlayer(a);
   if (pending || a.local) {
+    if (a.isVoice) return h('div', { class: 'voice-msg pending' }, h('span', { class: 'vm-play' }, '🎤'), h('span', { class: 'muted' }, `Mensagem de voz · ${fmtDuration(a.duration)}`));
     return h('div', { class: 'att-file' }, h('span', { class: 'att-icon' }, '📎'), h('span', { class: 'truncate' }, a.filename));
   }
+  if (a.isVoice && a.kind === 'audio') return buildVoicePlayer(a);
   if (a.kind === 'image') {
     const img = h('img', { src: a.url, alt: a.filename, loading: 'lazy', class: 'att-img' });
-    img.addEventListener('load', () => {
-      const box = $('#messages');
-      if (stickToBottom) box.scrollTop = box.scrollHeight;
-    });
+    img.addEventListener('load', keepBottom);
     return h('a', { href: a.url, target: '_blank', rel: 'noopener', class: 'att-img-link', title: a.filename }, img);
   }
   if (a.kind === 'video') return h('video', { src: a.url, controls: true, preload: 'metadata', class: 'att-video' });
@@ -1177,147 +1427,6 @@ function buildAttachment(a, pending) {
     h('div', { class: 'att-info' },
       h('a', { href: a.url, download: a.filename, class: 'truncate' }, a.filename),
       h('span', { class: 'muted' }, formatSize(a.size))));
-}
-
-// ---------------------------------------------------------------- Prévia de links
-
-function buildEmbed(e) {
-  const scroll = () => { if (stickToBottom) $('#messages').scrollTop = $('#messages').scrollHeight; };
-  if (e.type === 'image') {
-    const img = h('img', { src: e.image, alt: '', loading: 'lazy', class: 'embed-only-img' });
-    img.addEventListener('load', scroll);
-    return h('a', { href: e.url, target: '_blank', rel: 'noopener noreferrer nofollow', class: 'embed-image-link' }, img);
-  }
-  const image = e.image ? h('img', { src: e.image, alt: '', loading: 'lazy' }) : null;
-  if (image) image.addEventListener('load', scroll);
-  let media = null;
-  if (e.youtubeId && image) {
-    media = h('button', { class: 'embed-video', type: 'button', title: 'Assistir aqui' }, image, h('span', { class: 'play' }, '▶'));
-    media.addEventListener('click', () => {
-      media.replaceWith(h('iframe', {
-        class: 'embed-iframe',
-        src: `https://www.youtube-nocookie.com/embed/${encodeURIComponent(e.youtubeId)}?autoplay=1`,
-        allow: 'autoplay; encrypted-media; picture-in-picture; fullscreen',
-        allowfullscreen: true,
-        referrerpolicy: 'strict-origin-when-cross-origin',
-        title: e.title || 'YouTube',
-      }));
-    });
-  } else if (image && e.largeImage) {
-    media = h('a', { href: e.url, target: '_blank', rel: 'noopener noreferrer nofollow', class: 'embed-large' }, image);
-  }
-  return h('div', { class: `embed${!media && image ? ' with-thumb' : ''}`, style: e.color ? `--embed-color:${e.color}` : null },
-    h('div', { class: 'embed-body' },
-      e.siteName ? h('div', { class: 'embed-site' }, e.siteName) : null,
-      e.title ? h('a', { class: 'embed-title', href: e.url, target: '_blank', rel: 'noopener noreferrer nofollow' }, e.title) : null,
-      e.description ? h('div', { class: 'embed-desc' }, e.description) : null,
-      media),
-    !media && image ? h('a', { class: 'embed-thumb', href: e.url, target: '_blank', rel: 'noopener noreferrer nofollow' }, image) : null);
-}
-
-// ---------------------------------------------------------------- Enquetes
-
-function timeLeft(date) {
-  const ms = new Date(date) - Date.now();
-  if (ms <= 0) return null;
-  const min = Math.ceil(ms / 60000);
-  if (min < 60) return `${min} min`;
-  const hours = Math.round(min / 60);
-  if (hours < 48) return `${hours} h`;
-  return `${Math.round(hours / 24)} dias`;
-}
-
-function buildPoll(m) {
-  const p = m.poll;
-  const ended = p.ended || new Date(p.endsAt) <= new Date();
-  const mine = new Set(p.options.filter((o) => o.users.includes(state.me.id)).map((o) => o.id));
-  const voted = mine.size > 0;
-  const showResults = voted || ended;
-  const maxVotes = Math.max(0, ...p.options.map((o) => o.users.length));
-  const canEnd = !ended && (m.author.id === state.me.id || (state.view !== 'home' && can(P.MANAGE_MESSAGES)));
-  const users = new Map([...knownUsers().values()].map((u) => [u.id, u]));
-  const vote = async (optionId) => {
-    let next;
-    if (p.multi) next = mine.has(optionId) ? [...mine].filter((id) => id !== optionId) : [...mine, optionId];
-    else next = mine.has(optionId) ? [] : [optionId];
-    try { await api(`/messages/${m.id}/poll`, { method: 'PUT', body: { optionIds: next } }); } catch (err) { toast(err.message); }
-  };
-  const left = timeLeft(p.endsAt);
-  return h('div', { class: `poll${ended ? ' ended' : ''}` },
-    h('div', { class: 'poll-q' }, p.question),
-    h('div', { class: 'poll-sub muted' }, ended ? 'Enquete encerrada' : p.multi ? 'Escolha uma ou mais opções' : 'Escolha uma opção'),
-    h('div', { class: 'poll-options' }, p.options.map((o) => {
-      const n = o.users.length;
-      const pct = p.totalVoters ? Math.round((n / p.totalVoters) * 100) : 0;
-      const winner = ended && n > 0 && n === maxVotes;
-      const names = o.users.map((id) => (users.get(id) || {}).displayName).filter(Boolean);
-      return h('button', {
-        type: 'button',
-        class: `poll-opt${mine.has(o.id) ? ' mine' : ''}${winner ? ' winner' : ''}${showResults ? ' results' : ''}`,
-        disabled: ended || m.pending,
-        title: showResults && names.length ? names.join(', ') : null,
-        onclick: () => vote(o.id),
-      },
-      showResults ? h('span', { class: 'poll-bar', style: `width:${pct}%` }) : null,
-      h('span', { class: `poll-check${p.multi ? ' square' : ''}` }, mine.has(o.id) ? '✓' : ''),
-      h('span', { class: 'poll-text' }, o.text, winner ? ' 🏆' : ''),
-      showResults ? h('span', { class: 'poll-count' }, `${n} · ${pct}%`) : null);
-    })),
-    h('div', { class: 'poll-foot muted' },
-      `${p.totalVoters} ${p.totalVoters === 1 ? 'voto' : 'votos'}`,
-      ended ? ' · encerrada' : left ? ` · termina em ${left}` : '',
-      voted && !ended ? ' · clique de novo para tirar o voto' : '',
-      canEnd ? h('button', {
-        class: 'link small', type: 'button',
-        onclick: () => confirmDialog({
-          title: 'Encerrar enquete', text: 'Ninguém mais vai poder votar.', okLabel: 'Encerrar',
-          onConfirm: () => api(`/messages/${m.id}/poll/end`, { method: 'POST' }),
-        }),
-      }, ' Encerrar agora') : null));
-}
-
-function createPollDialog() {
-  if (!state.channelId) return;
-  const question = h('input', { maxlength: '300', placeholder: 'Ex.: Que horas a gente joga?' });
-  const list = h('div', { class: 'poll-edit-options' });
-  const addOption = (value = '') => {
-    if (list.children.length >= 10) return toast('No máximo 10 opções.');
-    const input = h('input', { maxlength: '80', placeholder: `Opção ${list.children.length + 1}`, value });
-    const row = h('div', { class: 'poll-edit-row' }, input,
-      h('button', { class: 'icon-btn small', type: 'button', title: 'Remover', onclick: () => { if (list.children.length > 2) row.remove(); } }, '✕'));
-    list.append(row);
-    return input;
-  };
-  addOption(); addOption();
-  const duration = h('select', {},
-    [[1, '1 hora'], [4, '4 horas'], [8, '8 horas'], [24, '1 dia'], [72, '3 dias'], [168, '1 semana']]
-      .map(([v, label]) => h('option', { value: String(v), selected: v === 24 }, label)));
-  const multi = h('input', { type: 'checkbox', class: 'switch' });
-  openDialog({
-    title: '📊 Criar enquete',
-    body: h('div', { class: 'poll-editor' },
-      h('label', { class: 'field' }, 'Pergunta', question),
-      h('div', { class: 'field' }, 'Opções', list,
-        h('button', { class: 'btn small', type: 'button', onclick: () => { const i = addOption(); if (i) i.focus(); } }, '+ Adicionar opção')),
-      h('div', { class: 'poll-edit-bottom' },
-        h('label', { class: 'field' }, 'Duração', duration),
-        h('label', { class: 'switch-row' }, multi, h('span', {}, 'Permitir várias respostas')))),
-    actions: [
-      { label: 'Cancelar' },
-      {
-        label: 'Publicar', kind: 'primary', submit: true,
-        onClick: async () => {
-          const options = [...list.querySelectorAll('input')].map((i) => i.value.trim()).filter(Boolean);
-          if (!question.value.trim()) throw new Error('Escreva a pergunta.');
-          if (options.length < 2) throw new Error('Preencha pelo menos 2 opções.');
-          await api(`/channels/${state.channelId}/messages`, {
-            method: 'POST',
-            body: { content: '', poll: { question: question.value.trim(), options, multi: multi.checked, durationHours: Number(duration.value) } },
-          });
-        },
-      },
-    ],
-  });
 }
 
 function buildReactions(m) {
@@ -1439,15 +1548,26 @@ function renderComposerState() {
   input.disabled = !allowed;
   $('#composer').classList.toggle('disabled', !allowed);
   $('#btn-attach').hidden = !allowed;
-  $('#btn-voice').hidden = !allowed || !can(P.ATTACH_FILES) || !canRecord() || !!state.recording;
   const dm = currentDm();
   const channel = currentChannel();
-  input.placeholder = !allowed
-    ? 'Você não tem permissão para enviar mensagens aqui.'
-    : dm ? `Conversar com @${dm.user.username}`
-      : channel && channel.kind === 'thread' ? `Conversar em 🧵 ${channel.name}` : `Conversar em #${channel ? channel.name : ''}`;
+  const timeout = state.view !== 'home' && state.detail && state.detail.me.timeoutUntil;
+  input.placeholder = timeout
+    ? `Você está de castigo até ${fullTime(new Date(timeout)).replace(/^Hoje às /, '')} e só pode ler.`
+    : !allowed
+      ? 'Você não tem permissão para enviar mensagens aqui.'
+      : dm ? (dm.isGroup ? `Conversar em ${dmName(dm)}` : `Conversar com @${dm.user.username}`)
+        : channel && channel.kind === 'thread' ? `Conversar em 🧵 ${channel.name}` : `Conversar em #${channel ? channel.name : ''}`;
   renderUploads();
   renderReplyBar();
+  updateMicButton();
+}
+
+// Mostra o microfone (mensagem de voz) quando a caixa está vazia; senão, o botão Enviar.
+function updateMicButton() {
+  const canVoice = !input.disabled && can(P.ATTACH_FILES) && canRecord();
+  const empty = !input.value.trim() && state.uploads.length === 0;
+  $('#btn-mic').hidden = !canVoice || !empty;
+  $('#composer .send').hidden = canVoice && empty;
 }
 
 function autoResize() {
@@ -1457,6 +1577,7 @@ function autoResize() {
 
 input.addEventListener('input', () => {
   autoResize();
+  updateMicButton();
   updateAutocomplete();
   const now = Date.now();
   if (input.value.trim() && now - lastTypingSent > 2500 && state.socket) {
@@ -1465,8 +1586,25 @@ input.addEventListener('input', () => {
   }
 });
 
+// Atalhos de formatação: Ctrl+B negrito, Ctrl+I itálico, Ctrl+U sublinhado, Ctrl+Shift+X riscado.
+function wrapSelection(mark) {
+  const a = input.selectionStart;
+  const b = input.selectionEnd;
+  const sel = input.value.slice(a, b);
+  input.setRangeText(`${mark}${sel}${mark}`, a, b, 'end');
+  if (!sel) input.setSelectionRange(a + mark.length, a + mark.length);
+  else input.setSelectionRange(a + mark.length, b + mark.length);
+  autoResize();
+  updateMicButton();
+}
+
 input.addEventListener('keydown', (e) => {
   if (handleAutocompleteKey(e)) return;
+  if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+    const k = e.key.toLowerCase();
+    const mark = k === 'b' && !e.shiftKey ? '**' : k === 'i' && !e.shiftKey ? '*' : k === 'u' && !e.shiftKey ? '__' : k === 'x' && e.shiftKey ? '~~' : null;
+    if (mark) { e.preventDefault(); wrapSelection(mark); return; }
+  }
   if (e.key === 'Escape' && state.replyTo) { e.preventDefault(); setReply(null); return; }
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
@@ -1474,7 +1612,7 @@ input.addEventListener('keydown', (e) => {
   } else if (e.key === 'ArrowUp' && !input.value) {
     // Seta para cima com a caixa vazia: edita sua última mensagem.
     const bucket = state.messages.get(state.channelId);
-    const last = bucket && [...bucket.items].reverse().find((m) => m.author.id === state.me.id && !m.pending && !m.failed);
+    const last = bucket && [...bucket.items].reverse().find((m) => m.author.id === state.me.id && !m.pending && !m.failed && m.kind !== 'system');
     if (last) { e.preventDefault(); startEdit(last); }
   }
 });
@@ -1515,6 +1653,7 @@ function sendMessage() {
   autoResize();
   clearUploads();
   hideAutocomplete();
+  updateMicButton();
   setReply(null, { render: false });
   lastTypingSent = 0;
   renderMessages({ stick: 'always' });
@@ -1540,11 +1679,138 @@ function sendMessage() {
 
 const MAX_ATTACHMENTS = 5;
 
+// "+" abre um menu: arquivo ou enquete.
 $('#btn-attach').addEventListener('click', (e) => openMenu(e.currentTarget, [
   { label: '📎  Enviar arquivo', hidden: !can(P.ATTACH_FILES), onClick: () => $('#file-input').click() },
-  { label: '📊  Criar enquete', onClick: createPollDialog },
-  { label: '🎤  Mensagem de voz', hidden: !can(P.ATTACH_FILES) || !canRecord(), onClick: beginRecording },
-]));
+  { label: '📊  Criar enquete', onClick: () => openPollDialog() },
+  { label: '🎤  Mensagem de voz', hidden: !can(P.ATTACH_FILES) || !canRecord(), onClick: () => startVoiceMessage(true) },
+], { className: 'popover-menu' }));
+
+function openPollDialog() {
+  const channelId = state.channelId;
+  createPollDialog(async (poll) => {
+    const res = await new Promise((resolve) => state.socket.timeout(15000).emit('message:send', { channelId, content: '', poll }, (err, r) => resolve(err ? { ok: false, error: 'Sem conexão.' } : r)));
+    if (!res || !res.ok) throw new Error((res && res.error) || 'Não foi possível criar a enquete.');
+    if (channelId === state.channelId) {
+      const bucket = bucketFor(channelId);
+      if (!bucket.items.some((m) => m.id === res.message.id)) bucket.items.push(res.message);
+      renderMessages({ stick: 'always' });
+    }
+  });
+}
+
+// ---------------------------------------------------------------- Mensagem de voz
+// Segure o 🎤 para gravar e solte para enviar; um toque rápido grava "travado" (com botões).
+let rec = null; // { recorder, channelId, locked, timer, startedAt }
+
+async function startVoiceMessage(locked = false) {
+  if (rec || !state.channelId) return;
+  const channelId = state.channelId;
+  rec = { channelId, locked, starting: true };
+  renderRecBar();
+  try {
+    const recorder = await startRecording({ onTick: () => renderRecBar() });
+    if (!rec || rec.cancelled) { recorder.cancel(); rec = null; renderRecBar(); return; }
+    rec.recorder = recorder;
+    rec.starting = false;
+    recorder.onAutoStop = () => finishVoiceMessage(true);
+    if (rec.releasedEarly) { rec.locked = true; rec.releasedEarly = false; }
+    renderRecBar();
+  } catch (err) {
+    rec = null;
+    renderRecBar();
+    toast(err.message);
+  }
+}
+
+async function finishVoiceMessage(send) {
+  const r = rec;
+  if (!r) return;
+  rec = null;
+  renderRecBar();
+  if (!r.recorder) { r.cancelled = true; return; }
+  if (!send) { r.recorder.cancel(); return; }
+  if (r.recorder.elapsed() < 0.7) { r.recorder.cancel(); toast('Segure o 🎤 enquanto fala (áudio curto demais).'); return; }
+  let result;
+  try { result = await r.recorder.stop(); } catch (err) { return toast(err.message); }
+  const { file, duration, waveform } = result;
+  const nonce = `n${Date.now().toString(36)}${++tempSeq}`;
+  const temp = {
+    id: `tmp-${nonce}`, nonce, pending: true, channelId: r.channelId, serverId: state.view === 'home' ? null : state.view,
+    content: '', createdAt: new Date().toISOString(), author: state.me, mentions: [], mentionEveryone: false, kind: 'default',
+    reactions: [], embeds: [], poll: null, replyTo: null, thread: null, pinnedAt: null,
+    attachments: [{ id: nonce, filename: file.name, isVoice: true, duration, local: true }],
+  };
+  const bucket = bucketFor(r.channelId);
+  bucket.items.push(temp);
+  if (r.channelId === state.channelId) renderMessages({ stick: 'always' });
+  try {
+    const att = await uploadFile(file, () => {}, { 'X-Voice-Duration': duration.toFixed(2), 'X-Voice-Waveform': waveform });
+    state.socket.timeout(15000).emit('message:send', { channelId: r.channelId, content: '', attachmentIds: [att.id], nonce }, (err, res) => {
+      const idx = bucket.items.indexOf(temp);
+      if (err || !res || !res.ok) {
+        if (idx !== -1) Object.assign(temp, { pending: false, failed: true, _v: 1 });
+        toast((res && res.error) || 'Não foi possível enviar o áudio.');
+      } else if (idx !== -1) {
+        if (bucket.items.some((m) => m !== temp && m.id === res.message.id)) bucket.items.splice(idx, 1);
+        else bucket.items[idx] = res.message;
+      }
+      if (r.channelId === state.channelId) renderMessages();
+    });
+  } catch (err) {
+    Object.assign(temp, { pending: false, failed: true, _v: 1 });
+    if (r.channelId === state.channelId) renderMessages();
+    toast(err.message);
+  }
+}
+
+function renderRecBar() {
+  const bar = $('#rec-bar');
+  $('#composer').hidden = !!rec;
+  if (!rec) { bar.hidden = true; bar.replaceChildren(); return; }
+  bar.hidden = false;
+  const secs = rec.recorder ? rec.recorder.elapsed() : 0;
+  bar.replaceChildren(
+    h('button', { type: 'button', class: 'icon-btn rec-cancel', title: 'Cancelar', onclick: () => finishVoiceMessage(false) }, '🗑️'),
+    h('span', { class: 'rec-dot' }),
+    h('span', { class: 'rec-time' }, rec.starting ? 'Preparando…' : fmtDuration(secs)),
+    rec.recorder ? liveBars(rec.recorder.levels()) : h('span', { class: 'rec-bars' }),
+    h('span', { class: 'muted small rec-hint' }, rec.locked ? '' : 'Solte para enviar'),
+    rec.locked ? h('button', { type: 'button', class: 'btn primary small', onclick: () => finishVoiceMessage(true) }, 'Enviar ➤') : '',
+  );
+}
+
+// Segurar o botão do microfone.
+(() => {
+  const mic = $('#btn-mic');
+  let downAt = 0;
+  mic.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    e.preventDefault();
+    downAt = performance.now();
+    try { mic.setPointerCapture(e.pointerId); } catch { /* ignora */ }
+    startVoiceMessage(false);
+  });
+  const up = (e) => {
+    if (!downAt) return;
+    const held = performance.now() - downAt;
+    downAt = 0;
+    if (!rec) return;
+    if (e.type === 'pointercancel') return finishVoiceMessage(false);
+    // Toque rápido: continua gravando, com os botões Cancelar/Enviar.
+    if (held < 350) {
+      if (rec.recorder) rec.locked = true; else rec.releasedEarly = true;
+      renderRecBar();
+      return;
+    }
+    if (!rec.locked) finishVoiceMessage(true);
+  };
+  mic.addEventListener('pointerup', up);
+  mic.addEventListener('pointercancel', up);
+  mic.addEventListener('contextmenu', (e) => e.preventDefault());
+})();
+
+
 $('#file-input').addEventListener('change', (e) => {
   addFiles([...e.target.files]);
   e.target.value = '';
@@ -1574,6 +1840,7 @@ function clearUploads() {
 }
 
 function renderUploads() {
+  updateMicButton();
   const box = $('#uploads');
   box.hidden = state.uploads.length === 0;
   box.replaceChildren(...state.uploads.map((u) => h('div', { class: `upload${u.error ? ' error' : ''}` },
@@ -1613,74 +1880,6 @@ main.addEventListener('drop', (e) => {
   if (files.length) addFiles(files);
 });
 
-// ---------------------------------------------------------------- Mensagem de voz
-
-state.recording = null; // { rec, channelId, timer }
-
-$('#btn-voice').addEventListener('click', () => beginRecording());
-
-async function beginRecording() {
-  if (state.recording || !state.channelId) return;
-  if (!can(P.ATTACH_FILES) || !can(P.SEND_MESSAGES)) return toast('Você não pode enviar áudio aqui.');
-  const channelId = state.channelId;
-  const time = h('span', { class: 'rec-time' }, '0:00');
-  const bars = h('div', { class: 'rec-wave' });
-  const bar = $('#recorder');
-  bar.replaceChildren(
-    h('button', { class: 'icon-btn rec-cancel', type: 'button', title: 'Cancelar (Esc)', onclick: () => stopRecording(false) }, '🗑️'),
-    h('span', { class: 'rec-dot' }), time, bars,
-    h('button', { class: 'btn primary rec-send', type: 'button', title: 'Enviar (Enter)', onclick: () => stopRecording(true) }, 'Enviar ➤'));
-  try {
-    const rec = await startRecording({
-      onTick: (elapsed, levels) => {
-        time.textContent = formatDuration(elapsed);
-        const last = levels.slice(-40);
-        const peak = Math.max(0.02, ...levels);
-        bars.replaceChildren(...last.map((v) => h('i', { style: `height:${Math.max(8, Math.round(Math.sqrt(v / peak) * 100))}%` })));
-        if (elapsed > MAX_VOICE_MS - 10000) time.classList.add('warn');
-      },
-      onAutoStop: () => stopRecording(true),
-    });
-    state.recording = { rec, channelId };
-    $('#composer').hidden = true;
-    bar.hidden = false;
-    bar.querySelector('.rec-send').focus();
-    renderComposerState();
-  } catch (err) {
-    toast(err.message);
-  }
-}
-
-async function stopRecording(send) {
-  const cur = state.recording;
-  if (!cur) return;
-  state.recording = null;
-  $('#recorder').hidden = true;
-  $('#composer').hidden = false;
-  renderComposerState();
-  if (!send) { cur.rec.cancel(); return; }
-  const result = await cur.rec.stop();
-  if (!result || result.durationMs < 700 || !result.blob.size) return toast('Áudio curto demais.');
-  const ext = result.blob.type.includes('mp4') || result.blob.type.includes('aac') ? 'm4a' : result.blob.type.includes('ogg') ? 'ogg' : 'webm';
-  const file = new File([result.blob], `mensagem-de-voz.${ext}`, { type: result.blob.type });
-  toast('Enviando áudio…');
-  try {
-    const att = await uploadFile(file, () => {}, { 'X-Voice-Duration': String(result.durationMs), 'X-Voice-Waveform': result.waveform });
-    const res = await new Promise((resolve) => state.socket.timeout(15000).emit('message:send', {
-      channelId: cur.channelId, content: '', attachmentIds: [att.id], nonce: `v${Date.now().toString(36)}`,
-    }, (err, r) => resolve(err ? { ok: false } : r)));
-    if (!res || !res.ok) throw new Error((res && res.error) || 'Não foi possível enviar o áudio.');
-  } catch (err) {
-    toast(err.message);
-  }
-}
-
-document.addEventListener('keydown', (e) => {
-  if (!state.recording || document.querySelector('dialog[open]')) return;
-  if (e.key === 'Escape') { e.preventDefault(); stopRecording(false); }
-  if (e.key === 'Enter') { e.preventDefault(); stopRecording(true); }
-});
-
 // ---------------------------------------------------------------- Emojis no texto
 
 $('#btn-emoji').addEventListener('click', (e) => {
@@ -1702,7 +1901,7 @@ let ac = null; // { items, index, start }
 function mentionCandidates() {
   if (state.view === 'home') {
     const dm = currentDm();
-    return dm ? [dm.user, state.me] : [];
+    return dm ? [...dm.users, state.me] : [];
   }
   return state.detail ? state.detail.members : [];
 }
@@ -1824,12 +2023,40 @@ export function openProfile(anchor, user) {
     } else {
       actions.push(h('span', { class: 'friend-tag' }, '✓ Amigos'));
     }
-    if (member && can(P.KICK_MEMBERS) && user.id !== state.detail.server.ownerId && memberTop(member) < myTop()) {
-      actions.push(h('button', { class: 'btn danger-ghost', onclick: () => kickMember(member) }, 'Expulsar'));
+    if (member && user.id !== state.detail.server.ownerId && memberTop(member) < myTop()
+      && (can(P.KICK_MEMBERS) || can(P.BAN_MEMBERS) || can(P.MODERATE_MEMBERS))) {
+      actions.push(h('button', {
+        class: 'btn danger-ghost', onclick: (e) => {
+          const anchor = e.currentTarget;
+          openMenu(anchor, [
+            can(P.MODERATE_MEMBERS) ? { label: member.timeoutUntil ? '⏳  Castigo…' : '⏳  Castigar…', onClick: () => timeoutMenu(anchor, member) } : null,
+            can(P.KICK_MEMBERS) ? { label: '👢  Expulsar', danger: true, onClick: () => kickDialog(member) } : null,
+            can(P.BAN_MEMBERS) ? { label: '🔨  Banir', danger: true, onClick: () => banDialog(member) } : null,
+          ], { className: 'popover-menu' });
+        },
+      }, 'Moderar ▾'));
     }
+    const vs = voiceState();
+    const inCallWithThem = vs.room && ((state.detail && state.detail.voice && (state.detail.voice[vs.channelId] || []).some((p) => p.userId === user.id))
+      || state.dms.some((d) => d.channelId === vs.channelId && (d.voice || []).some((p) => p.userId === user.id)));
+    if (inCallWithThem) actions.push(h('button', { class: 'btn', onclick: (e) => openVolumePopover(e.currentTarget, user) }, '🔊 Volume'));
   }
 
   const color = member ? roleColor(member.id) : null;
+  // "Sobre mim" e servidores em comum chegam um instante depois.
+  const extra = h('div', { class: 'profile-extra' });
+  if (!user.isBot || isMe) {
+    api(`/users/${user.id}/profile`).then((p) => {
+      const parts = [];
+      if (p.about) parts.push(h('div', { class: 'profile-section' }, h('div', { class: 'profile-label' }, 'Sobre mim'), h('div', { class: 'profile-about' }, renderContent(p.about))));
+      if (p.mutualServers && p.mutualServers.length && state.view === 'home') {
+        parts.push(h('div', { class: 'profile-section' }, h('div', { class: 'profile-label' }, 'Servidores em comum'),
+          h('div', { class: 'muted small' }, p.mutualServers.map((x) => x.name).join(', '))));
+      }
+      if (p.createdAt) parts.push(h('div', { class: 'profile-section muted small' }, `No Nexo desde ${new Date(p.createdAt).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' })}`));
+      extra.replaceChildren(...parts);
+    }).catch(() => {});
+  }
   openPopover(anchor, h('div', { class: 'profile' },
     h('div', { class: 'profile-banner', style: `--hue:${hueFor(user.id)}` }),
     h('div', { class: 'profile-avatar' }, avatar(freshUser(user), { size: 'xl', online: online === undefined && !isMe ? undefined : (isMe ? status : (online ? status : 'offline')) })),
@@ -1838,19 +2065,11 @@ export function openProfile(anchor, user) {
       h('div', { class: 'muted' }, `@${user.username}`),
       statusText ? h('div', { class: 'profile-status' }, statusText) : null,
       member && member.id === state.detail.server.ownerId ? h('div', { class: 'owner-line' }, '👑 Dono do servidor') : null,
+      member && member.timeoutUntil ? h('div', { class: 'timeout-tag' }, `⏳ De castigo até ${fullTime(new Date(member.timeoutUntil))}`) : null,
+      extra,
       roles.length ? h('div', { class: 'role-chips' }, roles.map((r) => h('span', { class: 'role-chip' },
         h('i', { style: `background:${r.color || 'var(--text-3)'}` }), r.name))) : null,
       actions.length ? h('div', { class: 'profile-actions' }, actions) : null)), { className: 'popover-profile' });
-}
-
-function kickMember(member) {
-  closePopover();
-  confirmDialog({
-    title: `Expulsar ${member.displayName}`,
-    text: `${member.displayName} vai sair do servidor, mas pode voltar se receber um convite.`,
-    okLabel: 'Expulsar',
-    onConfirm: () => api(`/servers/${state.view}/members/${member.id}`, { method: 'DELETE' }),
-  });
 }
 
 // ================================================================ Servidor: menus e janelas
@@ -1858,73 +2077,114 @@ function kickMember(member) {
 function openServerMenu(anchor) {
   const d = state.detail;
   if (!d) return;
-  const manageSomething = isOwner() || can(P.MANAGE_SERVER) || can(P.MANAGE_ROLES) || can(P.KICK_MEMBERS);
+  const manageSomething = isOwner() || can(P.MANAGE_SERVER) || can(P.MANAGE_ROLES) || can(P.KICK_MEMBERS)
+    || can(P.BAN_MEMBERS) || can(P.MODERATE_MEMBERS) || can(P.VIEW_AUDIT_LOG) || can(P.CREATE_INVITE);
   openMenu(anchor, [
-    { label: '✉️  Convidar pessoas', hidden: !d.server.inviteCode, onClick: inviteDialog },
+    { label: '✉️  Convidar pessoas', hidden: !can(P.CREATE_INVITE), onClick: inviteDialog },
     { label: '⚙️  Configurações do servidor', hidden: !manageSomething, onClick: () => openServerSettings() },
     { label: '➕  Criar canal', hidden: !can(P.MANAGE_CHANNELS), onClick: () => createChannelDialog('text') },
+    { label: '📁  Criar categoria', hidden: !can(P.MANAGE_CHANNELS), onClick: createCategoryDialog },
+    { label: '📜  Registro de auditoria', hidden: !can(P.VIEW_AUDIT_LOG), onClick: () => openServerSettings('audit') },
     { separator: true, hidden: isOwner() },
     { label: '🚪  Sair do servidor', danger: true, hidden: isOwner(), onClick: leaveServerDialog },
   ], { className: 'popover-menu' });
 }
 
-function inviteDialog() {
+// Escolher categoria e quem vê o canal (usado ao criar e ao editar).
+function channelOptionsFields(channel) {
   const d = state.detail;
-  const link = `${location.origin}/convite/${d.server.inviteCode}`;
-  const field = h('input', { value: link, readonly: true });
-  const codeLine = h('p', { class: 'muted small' }, 'Ou passe só o código: ', h('strong', {}, d.server.inviteCode));
-  const actions = [];
-  if (can(P.MANAGE_SERVER)) {
-    actions.push({
-      label: 'Gerar novo', close: false,
-      onClick: async () => {
-        const { inviteCode } = await api(`/servers/${d.server.id}/invite`, { method: 'POST' });
-        d.server.inviteCode = inviteCode;
-        field.value = `${location.origin}/convite/${inviteCode}`;
-        codeLine.lastChild.textContent = inviteCode;
-        toast('Novo convite gerado. O antigo parou de funcionar.');
-      },
-    });
-  }
-  actions.push({ label: 'Fechar' });
-  actions.push({
-    label: 'Copiar link', kind: 'primary', submit: true,
-    onClick: async () => {
-      if (await copyText(field.value, field)) toast('Link copiado!');
-      else throw new Error('Não deu para copiar automaticamente. Selecione e copie com Ctrl+C.');
-    },
-  });
-  openDialog({
-    title: `Convide amigos para ${d.server.name}`,
-    text: 'Quem abrir o link (ou colar o código no botão ↪) entra no servidor.',
-    body: h('div', {}, field, codeLine),
-    actions,
-  });
+  const cats = d.channels.filter((c) => c.kind === 'category').sort((a, b) => a.position - b.position);
+  const category = h('select', { class: 'select' },
+    h('option', { value: '' }, '(sem categoria)'),
+    cats.map((c) => h('option', { value: String(c.id), selected: channel.categoryId === c.id }, c.name)));
+  const roles = d.roles.filter((r) => !r.isDefault).sort((a, b) => b.position - a.position);
+  const chosen = new Set(channel.allowedRoleIds || []);
+  const priv = h('input', { type: 'checkbox', class: 'switch', checked: !!channel.private });
+  const roleList = h('div', { class: 'role-pick', hidden: !channel.private },
+    h('p', { class: 'muted small' }, 'Quem pode ver: o dono, administradores e os cargos marcados abaixo.'),
+    roles.length ? roles.map((r) => h('label', { class: 'role-pick-item' },
+      h('input', { type: 'checkbox', checked: chosen.has(r.id), onchange: (e) => { if (e.target.checked) chosen.add(r.id); else chosen.delete(r.id); } }),
+      h('i', { class: 'role-dot', style: `background:${r.color || 'var(--text-3)'}` }), r.name))
+      : h('p', { class: 'muted small' }, 'Ainda não há cargos. Crie cargos nas configurações do servidor para liberar o canal para eles.'));
+  priv.addEventListener('change', () => { roleList.hidden = !priv.checked; });
+  const el = h('div', {},
+    cats.length ? h('label', { class: 'field' }, 'Categoria', category) : null,
+    h('label', { class: 'switch-line' }, priv, h('span', {}, h('strong', {}, '🔒 Canal privado'), h('span', { class: 'muted small block' }, 'Só alguns cargos conseguem ver e entrar.'))),
+    roleList);
+  return {
+    el,
+    values: () => ({ categoryId: category.value ? Number(category.value) : null, private: priv.checked, roleIds: [...chosen] }),
+  };
 }
 
-function createChannelDialog(kind = 'text') {
+function createChannelDialog(kind = 'text', categoryId) {
   let chosen = kind === 'voice' ? 'voice' : 'text';
   const name = h('input', { placeholder: 'novo-canal', maxlength: '100' });
   const option = (value, icon, label, desc) => h('label', { class: 'kind-option' },
     h('input', { type: 'radio', name: 'kind', value, checked: chosen === value, onchange: () => { chosen = value; } }),
     h('span', { class: 'kind-icon' }, icon),
     h('span', { class: 'kind-text' }, h('strong', {}, label), h('span', { class: 'muted small' }, desc)));
+  const fallbackCat = categoryId !== undefined ? categoryId
+    : (state.detail.channels.find((c) => c.kind === 'category' && c.name === (chosen === 'voice' ? 'Canais de voz' : 'Canais de texto')) || {}).id;
+  const opts = channelOptionsFields({ categoryId: fallbackCat || null, private: false, allowedRoleIds: [] });
   openDialog({
     title: 'Criar canal',
     body: h('div', {},
       h('div', { class: 'kind-options' },
-        option('text', '#', 'Texto', 'Mensagens, imagens, emojis e arquivos'),
+        option('text', '#', 'Texto', 'Mensagens, imagens, enquetes e arquivos'),
         option('voice', '🔊', 'Voz', 'Conversa por voz, câmera e tela')),
-      h('label', { class: 'field' }, 'Nome do canal', name)),
+      h('label', { class: 'field' }, 'Nome do canal', name),
+      opts.el),
     actions: [
       { label: 'Cancelar' },
       {
         label: 'Criar canal', kind: 'primary', submit: true,
         onClick: async () => {
           if (!name.value.trim()) throw new Error('Dê um nome ao canal.');
-          const { channel } = await api(`/servers/${state.view}/channels`, { method: 'POST', body: { name: name.value.trim(), kind: chosen } });
+          const { channel } = await api(`/servers/${state.view}/channels`, { method: 'POST', body: { name: name.value.trim(), kind: chosen, ...opts.values() } });
           await refreshDetail();
           await selectChannel(channel.id);
+        },
+      },
+    ],
+  });
+}
+
+function createCategoryDialog() {
+  ask({
+    title: 'Criar categoria',
+    text: 'Categorias agrupam canais (ex.: "Jogos", "Estudos"). Depois é só arrastar os canais para dentro.',
+    placeholder: 'Nome da categoria',
+    maxLength: 60,
+    okLabel: 'Criar',
+    onSubmit: async (name) => {
+      if (!name) throw new Error('Dê um nome à categoria.');
+      await api(`/servers/${state.view}/channels`, { method: 'POST', body: { name, kind: 'category' } });
+    },
+  });
+}
+
+function editCategoryDialog(cat) {
+  const input2 = h('input', { value: cat.name, maxlength: '60' });
+  openDialog({
+    title: 'Editar categoria',
+    body: h('label', { class: 'field' }, 'Nome da categoria', input2),
+    actions: [
+      {
+        label: 'Apagar categoria', kind: 'danger-ghost',
+        onClick: () => confirmDialog({
+          title: `Apagar a categoria "${cat.name}"?`,
+          text: 'Os canais dela NÃO são apagados: eles só ficam sem categoria.',
+          okLabel: 'Apagar categoria',
+          onConfirm: () => api(`/channels/${cat.id}`, { method: 'DELETE' }),
+        }),
+      },
+      { label: 'Cancelar' },
+      {
+        label: 'Salvar', kind: 'primary', submit: true,
+        onClick: async () => {
+          if (!input2.value.trim()) throw new Error('Dê um nome à categoria.');
+          await api(`/channels/${cat.id}`, { method: 'PATCH', body: { name: input2.value.trim() } });
         },
       },
     ],
@@ -1934,9 +2194,10 @@ function createChannelDialog(kind = 'text') {
 function editChannelDialog(channel) {
   const thread = channel.kind === 'thread';
   const input2 = h('input', { value: channel.name, maxlength: '100' });
+  const opts = !thread && can(P.MANAGE_CHANNELS) ? channelOptionsFields(channel) : null;
   openDialog({
     title: thread ? 'Editar thread' : 'Editar canal',
-    body: h('label', { class: 'field' }, thread ? 'Nome da thread' : 'Nome do canal', input2),
+    body: h('div', {}, h('label', { class: 'field' }, thread ? 'Nome da thread' : 'Nome do canal', input2), opts ? opts.el : null),
     actions: [
       {
         label: thread ? 'Apagar thread' : 'Apagar canal', kind: 'danger-ghost',
@@ -1956,7 +2217,7 @@ function editChannelDialog(channel) {
         onClick: async () => {
           const name = input2.value.trim();
           if (!name) throw new Error('Dê um nome ao canal.');
-          await api(`/channels/${channel.id}`, { method: 'PATCH', body: { name } });
+          await api(`/channels/${channel.id}`, { method: 'PATCH', body: { name, ...(opts ? opts.values() : {}) } });
         },
       },
     ],
@@ -2025,21 +2286,200 @@ $('#btn-join-server').addEventListener('click', () => ask({
   },
 }));
 
-function newDmDialog() {
-  const friends = state.friends.friends;
+// Nova conversa: 1 amigo = conversa a dois; 2 ou mais = grupo.
+function pickFriendsDialog({ title, text, exclude = [], max = 9, okLabel, onSubmit }) {
+  const friends = state.friends.friends.filter((f) => !exclude.includes(f.id));
   if (friends.length === 0) {
-    toast('Adicione amigos primeiro, ou abra uma conversa pelo perfil de alguém do seu servidor.');
-    return goHome();
+    toast(exclude.length ? 'Todos os seus amigos já estão aqui.' : 'Adicione amigos primeiro, ou abra uma conversa pelo perfil de alguém do seu servidor.');
+    return;
   }
+  const chosen = new Set();
+  const filter = h('input', { placeholder: 'Procurar amigo', maxlength: '32' });
+  const counter = h('span', { class: 'muted small' }, `0 de ${max}`);
+  const list = h('div', { class: 'pick-list' });
+  const draw = () => {
+    const q = filter.value.trim().toLowerCase();
+    list.replaceChildren(...friends.filter((f) => !q || f.displayName.toLowerCase().includes(q) || f.username.includes(q)).map((f) => h('label', { class: 'pick-item' },
+      h('input', {
+        type: 'checkbox', checked: chosen.has(f.id),
+        onchange: (e) => {
+          if (e.target.checked && chosen.size >= max) { e.target.checked = false; return toast(`No máximo ${max}.`); }
+          if (e.target.checked) chosen.add(f.id); else chosen.delete(f.id);
+          counter.textContent = `${chosen.size} de ${max}`;
+        },
+      }),
+      avatar(f, { size: 'sm', online: f.online ? presenceOf(f) : 'offline' }), h('strong', {}, f.displayName), h('span', { class: 'muted' }, `@${f.username}`))));
+  };
+  filter.addEventListener('input', draw);
+  draw();
   openDialog({
-    title: 'Nova conversa',
-    text: 'Escolha um amigo.',
-    body: h('div', { class: 'pick-list' }, friends.map((f) => h('button', {
-      class: 'pick-item', type: 'button',
-      onclick: (e) => { e.currentTarget.closest('dialog').close(); openDm(f.id); },
-    }, avatar(f, { size: 'sm', online: f.online ? presenceOf(f) : 'offline' }), h('strong', {}, f.displayName), h('span', { class: 'muted' }, `@${f.username}`)))),
-    actions: [{ label: 'Fechar' }],
+    title, text,
+    body: h('div', { class: 'stack' }, filter, list, counter),
+    actions: [
+      { label: 'Cancelar' },
+      { label: okLabel, kind: 'primary', submit: true, onClick: () => onSubmit([...chosen]) },
+    ],
   });
+}
+
+function newDmDialog() {
+  pickFriendsDialog({
+    title: 'Nova conversa',
+    text: 'Escolha 1 amigo para conversar a dois, ou vários para criar um grupo (até 10 pessoas).',
+    okLabel: 'Começar conversa',
+    onSubmit: async (ids) => {
+      if (!ids.length) throw new Error('Escolha pelo menos um amigo.');
+      if (ids.length === 1) return openDm(ids[0]);
+      const { channelId } = await api('/dms/group', { method: 'POST', body: { userIds: ids } });
+      await loadDms();
+      await goHome(channelId);
+    },
+  });
+}
+
+function addToGroupDialog(dm) {
+  const exclude = dm.isGroup ? dm.users.map((u) => u.id) : [dm.user.id];
+  pickFriendsDialog({
+    title: dm.isGroup ? 'Adicionar ao grupo' : 'Criar grupo',
+    text: dm.isGroup ? 'Quem você quer chamar para o grupo?' : `Escolha quem mais vai entrar. Vai ser criado um grupo novo com você, ${dm.user.displayName} e as pessoas escolhidas.`,
+    exclude,
+    max: 10 - (dm.isGroup ? dm.users.length + 1 : 2),
+    okLabel: 'Adicionar',
+    onSubmit: async (ids) => {
+      if (!ids.length) throw new Error('Escolha pelo menos um amigo.');
+      const { channelId } = await api(`/dms/${dm.channelId}/members`, { method: 'POST', body: { userIds: ids } });
+      await loadDms();
+      if (channelId !== dm.channelId) await goHome(channelId);
+    },
+  });
+}
+
+function renameGroupDialog(dm) {
+  ask({
+    title: 'Nome do grupo',
+    text: 'Todo mundo do grupo vê o nome novo. Deixe vazio para mostrar os nomes das pessoas.',
+    value: dm.name || '',
+    maxLength: 60,
+    okLabel: 'Salvar',
+    onSubmit: (name) => api(`/dms/${dm.channelId}`, { method: 'PATCH', body: { name } }),
+  });
+}
+
+function groupMenu(anchor, dm) {
+  const owner = dm.ownerId === state.me.id;
+  openMenu(anchor, [
+    { label: '✏️  Mudar nome do grupo', onClick: () => renameGroupDialog(dm) },
+    { label: '➕  Adicionar pessoas', onClick: () => addToGroupDialog(dm) },
+    { label: '👢  Tirar alguém do grupo', hidden: !owner || !dm.users.length, onClick: () => removeFromGroupMenu(anchor, dm) },
+    { separator: true },
+    {
+      label: '🚪  Sair do grupo', danger: true,
+      onClick: () => confirmDialog({
+        title: `Sair de "${dmName(dm)}"?`,
+        text: 'Você só volta se alguém do grupo te adicionar de novo.',
+        okLabel: 'Sair do grupo',
+        onConfirm: async () => {
+          await api(`/dms/${dm.channelId}/members/me`, { method: 'DELETE' });
+          if (voiceState().channelId === dm.channelId) leaveVoice();
+          state.dms = state.dms.filter((d) => d.channelId !== dm.channelId);
+          goHome();
+        },
+      }),
+    },
+  ], { align: 'end', className: 'popover-menu' });
+}
+
+function removeFromGroupMenu(anchor, dm) {
+  openMenu(anchor, dm.users.map((u) => ({
+    label: `👢  ${u.displayName}`,
+    onClick: () => confirmDialog({
+      title: `Tirar ${u.displayName} do grupo?`,
+      okLabel: 'Tirar',
+      onConfirm: () => api(`/dms/${dm.channelId}/members/${u.id}`, { method: 'DELETE' }),
+    }),
+  })), { align: 'end', className: 'popover-menu' });
+}
+
+// ================================================================ Chamadas em mensagem direta
+
+function startDmCall(dm, video) {
+  if (state.view !== 'home' || state.channelId !== dm.channelId) goHome(dm.channelId);
+  stopRinging(dm.channelId);
+  joinVoice({ channelId: dm.channelId, channelName: dmName(dm), serverId: null, serverName: '', isDm: true, video });
+}
+
+function answerCall(channelId, video) {
+  const dm = state.dms.find((d) => d.channelId === channelId);
+  if (!dm) return;
+  startDmCall(dm, video);
+}
+
+function onDmVoiceUpdate(channelId, states) {
+  const dm = state.dms.find((d) => d.channelId === channelId);
+  if (!dm) { loadDmsSoon(); return; }
+  dm.voice = states;
+  // Ninguém mais na chamada: para de tocar.
+  if (!states.length) stopRinging(channelId);
+  renderSidebar();
+  if (state.view === 'home' && state.channelId === channelId) { renderHeader(); renderCallStage(); }
+}
+
+// Alguém está ligando: toque + janelinha com Atender / Recusar.
+const ringing = new Map(); // channelId -> { el, timer, audio }
+let ringCtx = null;
+function ringTone() {
+  try {
+    ringCtx = ringCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const t = ringCtx.currentTime;
+    [0, 0.45].forEach((off) => {
+      const o = ringCtx.createOscillator();
+      const g = ringCtx.createGain();
+      o.frequency.value = 660;
+      o.connect(g).connect(ringCtx.destination);
+      g.gain.setValueAtTime(0.0001, t + off);
+      g.gain.exponentialRampToValueAtTime(0.12, t + off + 0.03);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + off + 0.35);
+      o.start(t + off);
+      o.stop(t + off + 0.4);
+    });
+  } catch { /* sem som */ }
+}
+
+function onCallRing({ channelId, from, video }) {
+  if (voiceState().channelId === channelId || ringing.has(channelId)) return;
+  const dm = state.dms.find((d) => d.channelId === channelId);
+  const show = (d) => {
+    const el = h('div', { class: 'incoming-call', role: 'alertdialog', 'aria-label': 'Chamada recebida' },
+      avatar(from, { size: 'lg' }),
+      h('div', { class: 'ic-text' },
+        h('strong', {}, from.displayName),
+        h('span', { class: 'muted' }, d && d.isGroup ? `está chamando em ${dmName(d)}` : (video ? 'chamada de vídeo' : 'está te ligando…'))),
+      h('div', { class: 'ic-actions' },
+        h('button', { class: 'round-btn big ok', title: 'Atender', onclick: () => answerCall(channelId, false) }, '📞'),
+        h('button', { class: 'round-btn big ok', title: 'Atender com vídeo', onclick: () => answerCall(channelId, true) }, '📹'),
+        h('button', {
+          class: 'round-btn big danger', title: 'Recusar',
+          onclick: () => { stopRinging(channelId); if (state.socket) state.socket.emit('call:decline', { channelId }); },
+        }, '✕')));
+    $('#incoming-calls').append(el);
+    const dnd = state.me.status === 'dnd';
+    if (!dnd && state.soundOn) ringTone();
+    const timer = setInterval(() => { if (!dnd && state.soundOn) ringTone(); }, 2000);
+    const stop = setTimeout(() => stopRinging(channelId), 30000);
+    ringing.set(channelId, { el, timer, stop });
+  };
+  if (dm) show(dm);
+  else loadDms().then(() => show(state.dms.find((d) => d.channelId === channelId))).catch(() => {});
+}
+
+function stopRinging(channelId) {
+  for (const [id, r] of ringing) {
+    if (channelId !== undefined && id !== channelId) continue;
+    clearInterval(r.timer);
+    clearTimeout(r.stop);
+    r.el.remove();
+    ringing.delete(id);
+  }
 }
 
 // ================================================================ Painel do usuário
@@ -2078,21 +2518,23 @@ $('#me-info').addEventListener('click', (e) => openMenu(e.currentTarget, [
   })),
   { label: state.me.statusText ? '💬  Editar status personalizado' : '💬  Definir status personalizado', onClick: editStatusText },
   { separator: true },
-  { label: '⚙️  Configurações', onClick: () => openUserSettings() },
-  { label: '🖼️  Mudar foto de perfil', onClick: pickAvatar },
-  { label: '🗑️  Remover foto de perfil', hidden: !state.me.avatarUrl, onClick: removeAvatar },
-  { label: '✏️  Mudar nome de exibição', onClick: editDisplayName },
+  { label: '⚙️  Configurações do usuário', onClick: () => openAccountSettings() },
+  { label: '🎨  Aparência (tema e cor)', onClick: () => openAccountSettings('appearance') },
+  { label: '📲  Instalar o Nexo como app', hidden: !canPromptInstall(), onClick: () => promptInstall() },
   { label: '🤖  Desenvolvedor (bots)', onClick: () => openDeveloper() },
   { separator: true },
-  { label: '🚪  Sair da conta', danger: true, onClick: logout },
+  { label: '🚪  Sair da conta', danger: true, onClick: () => logout() },
 ]));
+$('#btn-settings').addEventListener('click', () => openAccountSettings());
 
 function applyMe(user) {
   state.me = user;
   renderUserPanel();
   if (state.channelId) renderMessages();
-  refreshUserSettings();
+  refreshAccountSettings();
 }
+
+initAccount({ applyMe, setSession, logout: (opts) => logout(opts) });
 
 async function saveMe(changes) {
   try {
@@ -2116,46 +2558,6 @@ const editStatusText = () => ask({
   },
 });
 
-function pickAvatar(after) {
-  const picker = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp' });
-  picker.addEventListener('change', async () => {
-    const file = picker.files[0];
-    if (!file) return;
-    try {
-      toast('Enviando foto…');
-      applyMe(await uploadAvatar(file));
-      toast('Foto de perfil atualizada!');
-      if (after) after();
-    } catch (err) {
-      toast(err.message);
-    }
-  });
-  picker.click();
-}
-
-function removeAvatar(after) {
-  confirmDialog({
-    title: 'Remover foto de perfil',
-    text: 'Seu avatar volta a ser as iniciais do seu nome.',
-    okLabel: 'Remover',
-    onConfirm: async () => { applyMe((await api('/me/avatar', { method: 'DELETE' })).user); if (after) after(); },
-  });
-}
-
-const editDisplayName = (after) => ask({
-  title: 'Seu nome de exibição',
-  text: 'É o nome que aparece nas mensagens. O @usuário continua o mesmo.',
-  value: state.me.displayName,
-  maxLength: 32,
-  okLabel: 'Salvar',
-  onSubmit: async (displayName) => {
-    const { user } = await api('/me', { method: 'PATCH', body: { displayName } });
-    applyMe(user);
-    if (typeof after === 'function') after();
-  },
-});
-
-$('#btn-logout').addEventListener('click', () => logout());
 $('#home-btn').addEventListener('click', () => goHome());
 
 $('#btn-toggle-members').addEventListener('click', () => {
@@ -2314,8 +2716,7 @@ function resultCard(m, { actions = [], channelLabel = null } = {}) {
         h('div', { class: 'msg-head' },
           h('strong', { style: roleColor(m.author.id) ? `color:${roleColor(m.author.id)}` : null }, author.displayName),
           h('span', { class: 'msg-time' }, fullTime(date))),
-        m.content ? h('div', { class: 'msg-text' }, renderMarkdown(m.content, renderContent)) : null,
-        m.poll ? h('div', { class: 'muted small' }, `📊 ${m.poll.question}`) : null,
+        m.content ? h('div', { class: 'msg-text' }, renderContent(m.content)) : null,
         m.attachments.length ? h('div', { class: 'muted small' }, `📎 ${m.attachments.length} anexo(s)`) : null),
       actions.length ? h('div', { class: 'result-actions' }, actions) : null));
 }
@@ -2381,7 +2782,7 @@ function renderSearch() {
     if (!m.channel) return null;
     if (m.channel.kind === 'dm') {
       const dm = state.dms.find((d) => d.channelId === m.channelId);
-      return dm ? `@${dm.user.displayName}` : 'Mensagem direta';
+      return dm ? (dm.isGroup ? `👥 ${dmName(dm)}` : `@${dm.user.displayName}`) : 'Mensagem direta';
     }
     return m.channel.kind === 'thread' ? `🧵 ${m.channel.name}` : `# ${m.channel.name}`;
   };
@@ -2427,11 +2828,9 @@ $('#search-input').addEventListener('keydown', (e) => {
 $('#search-input').addEventListener('search', (e) => { if (!e.currentTarget.value) closeSearch(); });
 
 initVoice({ getSocket: () => state.socket, onChange: onVoiceChange });
+onThemeChange(() => { if (state.me && state.channelId) renderMessages(); });
 
 // Funções usadas pelas outras telas (amigos, configurações).
-export {
-  openDm, goHome, refreshDetail, loadFriends, renderAll, selectChannel, botTag,
-  applyMe, logout, pickAvatar, removeAvatar, editDisplayName, installPrompt,
-};
+export { openDm, goHome, refreshDetail, loadFriends, renderAll, selectChannel, botTag };
 
 boot();

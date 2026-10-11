@@ -34,8 +34,9 @@ services:
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:?Defina LIVEKIT_API_SECRET no .env (rode infra/completar-env.sh)}
       # Opcional: exige este código para criar conta (bom quando o Nexo está na internet).
       REGISTRATION_CODE: ${REGISTRATION_CODE:-}
-      # Contato que vai junto das notificações push (os serviços da Apple/Google pedem um).
-      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:nexo@example.com}
+      # Fase 5 (opcionais): prévias de link (0 desliga) e contato das notificações push.
+      LINK_PREVIEWS: ${LINK_PREVIEWS:-1}
+      PUSH_CONTACT: ${PUSH_CONTACT:-}
     volumes:
       - nexo_uploads:/data/uploads
     ports:

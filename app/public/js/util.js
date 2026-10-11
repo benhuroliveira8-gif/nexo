@@ -52,7 +52,11 @@ export async function api(path, { method = 'GET', body } = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && token) onUnauthorized();
-  if (!res.ok) throw new Error(data.error || `Erro ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(data.error || `Erro ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
@@ -65,7 +69,7 @@ export function uploadFile(file, onProgress, extraHeaders = {}) {
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name || 'arquivo'));
     xhr.setRequestHeader('X-File-Type', file.type || 'application/octet-stream');
-    for (const [k, v] of Object.entries(extraHeaders)) xhr.setRequestHeader(k, v);
+    Object.entries(extraHeaders).forEach(([k, v]) => xhr.setRequestHeader(k, String(v)));
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
     xhr.onload = () => {
       let data = {};
@@ -133,8 +137,8 @@ export function avatar(user, { size, online } = {}) {
   return el;
 }
 
-// Foto de perfil: recorta no centro (quadrado), reduz para 256x256 e envia.
-export async function uploadAvatar(file) {
+// Foto de perfil / ícone do servidor: recorta no centro (quadrado), reduz para 256x256 e envia.
+export async function uploadAvatar(file, path = '/api/me/avatar') {
   if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) throw new Error('Escolha uma imagem PNG, JPG, GIF ou WEBP.');
   const bitmap = await createImageBitmap(file).catch(() => { throw new Error('Não deu para abrir essa imagem.'); });
   const side = Math.min(bitmap.width, bitmap.height);
@@ -148,14 +152,14 @@ export async function uploadAvatar(file) {
   const toBlob = (type, q) => new Promise((r) => canvas.toBlob(r, type, q));
   let blob = await toBlob('image/webp', 0.9);
   if (!blob || blob.type !== 'image/webp') blob = await toBlob('image/png');
-  const res = await fetch('/api/me/avatar', {
+  const res = await fetch(path, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream' },
     body: blob,
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `Erro ${res.status}`);
-  return data.user;
+  return data.user || data.server;
 }
 
 export function badge(count) {
