@@ -66,6 +66,7 @@ module.exports = function messageRoutes(r) {
         attachmentIds: req.body.attachmentIds,
         replyToId: req.body.replyToId,
         poll: req.body.poll,
+        gif: req.body.gif,
       });
       M.announceNew(access, message);
       res.status(201).json({ message });

@@ -20,6 +20,7 @@ import {
 } from './voice.js';
 import { openDeveloper } from './developer.js';
 import { renderMarkdown, isJumbo, stripMarkdown } from './markdown.js';
+import { openGifPicker, buildGif } from './gifs.js';
 import {
   createPollDialog, buildPoll, buildVoicePlayer, buildEmbeds, startRecording, canRecord, liveBars, fmtDuration,
 } from './extras.js';
@@ -605,7 +606,7 @@ function notifyUser(msg) {
   // Com o push ligado, o aviso já chega pelo celular/computador; não repete.
   if (!pushOn && 'Notification' in window && window.isSecureContext && Notification.permission === 'granted' && !isVisible()) {
     const where = msg.serverId === null ? 'mensagem direta' : 'menção';
-    const body = stripMarkdown(msg.content).slice(0, 120) || (msg.poll ? `📊 ${msg.poll.question}` : '📎 Anexo');
+    const body = stripMarkdown(msg.content).slice(0, 120) || (msg.poll ? `📊 ${msg.poll.question}` : msg.gif ? '🎞️ GIF' : '📎 Anexo');
     try { new Notification(`${msg.author.displayName} (${where})`, { body, icon: '/icons/icon-192.png' }); } catch { /* ignora */ }
   }
 }
@@ -1377,6 +1378,7 @@ function buildMessage(m, grouped) {
       }),
     }));
   }
+  if (m.gif) body.append(buildGif(m.gif, { onLoad: keepBottom, pending: m.pending }));
   if (m.attachments.length) body.append(h('div', { class: 'attachments' }, m.attachments.map((a) => buildAttachment(a, m.pending))));
   if (m.embeds && m.embeds.length && !editing) body.append(buildEmbeds(m.embeds, { onImageLoad: keepBottom }));
   if (m.failed) body.append(h('div', { class: 'msg-failed' }, 'Não foi enviada.'));
@@ -1656,7 +1658,7 @@ function sendMessage() {
     id: `tmp-${nonce}`, nonce, pending: true, channelId, serverId: state.view === 'home' ? null : state.view,
     content, createdAt: new Date().toISOString(), author: state.me, mentions: [], mentionEveryone: false,
     reactions: [], attachments: ups.map((u) => ({ ...u.attachment, local: true })),
-    replyTo: reply ? { id: reply.id, content: reply.content.slice(0, 120), hasAttachments: reply.attachments.length > 0, author: reply.author } : null,
+    replyTo: reply ? { id: reply.id, content: (reply.content || (reply.gif ? '🎞️ GIF' : '')).slice(0, 120), hasAttachments: reply.attachments.length > 0, author: reply.author } : null,
     thread: null, pinnedAt: null,
   };
   const attachmentIds = ups.map((u) => u.attachment.id);
@@ -1687,6 +1689,43 @@ function sendMessage() {
   });
 }
 
+// ---------------------------------------------------------------- GIFs
+
+$('#btn-gif').addEventListener('click', (e) => openGifPicker(e.currentTarget, sendGif, { userId: state.me.id }));
+
+// O GIF vai numa mensagem só dele (se estava respondendo alguém, vai como resposta).
+function sendGif(gif) {
+  if (!state.channelId || !state.socket || input.disabled) return;
+  const channelId = state.channelId;
+  const nonce = `n${Date.now().toString(36)}${++tempSeq}`;
+  const reply = state.replyTo && state.replyTo.channelId === channelId ? state.replyTo.message : null;
+  const temp = {
+    id: `tmp-${nonce}`, nonce, pending: true, channelId, serverId: state.view === 'home' ? null : state.view,
+    content: '', gif, createdAt: new Date().toISOString(), author: state.me, mentions: [], mentionEveryone: false,
+    reactions: [], attachments: [],
+    replyTo: reply ? { id: reply.id, content: (reply.content || (reply.gif ? '🎞️ GIF' : '')).slice(0, 120), hasAttachments: reply.attachments.length > 0, author: reply.author } : null,
+    thread: null, pinnedAt: null,
+  };
+  bucketFor(channelId).items.push(temp);
+  setReply(null, { render: false });
+  renderMessages({ stick: 'always' });
+
+  const payload = { channelId, content: '', gif, nonce, ...(reply ? { replyToId: reply.id } : {}) };
+  state.socket.timeout(15000).emit('message:send', payload, (err, res) => {
+    const bucket = state.messages.get(channelId);
+    if (!bucket) return;
+    const idx = bucket.items.indexOf(temp);
+    if (err || !res || !res.ok) {
+      if (idx !== -1) Object.assign(temp, { pending: false, failed: true, _v: 1 });
+      toast((res && res.error) || 'Não foi possível enviar o GIF.');
+    } else if (idx !== -1) {
+      if (bucket.items.some((m) => m !== temp && m.id === res.message.id)) bucket.items.splice(idx, 1);
+      else bucket.items[idx] = res.message;
+    }
+    if (channelId === state.channelId) renderMessages();
+  });
+}
+
 // ---------------------------------------------------------------- Anexos
 
 const MAX_ATTACHMENTS = 5;
@@ -1694,6 +1733,7 @@ const MAX_ATTACHMENTS = 5;
 // "+" abre um menu: arquivo ou enquete.
 $('#btn-attach').addEventListener('click', (e) => openMenu(e.currentTarget, [
   { label: '📎  Enviar arquivo', hidden: !can(P.ATTACH_FILES), onClick: () => $('#file-input').click() },
+  { label: '🎞️  Enviar GIF', onClick: () => openGifPicker($('#btn-attach'), sendGif, { userId: state.me.id }) },
   { label: '📊  Criar enquete', onClick: () => openPollDialog() },
   { label: '🎤  Gravar mensagem de voz', hidden: !can(P.ATTACH_FILES) || !canRecord(), onClick: () => startVoiceMessage(true) },
 ], { className: 'popover-menu' }));

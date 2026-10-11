@@ -76,6 +76,7 @@ module.exports = function setupRealtime(io) {
           attachmentIds: payload.attachmentIds,
           replyToId: payload.replyToId,
           poll: payload.poll,
+          gif: payload.gif,
         });
         // "nonce" é um id temporário criado pelo navegador para casar a mensagem
         // "enviando..." com a confirmada.

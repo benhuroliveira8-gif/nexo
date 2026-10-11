@@ -7,6 +7,7 @@ const presence = require('../presence');
 const totp = require('../totp');
 const voice = require('../voice');
 const push = require('../push');
+const gifs = require('../gifs');
 const { wrap, fail, parseId } = require('./util');
 
 const USER_COLS = 'id, username, display_name, is_bot, avatar_id, status, status_text, about, totp_enabled, token_version';
@@ -361,6 +362,9 @@ function meRoutes(r) {
   }));
 
   // ---------- Notificações push
+  // Configuração da pesquisa de GIFs (KLIPY). A pesquisa é feita pelo navegador.
+  r.get('/gifs/config', wrap(async (req, res) => res.json(gifs.config(req.userId))));
+
   r.get('/push/key', wrap(async (req, res) => res.json({ publicKey: await push.publicKey() })));
   r.post('/push/subscribe', auth.humansOnly, wrap(async (req, res) => {
     if (!(await push.subscribe(req.userId, req.body || {}))) fail(400, 'Inscrição de notificação inválida.');

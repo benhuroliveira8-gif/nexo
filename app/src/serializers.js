@@ -78,6 +78,7 @@ const message = (row, extras = {}) => ({
   kind: row.kind || 'default',
   embeds: extras.embeds || [],
   poll: extras.poll || null,
+  gif: row.gif || null,
   replyTo: extras.replyTo || null,
   thread: extras.thread || null,
   mentions: extras.mentions || [],

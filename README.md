@@ -64,6 +64,7 @@ Chat em tempo real no estilo de servidores e canais. Projeto pessoal, construíd
 - **Monitor**: job `nexo-monitor` no Jenkins confere tudo a cada 5 minutos, religa o que caiu e avisa no canal `#avisos`; e monitor externo grátis (UptimeRobot) para quando a VM inteira cair
 - **Backup fora da VM**: script do Windows copia os backups todo dia para o OneDrive
 - Guia: [docs/monitor-e-backup.md](docs/monitor-e-backup.md)
+- **GIFs** 🎞️: botão **GIF** ao lado do 😊 (no celular: ＋ → *Enviar GIF*) para pesquisar e enviar GIFs em canais e DMs, via KLIPY. Precisa de uma chave grátis no `.env`: [docs/gifs.md](docs/gifs.md)
 
 ## Como rodar (no servidor Ubuntu com Docker)
 

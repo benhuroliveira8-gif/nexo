@@ -1144,3 +1144,41 @@ body.is-dragging, body.is-dragging * { cursor: grabbing !important; user-select:
 .emoji-admin-img { width: 36px; height: 36px; object-fit: contain; margin-right: 8px; flex: none; }
 .emoji-admin-row input { flex: 1; min-width: 0; padding: 6px 8px !important; font-size: 14px !important; }
 .emoji-colon { color: var(--text-3); font-weight: 700; }
+
+/* ---------------------------------------------------------------- GIFs */
+.composer-btn.gif-btn {
+  width: auto; height: 24px; margin: 5px 4px; padding: 0 6px; border-radius: 6px;
+  font-size: 11px; font-weight: 800; letter-spacing: .5px; box-shadow: inset 0 0 0 2px currentColor;
+}
+@media (max-width: 480px) { .composer-btn.gif-btn { display: none; } } /* no celular: menu ＋ */
+.popover-gif { width: 380px; overflow: hidden; }
+.gif-picker { display: flex; flex-direction: column; height: min(440px, 70vh); }
+.gif-search {
+  margin: 10px 10px 6px; width: auto; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--bg-0); outline: none; font-size: 14px; color: var(--text);
+}
+.gif-search:focus { border-color: var(--accent); }
+.gif-search:disabled { opacity: .6; }
+.gif-scroll { flex: 1; overflow-y: auto; padding: 0 10px 10px; overscroll-behavior: contain; }
+.gif-grid { columns: 2; column-gap: 6px; }
+.gif-cat { column-span: all; font-size: 12px; font-weight: 700; color: var(--text-2); text-transform: uppercase; margin: 6px 0; }
+.gif-tile {
+  display: block; width: 100%; padding: 0; margin: 0 0 6px; border: 0; border-radius: 8px; overflow: hidden;
+  background: var(--bg-3); break-inside: avoid; cursor: pointer;
+}
+.gif-tile img { display: block; width: 100%; height: auto; }
+.gif-tile:hover, .gif-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.gif-status { text-align: center; padding: 10px 6px; margin: 0; }
+.gif-status[hidden] { display: none; }
+.gif-footer {
+  padding: 6px 10px; font-size: 11px; color: var(--text-3); text-align: right; border-top: 1px solid var(--line);
+}
+.gif-footer strong { color: var(--text-2); letter-spacing: .5px; }
+.gif-msg { position: relative; margin-top: 4px; border-radius: 8px; overflow: hidden; background: var(--bg-3); line-height: 0; }
+.gif-msg img { display: block; width: 100%; height: auto; }
+.gif-msg.pending { opacity: .6; }
+.gif-badge {
+  position: absolute; left: 6px; bottom: 6px; padding: 1px 5px; border-radius: 4px; background: rgba(0,0,0,.6);
+  color: #fff; font-size: 10px; font-weight: 800; line-height: 1.4; letter-spacing: .5px; pointer-events: none;
+}
+.gif-gone { line-height: 1.4; display: block; padding: 10px; }

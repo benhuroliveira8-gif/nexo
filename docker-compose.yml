@@ -37,6 +37,9 @@ services:
       # Fase 5 (opcionais): prévias de link (0 desliga) e contato das notificações push.
       LINK_PREVIEWS: ${LINK_PREVIEWS:-1}
       PUSH_CONTACT: ${PUSH_CONTACT:-}
+      # GIFs (opcional): chave do KLIPY e classificação máxima (g, pg, pg-13, r).
+      KLIPY_API_KEY: ${KLIPY_API_KEY:-}
+      GIF_RATING: ${GIF_RATING:-pg-13}
     volumes:
       - nexo_uploads:/data/uploads
     ports:
