@@ -3,6 +3,10 @@
 // O áudio/vídeo vai direto do navegador para o servidor LiveKit (pelo Caddy, em HTTPS).
 // O Nexo só autoriza a entrada (token) e mostra para todos quem está em cada canal.
 import { h, api, avatar, toast, openDialog, hueFor, storage, openPopover, closePopover } from './util.js';
+import {
+  initRemote, onData, remoteState, requestControl, stopViewing, endHosting, attachControl,
+  onParticipantGone, onScreenStopped, onRemoteScreenStopped, resetRemote,
+} from './remote.js';
 
 const vs = {
   room: null,
@@ -94,6 +98,13 @@ const trackEls = new Map(); // track.sid -> elemento <video>/<audio>
 export function initVoice(opts) {
   getSocket = opts.getSocket;
   onChange = opts.onChange;
+  initRemote({
+    room: () => vs.room,
+    Track: () => LK().Track,
+    onChange: () => onChange(),
+    nameOf: (p) => p.name || p.identity,
+    isSharing: () => vs.screen,
+  });
   // Saiu da tela cheia: redesenha a tela da chamada.
   const fsChanged = () => { if (!fullscreenEl()) onChange(); };
   document.addEventListener('fullscreenchange', fsChanged);
@@ -214,6 +225,7 @@ function micErrorMessage(err) {
 
 export async function leaveVoice({ silent = false } = {}) {
   const room = vs.room;
+  resetRemote();
   vs.room = null;
   if (room) {
     try { await room.disconnect(); } catch { /* já caiu */ }
@@ -260,12 +272,16 @@ function wireRoom(room) {
   });
   room.on(RoomEvent.LocalTrackUnpublished, (pub) => {
     // O navegador pode parar a tela sozinho (botão "Parar de compartilhar").
-    if (pub.source === Track.Source.ScreenShare) { vs.screen = false; emitState(); }
+    if (pub.source === Track.Source.ScreenShare) { vs.screen = false; onScreenStopped(); emitState(); }
     if (pub.source === Track.Source.Camera) { vs.video = false; emitState(); }
     const el = pub.track && trackEls.get(pub.track.sid);
     if (el) { el.remove(); trackEls.delete(pub.track.sid); }
     changed();
   });
+  // Controle remoto: mensagens e quem saiu.
+  if (RoomEvent.DataReceived) room.on(RoomEvent.DataReceived, (payload, participant, kind, topic) => onData(payload, participant, topic));
+  room.on(RoomEvent.ParticipantDisconnected, (p) => { if (p) onParticipantGone(p.identity); });
+  room.on(RoomEvent.TrackUnpublished, (pub, p) => { if (pub && p && pub.source === Track.Source.ScreenShare) onRemoteScreenStopped(p.identity); });
   [RoomEvent.ParticipantConnected, RoomEvent.ParticipantDisconnected, RoomEvent.TrackMuted,
     RoomEvent.TrackUnmuted, RoomEvent.ActiveSpeakersChanged, RoomEvent.LocalTrackPublished,
     RoomEvent.TrackPublished, RoomEvent.TrackUnpublished, RoomEvent.ParticipantMetadataChanged,
@@ -468,6 +484,7 @@ async function startScreen() {
 
 async function stopScreen() {
   if (!vs.room || !vs.screen) return;
+  onScreenStopped();
   try { await vs.room.localParticipant.setScreenShareEnabled(false); } catch { /* já parou */ }
   vs.screen = false;
   emitState();
@@ -598,6 +615,16 @@ export async function enableAudio() {
 
 const icon = (on, offIcon, onIcon) => (on ? onIcon : offIcon);
 
+// Aviso para quem está sendo controlado.
+function controlBanner() {
+  const { hosting } = remoteState();
+  if (!hosting) return null;
+  return h('div', { class: 'rc-banner', role: 'status' },
+    h('span', {}, `🖱️ ${hosting.name} está controlando o seu PC`),
+    h('span', { class: 'muted small' }, 'Seu mouse tem prioridade · Ctrl+Alt+End encerra'),
+    h('button', { type: 'button', class: 'btn small danger', onclick: () => endHosting() }, 'Parar controle'));
+}
+
 // Painel "Voz conectada" acima do seu nome.
 export function renderVoicePanel(el) {
   if (!vs.room && !vs.connecting) {
@@ -614,6 +641,7 @@ export function renderVoicePanel(el) {
         h('span', { class: 'muted truncate' }, vs.isDm ? `📞 ${vs.channelName}` : `🔊 ${vs.channelName} / ${vs.serverName}`)),
       h('button', { class: 'vp-btn danger', title: 'Sair da voz', onclick: () => leaveVoice() }, '📞')),
     vs.needsAudioClick ? h('button', { class: 'btn small primary vp-audio', onclick: enableAudio }, '🔈 Clique para ouvir') : null,
+    controlBanner(),
     ptt ? pttButton(`Segure para falar (${keyLabel(voiceSettings().pttKey)})`) : null,
     h('div', { class: 'vp-actions' },
       h('button', {
@@ -714,7 +742,7 @@ function watchStats(tile, video, badge) {
   video.addEventListener('resize', () => show(0));
 }
 
-function screenTile(track, user, { isLocal, hasAudio }) {
+function screenTile(track, user, { isLocal, hasAudio, identity }) {
   let tile = screenTiles.get(track.sid);
   if (!tile) {
     const video = videoEl(track);
@@ -724,9 +752,16 @@ function screenTile(track, user, { isLocal, hasAudio }) {
     const slider = h('input', { type: 'range', min: '0', max: '100', step: '5', class: 'sc-range', 'aria-label': 'Volume da transmissão' });
     const volBox = h('div', { class: 'sc-vol' }, volIcon, slider);
     const fsBtn = h('button', { type: 'button', class: 'sc-btn sc-fs', title: 'Tela cheia (ou duplo clique na tela)', 'aria-label': 'Tela cheia' }, '⛶');
+    const ctlBtn = h('button', { type: 'button', class: 'sc-btn sc-ctl' });
+    const hint = h('div', { class: 'rc-hint', hidden: true });
     tile = h('div', { class: 'tile screen', dataset: { sid: track.sid }, tabindex: '0' },
-      video, name, h('div', { class: 'screen-controls' }, volBox, badge, fsBtn));
-    Object.assign(tile, { _name: name, _volBox: volBox, _slider: slider, _volIcon: volIcon });
+      video, name, hint, h('div', { class: 'screen-controls' }, volBox, badge, ctlBtn, fsBtn));
+    Object.assign(tile, { _name: name, _volBox: volBox, _slider: slider, _volIcon: volIcon, _ctlBtn: ctlBtn, _video: video });
+    ctlBtn.addEventListener('click', () => {
+      const { viewing } = remoteState();
+      if (viewing && viewing.identity === tile._identity) stopViewing();
+      else if (!viewing) requestControl(tile._identity, tile._userName);
+    });
 
     const paintVol = (v) => {
       slider.value = String(Math.round(v * 100));
@@ -745,7 +780,7 @@ function screenTile(track, user, { isLocal, hasAudio }) {
     });
     fsBtn.addEventListener('click', () => toggleFullscreen(tile, video));
     tile.addEventListener('dblclick', (e) => { if (!e.target.closest('.screen-controls')) toggleFullscreen(tile, video); });
-    tile.addEventListener('keydown', (e) => { if ((e.key === 'f' || e.key === 'F') && e.target === tile) toggleFullscreen(tile, video); });
+    tile.addEventListener('keydown', (e) => { if ((e.key === 'f' || e.key === 'F') && e.target === tile && !tile.classList.contains('controlling')) toggleFullscreen(tile, video); });
     // Em tela cheia, os controles e o mouse somem depois de um tempo parado.
     let idle = null;
     const wake = () => { tile.classList.remove('idle'); clearTimeout(idle); idle = setTimeout(() => tile.classList.add('idle'), 2500); };
@@ -755,7 +790,18 @@ function screenTile(track, user, { isLocal, hasAudio }) {
     screenTiles.set(track.sid, tile);
   }
   tile._uid = user.id;
+  tile._identity = identity;
+  tile._userName = user.displayName;
   tile._name.textContent = `🖥️ Tela de ${user.displayName}${isLocal ? ' (você)' : ''}`;
+  // Controle remoto (só na tela dos outros).
+  const { viewing } = remoteState();
+  const mine = viewing && viewing.identity === identity ? viewing.state : null;
+  tile._ctlBtn.hidden = isLocal || !identity || (!!viewing && !mine);
+  tile._ctlBtn.textContent = mine === 'active' ? '✋' : mine === 'pending' ? '⏳' : '🖱️';
+  tile._ctlBtn.title = mine === 'active' ? 'Soltar o controle' : mine === 'pending' ? 'Aguardando resposta… (clique para cancelar)' : `Pedir para controlar o PC de ${user.displayName}`;
+  tile._ctlBtn.classList.toggle('on', mine === 'active');
+  tile.classList.toggle('controlling', mine === 'active');
+  if (!isLocal && identity) attachControl(tile, tile._video, identity);
   // Você não ouve o som da sua própria tela; e só mostra volume se a tela tiver som.
   tile._volBox.hidden = isLocal || !hasAudio || !user.id;
   if (!tile._volBox.hidden) tile._paintVol(screenVolumeOf(user.id));
@@ -824,7 +870,7 @@ export function renderStage(el, { channel, serverId, serverName, others, members
     const screenPub = p.getTrackPublication(Track.Source.ScreenShare);
     if (screenPub && screenPub.track && !screenPub.isMuted) {
       const audioPub = Track.Source.ScreenShareAudio ? p.getTrackPublication(Track.Source.ScreenShareAudio) : null;
-      tiles.push(screenTile(screenPub.track, user, { isLocal, hasAudio: !!(audioPub && !audioPub.isMuted) }));
+      tiles.push(screenTile(screenPub.track, user, { isLocal, hasAudio: !!(audioPub && !audioPub.isMuted), identity: p.identity }));
     }
     const camPub = p.getTrackPublication(Track.Source.Camera);
     const micPub = p.getTrackPublication(Track.Source.Microphone);
@@ -842,7 +888,8 @@ export function renderStage(el, { channel, serverId, serverName, others, members
     tiles.push(tile);
   }
   const ptt = voiceSettings().mode === 'ptt' && vs.canSpeak;
-  el.replaceChildren(
+  el.replaceChildren(...[
+    controlBanner(),
     h('div', { class: `stage-grid n${Math.min(tiles.length, 9)}${tiles.some((t) => t.classList.contains('screen')) ? ' has-screen' : ''}` },
       // Telas compartilhadas primeiro (em destaque), depois as pessoas.
       [...tiles.filter((t) => t.classList.contains('screen')), ...tiles.filter((t) => !t.classList.contains('screen'))]),
@@ -851,5 +898,5 @@ export function renderStage(el, { channel, serverId, serverName, others, members
       vs.canVideo ? h('button', { class: `round-btn big${vs.video ? ' on' : ''}`, title: 'Câmera', onclick: toggleCamera }, '📹') : null,
       vs.canVideo ? h('button', { class: `round-btn big${vs.screen ? ' on' : ''}`, title: vs.screen ? 'Compartilhando a tela' : 'Compartilhar tela', onclick: screenButton }, '🖥️') : null,
       h('button', { class: 'round-btn big danger', title: 'Sair da voz', onclick: () => leaveVoice() }, '📞')),
-  );
+  ].filter(Boolean));
 }

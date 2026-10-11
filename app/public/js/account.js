@@ -8,6 +8,7 @@ import { qrSvg } from './qr.js';
 import { ACCENTS, getTheme, getAccent, setTheme, setAccent } from './theme.js';
 import { voiceSettings, saveVoiceSettings, keyLabel } from './voice.js';
 import { devicesSection } from './devices.js';
+import { downloadHelper } from './remote.js';
 import {
   pushStatus, enablePush, disablePush, canPromptInstall, promptInstall, isStandalone, isIos, onPwaChange,
 } from './pwa.js';
@@ -399,6 +400,12 @@ function pageVoice() {
         toggle('noiseSuppression', 'Supressão de ruído', 'Tira barulhos de fundo (ventilador, teclado, rua).'),
         toggle('echoCancellation', 'Cancelamento de eco', 'Evita que os outros se ouçam de volta pelo seu microfone.'),
         toggle('autoGainControl', 'Ajuste automático de volume', 'Deixa sua voz num volume parecido, falando baixo ou alto.'))),
+    block('Controle remoto (Windows)',
+      h('p', { class: 'muted' }, 'Para alguém da chamada poder usar o mouse e o teclado do seu PC pela tela compartilhada, este PC precisa do programinha "Nexo Controle" aberto. Nada acontece sem você clicar em "Permitir".'),
+      h('ol', { class: 'muted small rc-steps' },
+        h('li', {}, 'Baixe e clique com o botão direito no arquivo → "Executar com o PowerShell".'),
+        h('li', {}, 'Ele cria o atalho "Nexo Controle" na Área de Trabalho. Abra quando quiser poder ser controlado.')),
+      h('button', { class: 'btn small', onclick: downloadHelper }, '⬇️ Baixar Nexo Controle')),
     block('Volume de cada pessoa',
       h('p', { class: 'muted' }, 'Na chamada, clique no quadrado de alguém (ou no nome na lista do canal de voz) para mudar o volume só para você.'),
       saved ? h('button', {

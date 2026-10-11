@@ -1256,3 +1256,28 @@ body.is-dragging, body.is-dragging * { cursor: grabbing !important; user-select:
 .mic-meter i { display: block; height: 100%; width: 0; background: var(--online); transition: width .06s linear; }
 .cam-preview { width: 100%; max-width: 360px; aspect-ratio: 16 / 9; border-radius: 10px; background: #000; object-fit: cover; transform: scaleX(-1); }
 .cam-preview[hidden] { display: none; }
+
+/* ---------------------------------------------------------------- Controle remoto */
+.rc-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 14px 0; padding: 8px 12px;
+  border-radius: 10px; background: rgba(255, 92, 108, .15); border: 1px solid var(--danger); font-weight: 600;
+}
+.rc-banner .btn { margin-left: auto; }
+.voice-panel .rc-banner, #voice-panel .rc-banner { margin: 6px 0; font-size: 12px; padding: 6px 8px; }
+#voice-panel .rc-banner .btn { margin-left: 0; }
+.sc-btn.on { background: var(--accent); }
+.tile.screen.controlling { outline: 3px solid var(--accent); outline-offset: -3px; }
+.tile.screen.controlling video { cursor: default; touch-action: none; }
+.rc-hint {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%); padding: 4px 10px; border-radius: 8px;
+  background: rgba(0,0,0,.7); color: #fff; font-size: 13px; font-weight: 600; pointer-events: none;
+}
+.rc-hint[hidden] { display: none; }
+.rc-dialog { display: grid; gap: 8px; max-width: 480px; }
+.rc-dialog p { margin: 0; }
+.rc-list { margin: 0; padding-left: 18px; color: var(--text-2); font-size: 13px; display: grid; gap: 4px; }
+.rc-helper { display: grid; gap: 6px; padding: 10px 12px; border-radius: 10px; background: var(--bg-0); border: 1px solid var(--line); }
+.rc-helper ol { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.rc-helper .btn { justify-self: start; }
+.rc-steps { margin: 0 0 10px; padding-left: 18px; }
+kbd { font: 600 12px ui-monospace, Consolas, monospace; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--line); background: var(--bg-0); }

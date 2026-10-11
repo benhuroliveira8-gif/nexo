@@ -67,6 +67,7 @@ Chat em tempo real no estilo de servidores e canais. Projeto pessoal, construíd
 - **GIFs** 🎞️: botão **GIF** ao lado do 😊 (no celular: ＋ → *Enviar GIF*) para pesquisar e enviar GIFs em canais e DMs, via KLIPY. Precisa de uma chave grátis no `.env`: [docs/gifs.md](docs/gifs.md)
 - **Compartilhar tela melhorado** 🖥️: escolha a qualidade (720p a **1440p 60 fps**), se é jogo/vídeo (fluidez) ou texto (nitidez) e se transmite o som. Quem assiste tem **tela cheia** (botão ⛶, duplo clique ou tecla F), **volume da transmissão** separado da voz da pessoa e vê a resolução/fps que está chegando
 - **Escolher aparelhos** 🎧: em ⚙️ → *Voz e vídeo* dá para escolher o microfone (com teste e barra de nível), a saída de som (alto-falante/fone, com som de teste; Chrome/Edge/Firefox) e a câmera (com prévia). Troca na hora, mesmo no meio de uma chamada
+- **Controle remoto** 🖱️ (estilo AnyDesk): quem assiste uma tela pede o controle; quem compartilha permite e a pessoa usa mouse e teclado. Precisa do programinha **Nexo Controle** no Windows de quem é controlado: [docs/controle-remoto.md](docs/controle-remoto.md)
 
 ## Como rodar (no servidor Ubuntu com Docker)
 
