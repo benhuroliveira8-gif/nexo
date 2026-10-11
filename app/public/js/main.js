@@ -629,6 +629,7 @@ document.addEventListener('visibilitychange', () => {
 
 async function goHome(channelId = null) {
   if (state.view !== 'home') closeSearch();
+  if (!channelId) discardVoiceOnSwitch();
   state.view = 'home';
   state.detail = null;
   storage('nexo.view', 'home');
@@ -667,6 +668,7 @@ async function selectServer(serverId, preferredChannelId) {
 async function selectChannel(channelId) {
   if (state.channelId !== channelId) {
     state.editingId = null;
+    discardVoiceOnSwitch();
     clearUploads();
     setReply(null, { render: false });
     pinsOpenFor = null;
@@ -1683,7 +1685,7 @@ const MAX_ATTACHMENTS = 5;
 $('#btn-attach').addEventListener('click', (e) => openMenu(e.currentTarget, [
   { label: '📎  Enviar arquivo', hidden: !can(P.ATTACH_FILES), onClick: () => $('#file-input').click() },
   { label: '📊  Criar enquete', onClick: () => openPollDialog() },
-  { label: '🎤  Mensagem de voz', hidden: !can(P.ATTACH_FILES) || !canRecord(), onClick: () => startVoiceMessage(true) },
+  { label: '🎤  Gravar mensagem de voz', hidden: !can(P.ATTACH_FILES) || !canRecord(), onClick: () => startVoiceMessage(true) },
 ], { className: 'popover-menu' }));
 
 function openPollDialog() {
@@ -1700,21 +1702,27 @@ function openPollDialog() {
 }
 
 // ---------------------------------------------------------------- Mensagem de voz
-// Segure o 🎤 para gravar e solte para enviar; um toque rápido grava "travado" (com botões).
-let rec = null; // { recorder, channelId, locked, timer, startedAt }
+// Como no WhatsApp:
+//  • segure o 🎤 e fale; solte para enviar
+//  • arraste para a ESQUERDA para cancelar, ou para CIMA para travar (e falar sem segurar)
+//  • um toque rápido também trava a gravação
+//  • travada: dá para pausar, cancelar, parar e ouvir antes de enviar
+//  • Esc cancela; Enter envia
+let rec = null; // { phase: 'holding'|'locked'|'review', recorder, channelId, result, previewUrl, drag }
+const CANCEL_DX = 90;
+const LOCK_DY = 70;
 
 async function startVoiceMessage(locked = false) {
   if (rec || !state.channelId) return;
   const channelId = state.channelId;
-  rec = { channelId, locked, starting: true };
+  rec = { channelId, phase: locked ? 'locked' : 'holding', starting: true, drag: { dx: 0, dy: 0 } };
   renderRecBar();
   try {
-    const recorder = await startRecording({ onTick: () => renderRecBar() });
-    if (!rec || rec.cancelled) { recorder.cancel(); rec = null; renderRecBar(); return; }
+    const recorder = await startRecording({ onTick: () => updateRecBar() });
+    if (!rec || rec.cancelled) { recorder.cancel(); if (rec && rec.cancelled) rec = null; renderRecBar(); return; }
     rec.recorder = recorder;
     rec.starting = false;
-    recorder.onAutoStop = () => finishVoiceMessage(true);
-    if (rec.releasedEarly) { rec.locked = true; rec.releasedEarly = false; }
+    recorder.onAutoStop = () => { toast('Limite de 5 minutos: pare e ouça antes de enviar.'); stopForReview(); };
     renderRecBar();
   } catch (err) {
     rec = null;
@@ -1723,17 +1731,47 @@ async function startVoiceMessage(locked = false) {
   }
 }
 
-async function finishVoiceMessage(send) {
+// Descarta a gravação (em qualquer etapa).
+function cancelVoiceMessage(note) {
   const r = rec;
   if (!r) return;
   rec = null;
+  if (r.recorder) r.recorder.cancel(); else r.cancelled = true;
+  if (r.previewUrl) URL.revokeObjectURL(r.previewUrl);
   renderRecBar();
-  if (!r.recorder) { r.cancelled = true; return; }
-  if (!send) { r.recorder.cancel(); return; }
-  if (r.recorder.elapsed() < 0.7) { r.recorder.cancel(); toast('Segure o 🎤 enquanto fala (áudio curto demais).'); return; }
-  let result;
-  try { result = await r.recorder.stop(); } catch (err) { return toast(err.message); }
-  const { file, duration, waveform } = result;
+  if (note) toast(note);
+}
+
+// Para de gravar e mostra o áudio para ouvir antes de enviar.
+async function stopForReview() {
+  const r = rec;
+  if (!r || !r.recorder || r.phase === 'review') return;
+  if (r.recorder.elapsed() < 0.7) return cancelVoiceMessage('Áudio curto demais.');
+  try {
+    r.result = await r.recorder.stop();
+  } catch (err) {
+    cancelVoiceMessage(err.message);
+    return;
+  }
+  if (rec !== r) return;
+  r.phase = 'review';
+  r.previewUrl = URL.createObjectURL(r.result.file);
+  renderRecBar();
+}
+
+async function sendVoiceMessage() {
+  const r = rec;
+  if (!r) return;
+  if (!r.result) {
+    if (!r.recorder) return;
+    if (r.recorder.elapsed() < 0.7) return cancelVoiceMessage('Segure o 🎤 enquanto fala (áudio curto demais).');
+    try { r.result = await r.recorder.stop(); } catch (err) { return cancelVoiceMessage(err.message); }
+  }
+  if (rec !== r) return;
+  rec = null;
+  if (r.previewUrl) URL.revokeObjectURL(r.previewUrl);
+  renderRecBar();
+  const { file, duration, waveform } = r.result;
   const nonce = `n${Date.now().toString(36)}${++tempSeq}`;
   const temp = {
     id: `tmp-${nonce}`, nonce, pending: true, channelId: r.channelId, serverId: state.view === 'home' ? null : state.view,
@@ -1764,46 +1802,122 @@ async function finishVoiceMessage(send) {
   }
 }
 
+function togglePauseVoice() {
+  if (!rec || !rec.recorder) return;
+  if (rec.recorder.isPaused()) rec.recorder.resume(); else rec.recorder.pause();
+  renderRecBar();
+}
+
+// Atualiza só o relógio e as barrinhas (sem refazer os botões a cada 100 ms).
+function updateRecBar() {
+  if (!rec || !rec.recorder || rec.phase === 'review') return;
+  const bar = $('#rec-bar');
+  const time = bar.querySelector('.rec-time');
+  const bars = bar.querySelector('.rec-bars');
+  if (time) time.textContent = fmtDuration(rec.recorder.elapsed());
+  if (bars) bars.replaceWith(liveBars(rec.recorder.levels()));
+}
+
 function renderRecBar() {
   const bar = $('#rec-bar');
+  const lockHint = $('#rec-lock');
   $('#composer').hidden = !!rec;
+  bar.classList.toggle('holding', !!rec && rec.phase === 'holding');
+  if (lockHint) lockHint.hidden = !rec || rec.phase !== 'holding';
   if (!rec) { bar.hidden = true; bar.replaceChildren(); return; }
   bar.hidden = false;
+  const btn = (cls, title, label, onclick) => h('button', { type: 'button', class: `rec-btn ${cls}`, title, 'aria-label': title, onclick }, label);
+
+  if (rec.phase === 'review') {
+    bar.replaceChildren(
+      btn('danger', 'Descartar áudio (Esc)', '🗑️', () => cancelVoiceMessage()),
+      h('div', { class: 'rec-review' }, buildVoicePlayer({ url: rec.previewUrl, duration: rec.result.duration, waveform: rec.result.waveform })),
+      h('button', { type: 'button', class: 'btn primary small rec-send', title: 'Enviar (Enter)', onclick: sendVoiceMessage }, 'Enviar ➤'),
+    );
+    return;
+  }
+
   const secs = rec.recorder ? rec.recorder.elapsed() : 0;
-  bar.replaceChildren(
-    h('button', { type: 'button', class: 'icon-btn rec-cancel', title: 'Cancelar', onclick: () => finishVoiceMessage(false) }, '🗑️'),
-    h('span', { class: 'rec-dot' }),
-    h('span', { class: 'rec-time' }, rec.starting ? 'Preparando…' : fmtDuration(secs)),
+  const paused = !!(rec.recorder && rec.recorder.isPaused());
+  const status = [
+    h('span', { class: `rec-dot${paused ? ' paused' : ''}` }),
+    h('span', { class: 'rec-time' }, rec.starting ? '0:00' : fmtDuration(secs)),
     rec.recorder ? liveBars(rec.recorder.levels()) : h('span', { class: 'rec-bars' }),
-    h('span', { class: 'muted small rec-hint' }, rec.locked ? '' : 'Solte para enviar'),
-    rec.locked ? h('button', { type: 'button', class: 'btn primary small', onclick: () => finishVoiceMessage(true) }, 'Enviar ➤') : '',
+  ];
+
+  if (rec.phase === 'holding') {
+    // Segurando: a dica de cancelar acompanha o dedo.
+    const dx = Math.max(0, rec.drag.dx);
+    const near = dx / CANCEL_DX;
+    bar.replaceChildren(
+      ...status,
+      h('span', {
+        class: `rec-slide${near > 0.6 ? ' warn' : ''}`,
+        style: `transform:translateX(${-Math.min(dx, CANCEL_DX)}px);opacity:${Math.max(0.3, 1 - near * 0.7)}`,
+      }, '◀ Arraste para cancelar'),
+      h('span', { class: 'muted small rec-hint' }, 'Solte para enviar'),
+    );
+    return;
+  }
+
+  // Travada: botões para cancelar, pausar, parar/ouvir e enviar.
+  bar.replaceChildren(
+    btn('danger', 'Cancelar (Esc)', '🗑️', () => cancelVoiceMessage()),
+    ...status,
+    paused ? h('span', { class: 'muted small rec-hint' }, 'Pausado') : '',
+    btn('', paused ? 'Continuar gravando' : 'Pausar', paused ? '🎤' : '⏸️', togglePauseVoice),
+    btn('', 'Parar e ouvir antes de enviar', '⏹️', stopForReview),
+    h('button', { type: 'button', class: 'btn primary small rec-send', title: 'Enviar (Enter)', disabled: !rec.recorder, onclick: sendVoiceMessage }, 'Enviar ➤'),
   );
 }
+
+// Teclado: Esc cancela, Enter envia (quando a gravação está travada ou em revisão).
+document.addEventListener('keydown', (e) => {
+  if (!rec || document.querySelector('dialog[open]')) return;
+  if (e.key === 'Escape') { e.preventDefault(); cancelVoiceMessage(); }
+  if (e.key === 'Enter' && rec.phase !== 'holding' && !e.target.closest('button')) { e.preventDefault(); sendVoiceMessage(); }
+});
+// Trocar de conversa no meio da gravação descarta o áudio.
+function discardVoiceOnSwitch() { if (rec) cancelVoiceMessage('Áudio descartado (você mudou de conversa).'); }
 
 // Segurar o botão do microfone.
 (() => {
   const mic = $('#btn-mic');
-  let downAt = 0;
+  let down = null; // { x, y, at, pointerId }
   mic.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
     e.preventDefault();
-    downAt = performance.now();
+    down = { x: e.clientX, y: e.clientY, at: performance.now(), pointerId: e.pointerId };
     try { mic.setPointerCapture(e.pointerId); } catch { /* ignora */ }
     startVoiceMessage(false);
   });
-  const up = (e) => {
-    if (!downAt) return;
-    const held = performance.now() - downAt;
-    downAt = 0;
-    if (!rec) return;
-    if (e.type === 'pointercancel') return finishVoiceMessage(false);
-    // Toque rápido: continua gravando, com os botões Cancelar/Enviar.
-    if (held < 350) {
-      if (rec.recorder) rec.locked = true; else rec.releasedEarly = true;
+  mic.addEventListener('pointermove', (e) => {
+    if (!down || !rec || rec.phase !== 'holding' || e.pointerId !== down.pointerId) return;
+    rec.drag = { dx: down.x - e.clientX, dy: down.y - e.clientY };
+    if (rec.drag.dx > CANCEL_DX) {
+      down = null;
+      if (navigator.vibrate) { try { navigator.vibrate(30); } catch { /* ignora */ } }
+      cancelVoiceMessage('Áudio cancelado.');
+      return;
+    }
+    if (rec.drag.dy > LOCK_DY) {
+      down = null;
+      rec.phase = 'locked';
+      if (navigator.vibrate) { try { navigator.vibrate(15); } catch { /* ignora */ } }
       renderRecBar();
       return;
     }
-    if (!rec.locked) finishVoiceMessage(true);
+    renderRecBar();
+  });
+  const up = (e) => {
+    if (!down) return;
+    const held = performance.now() - down.at;
+    down = null;
+    if (!rec || rec.phase !== 'holding') return;
+    if (e.type === 'pointercancel') { cancelVoiceMessage(); return; }
+    // Toque rápido: trava a gravação (com os botões).
+    if (held < 350) { rec.phase = 'locked'; renderRecBar(); return; }
+    sendVoiceMessage();
   };
   mic.addEventListener('pointerup', up);
   mic.addEventListener('pointercancel', up);

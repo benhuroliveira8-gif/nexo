@@ -150,13 +150,17 @@ export async function startRecording({ maxSeconds = 300, onTick, audio = {} } = 
   const data = new Uint8Array(analyser.fftSize);
   const levels = [];
   const started = performance.now();
+  let pausedAt = null;  // quando pausou (null = gravando)
+  let pausedTotal = 0;  // tempo total pausado (ms)
   let stopped = false;
+  const elapsed = () => ((pausedAt ?? performance.now()) - started - pausedTotal) / 1000;
   const sample = setInterval(() => {
+    if (pausedAt !== null) return;
     analyser.getByteTimeDomainData(data);
     let sum = 0;
     for (const v of data) sum += ((v - 128) / 128) ** 2;
     levels.push(Math.min(1, Math.sqrt(sum / data.length) * 3.2));
-    const secs = (performance.now() - started) / 1000;
+    const secs = elapsed();
     if (onTick) onTick(secs, levels);
     if (secs >= maxSeconds && !stopped) api.stopAuto();
   }, 100);
@@ -170,7 +174,19 @@ export async function startRecording({ maxSeconds = 300, onTick, audio = {} } = 
   };
   const api = {
     levels: () => levels,
-    elapsed: () => (performance.now() - started) / 1000,
+    elapsed,
+    isPaused: () => pausedAt !== null,
+    pause() {
+      if (stopped || pausedAt !== null || rec.state !== 'recording') return;
+      try { rec.pause(); } catch { return; }
+      pausedAt = performance.now();
+    },
+    resume() {
+      if (stopped || pausedAt === null) return;
+      try { rec.resume(); } catch { return; }
+      pausedTotal += performance.now() - pausedAt;
+      pausedAt = null;
+    },
     cancel() {
       if (stopped) return;
       finish();
@@ -179,7 +195,7 @@ export async function startRecording({ maxSeconds = 300, onTick, audio = {} } = 
     stop() {
       return new Promise((resolve, reject) => {
         if (stopped && rec.state === 'inactive') return reject(new Error('Gravação já terminou.'));
-        const duration = (performance.now() - started) / 1000;
+        const duration = elapsed();
         rec.onstop = () => {
           const type = (rec.mimeType || mime || 'audio/webm').split(';')[0];
           const blob = new Blob(chunks, { type });
