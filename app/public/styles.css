@@ -1182,3 +1182,57 @@ body.is-dragging, body.is-dragging * { cursor: grabbing !important; user-select:
   color: #fff; font-size: 10px; font-weight: 800; line-height: 1.4; letter-spacing: .5px; pointer-events: none;
 }
 .gif-gone { line-height: 1.4; display: block; padding: 10px; }
+
+/* ---------------------------------------------------------------- Compartilhar tela */
+.screen-dialog { display: grid; gap: 8px; min-width: min(460px, 100%); }
+.screen-dialog .field-label { font-size: 12px; font-weight: 700; text-transform: uppercase; color: var(--text-2); margin-top: 6px; }
+.quality-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+.quality-chip {
+  display: grid; gap: 2px; padding: 10px 4px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg-0);
+  color: var(--text); cursor: pointer; text-align: center;
+}
+.quality-chip strong { font-size: 15px; }
+.quality-chip span { font-size: 12px; color: var(--text-2); }
+.quality-chip:hover { border-color: var(--text-3); }
+.quality-chip.active { border-color: var(--accent); background: var(--accent-soft); }
+.quality-chip.active span { color: var(--accent); font-weight: 700; }
+.screen-hint { margin: 0; }
+.switch-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; margin-top: 6px;
+  border-radius: 10px; background: var(--bg-0); border: 1px solid var(--line); cursor: pointer;
+}
+@media (max-width: 520px) { .quality-grid { grid-template-columns: repeat(3, 1fr); } }
+.menu-note { padding: 6px 10px 8px; }
+
+.tile.screen { outline: none; }
+.tile.screen:focus-visible { outline: 3px solid var(--accent); }
+.screen-controls {
+  position: absolute; right: 10px; bottom: 10px; display: flex; align-items: center; gap: 6px;
+  padding: 4px 6px; border-radius: 8px; background: rgba(0,0,0,.65); color: #fff;
+  opacity: 0; transition: opacity .15s;
+}
+.tile.screen:hover .screen-controls, .tile.screen:focus-within .screen-controls { opacity: 1; }
+@media (hover: none) { .screen-controls { opacity: 1; } }
+.sc-btn { border: 0; background: transparent; color: #fff; font-size: 18px; width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; cursor: pointer; }
+.sc-btn:hover { background: rgba(255,255,255,.15); }
+.sc-vol { display: flex; align-items: center; gap: 2px; }
+.sc-vol[hidden] { display: none; }
+.sc-range { width: 96px; accent-color: var(--accent); }
+.screen-badge { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; padding: 0 4px; white-space: nowrap; }
+.screen-badge:empty { display: none; }
+.tile.screen:fullscreen { border-radius: 0; background: #000; min-height: 0; }
+.tile.screen:-webkit-full-screen { border-radius: 0; background: #000; }
+.tile.screen:fullscreen .screen-controls { opacity: 1; right: 20px; bottom: 20px; }
+.tile.screen:fullscreen .tile-name { left: 20px; bottom: 20px; }
+.tile.screen:fullscreen.idle { cursor: none; }
+.tile.screen:fullscreen.idle .screen-controls, .tile.screen:fullscreen.idle .tile-name { opacity: 0; }
+.tile.screen:fullscreen .tile-name { transition: opacity .15s; }
+.tile.screen .tile-name { max-width: calc(100% - 230px); min-width: 0; }
+@media (max-width: 520px) { .tile.screen .tile-name { max-width: 40%; } .sc-range { width: 70px; } }
+/* Com tela compartilhada: a tela em destaque em cima, as pessoas numa faixa embaixo. */
+.stage-grid.has-screen { grid-auto-rows: auto; align-content: start; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+.stage-grid.has-screen .tile { min-height: 0; height: 130px; }
+.stage-grid.has-screen .tile.screen { grid-column: 1 / -1; height: auto; aspect-ratio: 16 / 9; max-height: 68vh; min-height: 220px; }
+.stage-grid.has-screen .tile .avatar.xl { width: 72px; height: 72px; font-size: 28px; }
+.call-stage .stage-grid.has-screen .tile.screen { max-height: 50vh; min-height: 160px; }
+.call-stage .stage-grid.has-screen .tile { height: 110px; }

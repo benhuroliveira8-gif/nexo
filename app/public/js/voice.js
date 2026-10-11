@@ -2,7 +2,7 @@
 //
 // O áudio/vídeo vai direto do navegador para o servidor LiveKit (pelo Caddy, em HTTPS).
 // O Nexo só autoriza a entrada (token) e mostra para todos quem está em cada canal.
-import { h, api, avatar, toast, openDialog, hueFor, storage, openPopover } from './util.js';
+import { h, api, avatar, toast, openDialog, hueFor, storage, openPopover, closePopover } from './util.js';
 
 const vs = {
   room: null,
@@ -23,7 +23,10 @@ const vs = {
 };
 
 // ---------------------------------------------------------------- Preferências de voz (deste aparelho)
-const DEFAULT_SETTINGS = { mode: 'voice', pttKey: 'ControlLeft', noiseSuppression: true, echoCancellation: true, autoGainControl: true };
+const DEFAULT_SETTINGS = {
+  mode: 'voice', pttKey: 'ControlLeft', noiseSuppression: true, echoCancellation: true, autoGainControl: true,
+  screenQuality: '1080p30', screenContent: 'motion', screenAudio: true,
+};
 export function voiceSettings() {
   try { return { ...DEFAULT_SETTINGS, ...JSON.parse(storage('nexo.voice') || '{}') }; } catch { return { ...DEFAULT_SETTINGS }; }
 }
@@ -51,9 +54,23 @@ export function setVolume(userId, value) {
   if (value >= 0.999) delete all[userId]; else all[userId] = Math.round(value * 100) / 100;
   storage('nexo.volumes', JSON.stringify(all));
   for (const el of trackEls.values()) {
-    if (el.tagName === 'AUDIO' && Number(el.dataset.userId) === Number(userId)) el.volume = volumeOf(userId);
+    if (el.tagName === 'AUDIO' && !el.dataset.screen && Number(el.dataset.userId) === Number(userId)) el.volume = volumeOf(userId);
   }
   onChange();
+}
+
+// Volume do som da TELA compartilhada (separado da voz da pessoa).
+export const screenVolumeOf = (userId) => {
+  const v = Number(volumes()[`tela:${userId}`]);
+  return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 1;
+};
+export function setScreenVolume(userId, value) {
+  const all = volumes();
+  if (value >= 0.999) delete all[`tela:${userId}`]; else all[`tela:${userId}`] = Math.round(value * 100) / 100;
+  storage('nexo.volumes', JSON.stringify(all));
+  for (const el of trackEls.values()) {
+    if (el.tagName === 'AUDIO' && el.dataset.screen && Number(el.dataset.userId) === Number(userId)) el.volume = screenVolumeOf(userId);
+  }
 }
 
 let getSocket = () => null;
@@ -63,6 +80,10 @@ const trackEls = new Map(); // track.sid -> elemento <video>/<audio>
 export function initVoice(opts) {
   getSocket = opts.getSocket;
   onChange = opts.onChange;
+  // Saiu da tela cheia: redesenha a tela da chamada.
+  const fsChanged = () => { if (!fullscreenEl()) onChange(); };
+  document.addEventListener('fullscreenchange', fsChanged);
+  document.addEventListener('webkitfullscreenchange', fsChanged);
 }
 
 export const voiceState = () => vs;
@@ -209,7 +230,9 @@ function wireRoom(room) {
       const el = track.attach();
       el.muted = vs.deafened;
       const uid = participant ? participantUserId(participant) : null;
-      if (uid) { el.dataset.userId = String(uid); el.volume = volumeOf(uid); }
+      const isScreen = !!(publication && Track.Source.ScreenShareAudio && publication.source === Track.Source.ScreenShareAudio);
+      if (isScreen) el.dataset.screen = '1';
+      if (uid) { el.dataset.userId = String(uid); el.volume = isScreen ? screenVolumeOf(uid) : volumeOf(uid); }
       document.getElementById('voice-audio').append(el);
       trackEls.set(track.sid, el);
     }
@@ -295,18 +318,143 @@ export async function toggleCamera() {
   onChange();
 }
 
-export async function toggleScreen() {
+// ---------------------------------------------------------------- Compartilhar a tela
+
+// Qualidades oferecidas. "kbps" = taxa máxima de envio (quanto maior, mais nítido e mais internet usa).
+export const SCREEN_QUALITIES = [
+  { id: '720p30', res: '720p', fps: 30, w: 1280, h: 720, kbps: 2500 },
+  { id: '1080p30', res: '1080p', fps: 30, w: 1920, h: 1080, kbps: 4500 },
+  { id: '1080p60', res: '1080p', fps: 60, w: 1920, h: 1080, kbps: 7000 },
+  { id: '1440p30', res: '1440p', fps: 30, w: 2560, h: 1440, kbps: 7000 },
+  { id: '1440p60', res: '1440p', fps: 60, w: 2560, h: 1440, kbps: 12000 },
+];
+const qualityById = (id) => SCREEN_QUALITIES.find((q) => q.id === id) || SCREEN_QUALITIES[1];
+const mbps = (kbps) => `${(kbps / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} Mbps`;
+
+// Botão 🖥️: sem compartilhar abre as opções; compartilhando mostra "mudar qualidade / parar".
+export function screenButton(e) {
   if (!vs.room || !vs.canVideo) return;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-    return toast('Este navegador não consegue compartilhar a tela.');
+    return toast('Este navegador não consegue compartilhar a tela (no celular não dá; use o computador).');
   }
+  if (!vs.screen) return openScreenDialog();
+  const anchor = e && e.currentTarget;
+  const q = qualityById(voiceSettings().screenQuality);
+  openPopover(anchor || document.body, h('div', { class: 'menu', role: 'menu' },
+    h('div', { class: 'menu-note muted small' }, `Transmitindo em até ${q.res} ${q.fps} fps`),
+    h('button', { class: 'menu-item', onclick: async () => { closePopover(); await stopScreen(); openScreenDialog(); } }, '⚙️  Mudar qualidade ou tela'),
+    h('button', { class: 'menu-item danger', onclick: () => { closePopover(); stopScreen(); } }, '⏹️  Parar de compartilhar')),
+  { className: 'popover-menu', align: 'end' });
+}
+// Compatibilidade com quem chamava toggleScreen().
+export const toggleScreen = () => (vs.screen ? stopScreen() : screenButton());
+
+function openScreenDialog() {
+  const st = voiceSettings();
+  let quality = qualityById(st.screenQuality).id;
+  let content = st.screenContent === 'detail' ? 'detail' : 'motion';
+  const hint = h('p', { class: 'muted small screen-hint' });
+  const chips = h('div', { class: 'quality-grid', role: 'radiogroup', 'aria-label': 'Qualidade' });
+  const drawChips = () => {
+    const q = qualityById(quality);
+    chips.replaceChildren(...SCREEN_QUALITIES.map((x) => h('button', {
+      type: 'button', class: `quality-chip${x.id === quality ? ' active' : ''}`, role: 'radio', 'aria-checked': String(x.id === quality),
+      dataset: { q: x.id },
+      onclick: () => { quality = x.id; drawChips(); },
+    }, h('strong', {}, x.res), h('span', {}, `${x.fps} fps`))));
+    hint.textContent = `Usa até ${mbps(q.kbps)} da sua internet de envio (upload). Se a sua internet ou o computador não aguentarem, a imagem se ajusta sozinha. `
+      + `Só sai em ${q.res} se a sua tela for desse tamanho ou maior.`;
+  };
+  drawChips();
+  const contentOption = (value, label, desc) => h('label', { class: 'kind-option' },
+    h('input', { type: 'radio', name: 'screen-content', value, checked: content === value, onchange: () => { content = value; } }),
+    h('span', { class: 'kind-text' }, h('strong', {}, label), h('span', { class: 'muted small' }, desc)));
+  const audio = h('input', { type: 'checkbox', class: 'switch', checked: st.screenAudio !== false });
+  openDialog({
+    title: '🖥️ Compartilhar a tela',
+    body: h('div', { class: 'screen-dialog' },
+      h('div', { class: 'field-label' }, 'Qualidade'),
+      chips,
+      hint,
+      h('div', { class: 'field-label' }, 'O que você vai mostrar?'),
+      contentOption('motion', '🎮 Jogo ou vídeo', 'Prioriza a fluidez (mantém os quadros por segundo).'),
+      contentOption('detail', '📄 Texto, código ou slides', 'Prioriza a nitidez (letras sempre legíveis).'),
+      h('label', { class: 'switch-row' },
+        h('span', { class: 'kind-text' }, h('strong', {}, '🔊 Transmitir o som'),
+          h('span', { class: 'muted small' }, 'Som da aba ou do computador inteiro (no Windows, marque "Compartilhar áudio" na próxima janela).')),
+        audio)),
+    actions: [
+      { label: 'Cancelar' },
+      {
+        label: 'Escolher a tela', kind: 'primary', submit: true,
+        // Tem que abrir a escolha da tela direto do clique (exigência do navegador).
+        onClick: () => {
+          saveVoiceSettings({ screenQuality: quality, screenContent: content, screenAudio: audio.checked });
+          startScreen();
+        },
+      },
+    ],
+  });
+}
+
+function canEncodeH264() {
   try {
-    await vs.room.localParticipant.setScreenShareEnabled(!vs.screen, { audio: true });
-    vs.screen = !vs.screen;
+    const caps = window.RTCRtpSender && RTCRtpSender.getCapabilities && RTCRtpSender.getCapabilities('video');
+    return !caps || caps.codecs.some((c) => /h264/i.test(c.mimeType));
+  } catch { return true; }
+}
+
+function screenOptions() {
+  const st = voiceSettings();
+  const q = qualityById(st.screenQuality);
+  const detail = st.screenContent === 'detail';
+  const { VideoPreset } = LK();
+  const low = q.h > 720 ? [1280, 720, 1500, 15] : [640, 360, 600, 15];
+  const capture = {
+    audio: st.screenAudio !== false ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false } : false,
+    // Só limita o tamanho máximo (não aumenta telas menores).
+    video: { width: { max: q.w }, height: { max: q.h }, frameRate: { ideal: q.fps, max: q.fps } },
+    contentHint: detail ? 'detail' : 'motion',
+    systemAudio: 'include',
+    surfaceSwitching: 'include',
+    selfBrowserSurface: 'exclude',
+    suppressLocalAudioPlayback: false,
+  };
+  const publish = {
+    // H.264 costuma ter codificação por hardware (placa de vídeo): aguenta 1440p a 60 fps sem travar o PC.
+    videoCodec: canEncodeH264() ? 'h264' : 'vp8',
+    screenShareEncoding: { maxBitrate: q.kbps * 1000, maxFramerate: q.fps, priority: 'high' },
+    // Camada leve extra para quem estiver com a internet ruim.
+    screenShareSimulcastLayers: VideoPreset ? [new VideoPreset(low[0], low[1], low[2] * 1000, low[3])] : undefined,
+    degradationPreference: detail ? 'maintain-resolution' : 'maintain-framerate',
+    audioPreset: { maxBitrate: 128000 },
+    dtx: false,
+    red: false,
+  };
+  return { capture, publish };
+}
+
+async function startScreen() {
+  if (!vs.room || vs.screen) return;
+  const { capture, publish } = screenOptions();
+  try {
+    await vs.room.localParticipant.setScreenShareEnabled(true, capture, publish);
+    vs.screen = true;
   } catch (err) {
     // Fechar a janela de escolha da tela também cai aqui; não é erro de verdade.
-    if (err && err.name !== 'NotAllowedError') toast('Não foi possível compartilhar a tela.');
+    if (err && err.name !== 'NotAllowedError' && err.name !== 'AbortError') {
+      console.error('Erro ao compartilhar a tela:', err);
+      toast('Não foi possível compartilhar a tela.');
+    }
   }
+  emitState();
+  onChange();
+}
+
+async function stopScreen() {
+  if (!vs.room || !vs.screen) return;
+  try { await vs.room.localParticipant.setScreenShareEnabled(false); } catch { /* já parou */ }
+  vs.screen = false;
   emitState();
   onChange();
 }
@@ -437,7 +585,7 @@ export function renderVoicePanel(el) {
       }, '📹') : null,
       vs.canVideo ? h('button', {
         class: `vp-btn${vs.screen ? ' on' : ''}`, disabled: vs.connecting,
-        title: vs.screen ? 'Parar de compartilhar a tela' : 'Compartilhar a tela', onclick: toggleScreen,
+        title: vs.screen ? 'Compartilhando a tela' : 'Compartilhar a tela', onclick: screenButton,
       }, '🖥️') : null),
   ].filter(Boolean));
 }
@@ -466,6 +614,106 @@ function videoEl(track) {
     trackEls.set(track.sid, el);
   }
   return el;
+}
+
+// ---------------------------------------------------------------- Tela compartilhada (quem assiste)
+
+const screenTiles = new Map(); // sid do vídeo da tela -> quadro (fica o mesmo para não sair da tela cheia)
+
+export function fullscreenEl() { return document.fullscreenElement || document.webkitFullscreenElement || null; }
+
+function exitFullscreen() {
+  const fn = document.exitFullscreen || document.webkitExitFullscreen;
+  if (fn && fullscreenEl()) Promise.resolve(fn.call(document)).catch(() => {});
+}
+
+function toggleFullscreen(tile, video) {
+  if (fullscreenEl()) return exitFullscreen();
+  const req = tile.requestFullscreen || tile.webkitRequestFullscreen;
+  if (req) {
+    Promise.resolve(req.call(tile, { navigationUI: 'hide' }))
+      .then(() => { try { screen.orientation.lock('landscape').catch(() => {}); } catch { /* celular sem suporte */ } })
+      .catch(() => toast('O navegador não deixou abrir em tela cheia.'));
+  } else if (video.webkitEnterFullscreen) {
+    video.webkitEnterFullscreen(); // iPhone
+  } else {
+    toast('Este navegador não tem tela cheia.');
+  }
+}
+
+// Mostra a resolução e os quadros por segundo que estão chegando.
+function watchStats(tile, video, badge) {
+  if (tile._stats) return;
+  tile._stats = true;
+  const show = (fps) => {
+    if (!video.videoHeight) { badge.textContent = ''; return; }
+    badge.textContent = `${video.videoHeight}p${fps ? ` · ${fps} fps` : ''}`;
+  };
+  if (video.requestVideoFrameCallback) {
+    let frames = 0;
+    let last = performance.now();
+    const tick = (now) => {
+      if (!screenTiles.has(tile.dataset.sid)) { tile._stats = false; return; }
+      frames++;
+      if (now - last >= 1000) { show(Math.round((frames * 1000) / (now - last))); frames = 0; last = now; }
+      video.requestVideoFrameCallback(tick);
+    };
+    video.requestVideoFrameCallback(tick);
+  } else {
+    const timer = setInterval(() => {
+      if (!screenTiles.has(tile.dataset.sid)) { clearInterval(timer); tile._stats = false; return; }
+      show(0);
+    }, 1000);
+  }
+  video.addEventListener('resize', () => show(0));
+}
+
+function screenTile(track, user, { isLocal, hasAudio }) {
+  let tile = screenTiles.get(track.sid);
+  if (!tile) {
+    const video = videoEl(track);
+    const name = h('div', { class: 'tile-name' });
+    const badge = h('span', { class: 'screen-badge' });
+    const volIcon = h('button', { type: 'button', class: 'sc-btn sc-mute' });
+    const slider = h('input', { type: 'range', min: '0', max: '100', step: '5', class: 'sc-range', 'aria-label': 'Volume da transmissão' });
+    const volBox = h('div', { class: 'sc-vol' }, volIcon, slider);
+    const fsBtn = h('button', { type: 'button', class: 'sc-btn sc-fs', title: 'Tela cheia (ou duplo clique na tela)', 'aria-label': 'Tela cheia' }, '⛶');
+    tile = h('div', { class: 'tile screen', dataset: { sid: track.sid }, tabindex: '0' },
+      video, name, h('div', { class: 'screen-controls' }, volBox, badge, fsBtn));
+    Object.assign(tile, { _name: name, _volBox: volBox, _slider: slider, _volIcon: volIcon });
+
+    const paintVol = (v) => {
+      slider.value = String(Math.round(v * 100));
+      volIcon.textContent = v === 0 ? '🔇' : v < 0.5 ? '🔉' : '🔊';
+      volIcon.title = v === 0 ? 'Ligar o som da transmissão' : 'Silenciar a transmissão';
+      slider.title = `Volume da transmissão: ${Math.round(v * 100)}%`;
+    };
+    tile._paintVol = paintVol;
+    slider.addEventListener('input', () => { const v = Number(slider.value) / 100; setScreenVolume(tile._uid, v); paintVol(v); });
+    volIcon.addEventListener('click', () => {
+      const cur = screenVolumeOf(tile._uid);
+      const next = cur > 0 ? 0 : (tile._lastVol || 1);
+      if (cur > 0) tile._lastVol = cur;
+      setScreenVolume(tile._uid, next);
+      paintVol(next);
+    });
+    fsBtn.addEventListener('click', () => toggleFullscreen(tile, video));
+    tile.addEventListener('dblclick', (e) => { if (!e.target.closest('.screen-controls')) toggleFullscreen(tile, video); });
+    tile.addEventListener('keydown', (e) => { if ((e.key === 'f' || e.key === 'F') && e.target === tile) toggleFullscreen(tile, video); });
+    // Em tela cheia, os controles e o mouse somem depois de um tempo parado.
+    let idle = null;
+    const wake = () => { tile.classList.remove('idle'); clearTimeout(idle); idle = setTimeout(() => tile.classList.add('idle'), 2500); };
+    tile.addEventListener('mousemove', wake);
+    tile.addEventListener('touchstart', wake, { passive: true });
+    watchStats(tile, video, badge);
+    screenTiles.set(track.sid, tile);
+  }
+  tile._uid = user.id;
+  tile._name.textContent = `🖥️ Tela de ${user.displayName}${isLocal ? ' (você)' : ''}`;
+  // Você não ouve o som da sua própria tela; e só mostra volume se a tela tiver som.
+  tile._volBox.hidden = isLocal || !hasAudio || !user.id;
+  if (!tile._volBox.hidden) tile._paintVol(screenVolumeOf(user.id));
+  return tile;
 }
 
 // Tela do canal de voz: grade com câmeras, telas compartilhadas e avatares.
@@ -507,6 +755,20 @@ export function renderStage(el, { channel, serverId, serverName, others, members
   const { Track } = LK();
   const room = vs.room;
   const people = [room.localParticipant, ...room.remoteParticipants.values()];
+  const liveScreens = new Set();
+  for (const p of people) {
+    const pub = p.getTrackPublication(Track.Source.ScreenShare);
+    if (pub && pub.track && !pub.isMuted) liveScreens.add(pub.track.sid);
+  }
+  // Alguém está vendo uma tela em tela cheia: não redesenha (senão sai da tela cheia),
+  // a não ser que essa transmissão tenha acabado.
+  const fs = fullscreenEl();
+  const iosFs = [...screenTiles.values()].some((t) => { const v = t.querySelector('video'); return v && v.webkitDisplayingFullscreen; });
+  if ((fs && el.contains(fs)) || iosFs) {
+    if (iosFs || (fs.dataset.sid && liveScreens.has(fs.dataset.sid))) return;
+    exitFullscreen();
+  }
+  for (const sid of [...screenTiles.keys()]) if (!liveScreens.has(sid)) screenTiles.delete(sid);
   const tiles = [];
   for (const p of people) {
     const isLocal = p === room.localParticipant;
@@ -515,8 +777,8 @@ export function renderStage(el, { channel, serverId, serverName, others, members
     const user = member || { id: userId || 0, displayName: p.name || p.identity };
     const screenPub = p.getTrackPublication(Track.Source.ScreenShare);
     if (screenPub && screenPub.track && !screenPub.isMuted) {
-      tiles.push(h('div', { class: 'tile screen' }, videoEl(screenPub.track),
-        h('div', { class: 'tile-name' }, `🖥️ Tela de ${user.displayName}${isLocal ? ' (você)' : ''}`)));
+      const audioPub = Track.Source.ScreenShareAudio ? p.getTrackPublication(Track.Source.ScreenShareAudio) : null;
+      tiles.push(screenTile(screenPub.track, user, { isLocal, hasAudio: !!(audioPub && !audioPub.isMuted) }));
     }
     const camPub = p.getTrackPublication(Track.Source.Camera);
     const micPub = p.getTrackPublication(Track.Source.Microphone);
@@ -535,11 +797,13 @@ export function renderStage(el, { channel, serverId, serverName, others, members
   }
   const ptt = voiceSettings().mode === 'ptt' && vs.canSpeak;
   el.replaceChildren(
-    h('div', { class: `stage-grid n${Math.min(tiles.length, 9)}` }, tiles),
+    h('div', { class: `stage-grid n${Math.min(tiles.length, 9)}${tiles.some((t) => t.classList.contains('screen')) ? ' has-screen' : ''}` },
+      // Telas compartilhadas primeiro (em destaque), depois as pessoas.
+      [...tiles.filter((t) => t.classList.contains('screen')), ...tiles.filter((t) => !t.classList.contains('screen'))]),
     h('div', { class: 'stage-bar' },
       ptt ? pttButton('Segure para falar') : h('button', { class: `round-btn big${vs.muted ? ' off' : ''}`, title: vs.muted ? 'Ligar microfone' : 'Mutar', disabled: !vs.canSpeak, onclick: toggleMute }, vs.muted ? '🔇' : '🎤'),
       vs.canVideo ? h('button', { class: `round-btn big${vs.video ? ' on' : ''}`, title: 'Câmera', onclick: toggleCamera }, '📹') : null,
-      vs.canVideo ? h('button', { class: `round-btn big${vs.screen ? ' on' : ''}`, title: 'Compartilhar tela', onclick: toggleScreen }, '🖥️') : null,
+      vs.canVideo ? h('button', { class: `round-btn big${vs.screen ? ' on' : ''}`, title: vs.screen ? 'Compartilhando a tela' : 'Compartilhar tela', onclick: screenButton }, '🖥️') : null,
       h('button', { class: 'round-btn big danger', title: 'Sair da voz', onclick: () => leaveVoice() }, '📞')),
   );
 }
