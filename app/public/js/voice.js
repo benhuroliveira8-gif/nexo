@@ -7,6 +7,7 @@ import {
   initRemote, onData, remoteState, requestControl, stopViewing, endHosting, attachControl,
   onParticipantGone, onScreenStopped, onRemoteScreenStopped, resetRemote,
 } from './remote.js';
+import { quickDevices } from './devices.js';
 
 const vs = {
   room: null,
@@ -226,6 +227,7 @@ function micErrorMessage(err) {
 export async function leaveVoice({ silent = false } = {}) {
   const room = vs.room;
   resetRemote();
+  unwatched.clear();
   vs.room = null;
   if (room) {
     try { await room.disconnect(); } catch { /* já caiu */ }
@@ -281,7 +283,15 @@ function wireRoom(room) {
   // Controle remoto: mensagens e quem saiu.
   if (RoomEvent.DataReceived) room.on(RoomEvent.DataReceived, (payload, participant, kind, topic) => onData(payload, participant, topic));
   room.on(RoomEvent.ParticipantDisconnected, (p) => { if (p) onParticipantGone(p.identity); });
-  room.on(RoomEvent.TrackUnpublished, (pub, p) => { if (pub && p && pub.source === Track.Source.ScreenShare) onRemoteScreenStopped(p.identity); });
+  room.on(RoomEvent.TrackUnpublished, (pub, p) => {
+    if (pub && p && pub.source === Track.Source.ScreenShare) { onRemoteScreenStopped(p.identity); unwatched.delete(p.identity); }
+  });
+  // Som da tela chegou depois de você parar de assistir: também não baixa.
+  room.on(RoomEvent.TrackPublished, (pub, p) => {
+    if (pub && p && unwatched.has(p.identity) && (pub.source === Track.Source.ScreenShare || pub.source === Track.Source.ScreenShareAudio) && pub.setSubscribed) {
+      try { pub.setSubscribed(false); } catch { /* */ }
+    }
+  });
   [RoomEvent.ParticipantConnected, RoomEvent.ParticipantDisconnected, RoomEvent.TrackMuted,
     RoomEvent.TrackUnmuted, RoomEvent.ActiveSpeakersChanged, RoomEvent.LocalTrackPublished,
     RoomEvent.TrackPublished, RoomEvent.TrackUnpublished, RoomEvent.ParticipantMetadataChanged,
@@ -660,7 +670,11 @@ export function renderVoicePanel(el) {
       vs.canVideo ? h('button', {
         class: `vp-btn${vs.screen ? ' on' : ''}`, disabled: vs.connecting,
         title: vs.screen ? 'Compartilhando a tela' : 'Compartilhar a tela', onclick: screenButton,
-      }, '🖥️') : null),
+      }, '🖥️') : null,
+      h('button', {
+        class: 'vp-btn', disabled: vs.connecting, title: 'Microfone, saída de som e câmera',
+        onclick: (e) => openPopover(e.currentTarget, quickDevices({ canVideo: vs.canVideo }), { className: 'popover-devices' }),
+      }, '⚙️')),
   ].filter(Boolean));
 }
 
@@ -693,6 +707,36 @@ function videoEl(track) {
 // ---------------------------------------------------------------- Tela compartilhada (quem assiste)
 
 const screenTiles = new Map(); // sid do vídeo da tela -> quadro (fica o mesmo para não sair da tela cheia)
+
+// Telas que você escolheu NÃO assistir (não baixa o vídeo nem o som delas).
+const unwatched = new Set(); // identity de quem compartilha
+function setWatching(p, watch) {
+  const { Track } = LK();
+  if (!watch) {
+    const fs = fullscreenEl();
+    if (fs && fs.classList.contains('screen')) exitFullscreen();
+    const { viewing } = remoteState();
+    if (viewing && viewing.identity === p.identity) stopViewing();
+    unwatched.add(p.identity);
+  } else {
+    unwatched.delete(p.identity);
+  }
+  for (const src of [Track.Source.ScreenShare, Track.Source.ScreenShareAudio]) {
+    const pub = src && p.getTrackPublication(src);
+    if (pub && pub.setSubscribed) { try { pub.setSubscribed(watch); } catch { /* */ } }
+  }
+  onChange();
+}
+
+function pausedScreenTile(p, user) {
+  return h('div', { class: 'tile screen paused' },
+    h('div', { class: 'paused-box' },
+      h('div', { class: 'paused-icon' }, '🖥️'),
+      h('strong', {}, `${user.displayName} está compartilhando a tela`),
+      h('span', { class: 'muted small' }, 'Você não está assistindo (não gasta internet).'),
+      h('button', { type: 'button', class: 'btn primary small', onclick: () => setWatching(p, true) }, '▶️ Assistir')),
+    h('div', { class: 'tile-name' }, `🖥️ Tela de ${user.displayName}`));
+}
 
 export function fullscreenEl() { return document.fullscreenElement || document.webkitFullscreenElement || null; }
 
@@ -742,7 +786,7 @@ function watchStats(tile, video, badge) {
   video.addEventListener('resize', () => show(0));
 }
 
-function screenTile(track, user, { isLocal, hasAudio, identity }) {
+function screenTile(track, user, { isLocal, hasAudio, identity, participant }) {
   let tile = screenTiles.get(track.sid);
   if (!tile) {
     const video = videoEl(track);
@@ -753,10 +797,12 @@ function screenTile(track, user, { isLocal, hasAudio, identity }) {
     const volBox = h('div', { class: 'sc-vol' }, volIcon, slider);
     const fsBtn = h('button', { type: 'button', class: 'sc-btn sc-fs', title: 'Tela cheia (ou duplo clique na tela)', 'aria-label': 'Tela cheia' }, '⛶');
     const ctlBtn = h('button', { type: 'button', class: 'sc-btn sc-ctl' });
+    const hideBtn = h('button', { type: 'button', class: 'sc-btn sc-hide', title: 'Parar de assistir (economiza internet)', 'aria-label': 'Parar de assistir' }, '🙈');
     const hint = h('div', { class: 'rc-hint', hidden: true });
     tile = h('div', { class: 'tile screen', dataset: { sid: track.sid }, tabindex: '0' },
-      video, name, hint, h('div', { class: 'screen-controls' }, volBox, badge, ctlBtn, fsBtn));
-    Object.assign(tile, { _name: name, _volBox: volBox, _slider: slider, _volIcon: volIcon, _ctlBtn: ctlBtn, _video: video });
+      video, name, hint, h('div', { class: 'screen-controls' }, volBox, badge, ctlBtn, hideBtn, fsBtn));
+    Object.assign(tile, { _name: name, _volBox: volBox, _slider: slider, _volIcon: volIcon, _ctlBtn: ctlBtn, _video: video, _hideBtn: hideBtn });
+    hideBtn.addEventListener('click', () => { if (tile._participant) setWatching(tile._participant, false); });
     ctlBtn.addEventListener('click', () => {
       const { viewing } = remoteState();
       if (viewing && viewing.identity === tile._identity) stopViewing();
@@ -791,6 +837,8 @@ function screenTile(track, user, { isLocal, hasAudio, identity }) {
   }
   tile._uid = user.id;
   tile._identity = identity;
+  tile._participant = participant;
+  tile._hideBtn.hidden = isLocal;
   tile._userName = user.displayName;
   tile._name.textContent = `🖥️ Tela de ${user.displayName}${isLocal ? ' (você)' : ''}`;
   // Controle remoto (só na tela dos outros).
@@ -868,9 +916,11 @@ export function renderStage(el, { channel, serverId, serverName, others, members
     const member = members.find((x) => x.id === userId);
     const user = member || { id: userId || 0, displayName: p.name || p.identity };
     const screenPub = p.getTrackPublication(Track.Source.ScreenShare);
-    if (screenPub && screenPub.track && !screenPub.isMuted) {
+    if (!isLocal && screenPub && !screenPub.isMuted && unwatched.has(p.identity)) {
+      tiles.push(pausedScreenTile(p, user));
+    } else if (screenPub && screenPub.track && !screenPub.isMuted) {
       const audioPub = Track.Source.ScreenShareAudio ? p.getTrackPublication(Track.Source.ScreenShareAudio) : null;
-      tiles.push(screenTile(screenPub.track, user, { isLocal, hasAudio: !!(audioPub && !audioPub.isMuted), identity: p.identity }));
+      tiles.push(screenTile(screenPub.track, user, { isLocal, hasAudio: !!(audioPub && !audioPub.isMuted), identity: p.identity, participant: p }));
     }
     const camPub = p.getTrackPublication(Track.Source.Camera);
     const micPub = p.getTrackPublication(Track.Source.Microphone);

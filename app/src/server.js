@@ -100,6 +100,7 @@ db.init()
   .then(() => {
     files.startCleanup();
     previews.startCleanup();
+    require('./routes/events').startReminders();
     server.listen(PORT, () => console.log(`Nexo rodando na porta ${PORT}`));
   })
   .catch((err) => {

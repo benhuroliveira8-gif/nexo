@@ -282,15 +282,20 @@ export function openPopover(anchor, content, { align = 'start', className = '' }
   host.append(pop);
   activePopover = pop;
 
-  const r = anchor instanceof Element ? anchor.getBoundingClientRect() : { left: anchor.x, right: anchor.x, top: anchor.y, bottom: anchor.y };
-  const pw = pop.offsetWidth;
-  const ph = pop.offsetHeight;
-  let left = align === 'end' ? r.right - pw : r.left;
-  let top = r.bottom + 6;
-  if (top + ph > window.innerHeight - 8) top = Math.max(8, r.top - ph - 6);
-  left = Math.min(Math.max(8, left), window.innerWidth - pw - 8);
-  pop.style.left = `${left}px`;
-  pop.style.top = `${top}px`;
+  const place = () => {
+    const r = anchor instanceof Element ? anchor.getBoundingClientRect() : { left: anchor.x, right: anchor.x, top: anchor.y, bottom: anchor.y };
+    const pw = pop.offsetWidth;
+    const ph = pop.offsetHeight;
+    let left = align === 'end' ? r.right - pw : r.left;
+    let top = r.bottom + 6;
+    if (top + ph > window.innerHeight - 8) top = Math.max(8, r.top - ph - 6);
+    left = Math.min(Math.max(8, left), window.innerWidth - pw - 8);
+    pop.style.left = `${left}px`;
+    pop.style.top = `${top}px`;
+  };
+  place();
+  // O conteúdo pode crescer depois (ex.: lista carregada): reposiciona.
+  if (window.ResizeObserver) new ResizeObserver(() => { if (pop.isConnected) place(); }).observe(pop);
 
   setTimeout(() => {
     const onDown = (e) => {

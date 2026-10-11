@@ -1281,3 +1281,64 @@ body.is-dragging, body.is-dragging * { cursor: grabbing !important; user-select:
 .rc-helper .btn { justify-self: start; }
 .rc-steps { margin: 0 0 10px; padding-left: 18px; }
 kbd { font: 600 12px ui-monospace, Consolas, monospace; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--line); background: var(--bg-0); }
+
+/* ---------------------------------------------------------------- Parar de assistir */
+.tile.screen.paused { display: grid; place-items: center; background: var(--bg-3); }
+.paused-box { display: grid; justify-items: center; gap: 6px; text-align: center; padding: 16px; }
+.paused-icon { font-size: 34px; }
+.stage-grid.has-screen .tile.screen.paused { aspect-ratio: auto; min-height: 160px; height: 180px; }
+
+/* ---------------------------------------------------------------- Aparelhos na chamada */
+.popover-devices { width: 320px; }
+.quick-devices { display: grid; gap: 10px; padding: 12px; }
+.qd-row { display: grid; gap: 4px; }
+.qd-label { font-size: 12px; font-weight: 700; color: var(--text-2); }
+.quick-devices .dev-select { min-width: 0; width: 100%; }
+.qd-more { justify-self: start; }
+
+/* ---------------------------------------------------------------- GIFs favoritos */
+.gif-tile { position: relative; }
+.gif-star {
+  position: absolute; top: 4px; right: 4px; width: 28px; height: 28px; border-radius: 50%; border: 0;
+  background: rgba(0,0,0,.55); color: #fff; font-size: 16px; line-height: 1; cursor: pointer; opacity: 0; transition: opacity .12s;
+  display: grid; place-items: center;
+}
+.gif-star.on { color: #ffd34d; opacity: 1; }
+.gif-tile:hover .gif-star, .gif-tile:focus-within .gif-star, .gif-msg:hover .gif-star, .gif-star:focus-visible { opacity: 1; }
+@media (hover: none) { .gif-star { opacity: .85; } }
+
+/* ---------------------------------------------------------------- Busca: filtros */
+.search-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); flex: none; }
+.sf { display: grid; gap: 3px; font-size: 12px; color: var(--text-2); font-weight: 600; min-width: 0; }
+.sf-select, .sf-date { width: 100%; min-width: 0; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg-0); color: var(--text); font-size: 13px; }
+.sf-clear { grid-column: 1 / -1; justify-self: start; }
+
+/* ---------------------------------------------------------------- Eventos */
+.events-item { display: flex; align-items: center; gap: 8px; width: calc(100% - 16px); margin: 8px 8px 4px; padding: 8px 10px; border-radius: 8px; background: var(--bg-3); text-align: left; }
+.events-item:hover { background: var(--bg-4); }
+.events-text { display: grid; min-width: 0; }
+.events-text .small { font-size: 11px; }
+.events-panel { display: grid; gap: 12px; }
+.events-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.events-top p { margin: 0; }
+.events-list { display: grid; gap: 10px; max-height: 60vh; overflow-y: auto; }
+.event-card { display: flex; gap: 14px; padding: 12px; border-radius: 12px; background: var(--bg-0); border: 1px solid var(--line); }
+.event-card.live { border-color: var(--danger); }
+.event-date { flex: none; width: 52px; height: 58px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; align-content: center; }
+.ev-day { font-size: 22px; font-weight: 800; line-height: 1; }
+.ev-month { font-size: 12px; font-weight: 700; text-transform: uppercase; }
+.event-main { display: grid; gap: 6px; min-width: 0; flex: 1; }
+.event-when { font-size: 12px; font-weight: 700; color: var(--accent); }
+.event-title { margin: 0; font-size: 16px; overflow-wrap: anywhere; }
+.event-desc { margin: 0; color: var(--text-2); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.event-channel { justify-self: start; border: 0; background: var(--bg-3); color: var(--text); border-radius: 6px; padding: 3px 8px; font-size: 13px; cursor: pointer; }
+.event-channel:hover { background: var(--bg-4); }
+.event-people { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ev-avatars { display: flex; }
+.ev-avatars .avatar { margin-right: -6px; box-shadow: 0 0 0 2px var(--bg-0); }
+.ev-avatars + .muted { margin-left: 8px; }
+.event-actions { display: flex; gap: 6px; align-items: center; }
+.event-form { display: grid; gap: 10px; min-width: min(420px, 100%); }
+.event-form textarea { resize: vertical; width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg-0); color: var(--text); font: inherit; }
+.event-form select { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg-0); color: var(--text); }
+.event-form .field { margin-bottom: 0; }

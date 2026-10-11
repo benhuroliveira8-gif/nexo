@@ -10,6 +10,16 @@ const { wrap, fail, parseId, parseBigId } = require('./util');
 
 const PAGE_SIZE = 50;
 const SEARCH_PAGE = 25;
+// Filtro "tem:" da busca (trechos fixos, sem nada vindo do usuário).
+const HAS_SQL = {
+  arquivo: 'EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = msg.id AND NOT a.is_voice)',
+  imagem: "EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = msg.id AND a.content_type LIKE 'image/%')",
+  video: "EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = msg.id AND a.content_type LIKE 'video/%')",
+  audio: 'EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = msg.id AND a.is_voice)',
+  link: "msg.content ~* 'https?://'",
+  gif: 'msg.gif IS NOT NULL',
+  enquete: 'EXISTS (SELECT 1 FROM polls p WHERE p.message_id = msg.id)',
+};
 
 // Escapa % e _ para o ILIKE procurar o texto literalmente.
 const likeEscape = (text) => text.replace(/[\\%_]/g, (c) => `\\${c}`);
@@ -170,10 +180,21 @@ module.exports = function messageRoutes(r) {
 
   // ---------- Busca
   // GET /search?q=texto&serverId=1 (ou channelId=5, ou dms=1) &authorId=7 &before=<id da mensagem>
+  //   &has=arquivo|imagem|link|gif|audio|enquete  &since=<data ISO>  &until=<data ISO>
   r.get('/search', wrap(async (req, res) => {
     const q = String(req.query.q || '').replace(/\s+/g, ' ').trim().slice(0, 200);
     const authorId = req.query.authorId ? parseId(req.query.authorId) : null;
-    if (!q && !authorId) fail(400, 'Digite algo para buscar.');
+    const has = typeof req.query.has === 'string' && Object.hasOwn(HAS_SQL, req.query.has) ? req.query.has : null;
+    if (req.query.has && !has) fail(400, 'Filtro "tem" inválido.');
+    const date = (v) => {
+      if (!v) return null;
+      const d = new Date(String(v));
+      if (Number.isNaN(d.getTime())) fail(400, 'Data inválida.');
+      return d.toISOString();
+    };
+    const since = date(req.query.since);
+    const until = date(req.query.until);
+    if (!q && !authorId && !has && !since && !until) fail(400, 'Digite algo para buscar.');
     const before = parseBigId(req.query.before || '');
 
     let channelIds;
@@ -195,13 +216,17 @@ module.exports = function messageRoutes(r) {
     }
 
     const where = `msg.channel_id = ANY($1::int[])
+       AND msg.kind = 'default'
        AND ($2::text = '' OR msg.content ILIKE '%' || $2 || '%')
-       AND ($3::int IS NULL OR msg.author_id = $3)`;
-    const params = [channelIds, likeEscape(q), authorId];
+       AND ($3::int IS NULL OR msg.author_id = $3)
+       AND ($4::timestamptz IS NULL OR msg.created_at >= $4)
+       AND ($5::timestamptz IS NULL OR msg.created_at <= $5)
+       ${has ? `AND ${HAS_SQL[has]}` : ''}`;
+    const params = [channelIds, likeEscape(q), authorId, since, until];
     const [found, total] = await Promise.all([
       db.query(
         `${M.SELECT_MESSAGE}
-         WHERE ${where} AND ($4::bigint IS NULL OR msg.id < $4::bigint)
+         WHERE ${where} AND ($6::bigint IS NULL OR msg.id < $6::bigint)
          ORDER BY msg.id DESC LIMIT ${SEARCH_PAGE}`,
         [...params, before],
       ),

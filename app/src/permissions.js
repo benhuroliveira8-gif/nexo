@@ -21,16 +21,18 @@ const P = {
   MODERATE_MEMBERS: 1 << 15, // castigar (só ler por um tempo)
   VIEW_AUDIT_LOG:   1 << 16, // ver o registro de auditoria
   MANAGE_EMOJIS:    1 << 17, // enviar, renomear e apagar emojis do servidor
+  CREATE_EVENTS:    1 << 18, // criar eventos (e editar os próprios)
+  MANAGE_EVENTS:    1 << 19, // editar e apagar eventos dos outros
 };
 
 const ALL = Object.values(P).reduce((a, b) => a | b, 0);
 const DEFAULT_EVERYONE = P.CREATE_INVITE | P.SEND_MESSAGES | P.ATTACH_FILES | P.ADD_REACTIONS
-  | P.CONNECT | P.SPEAK | P.VIDEO;
+  | P.CONNECT | P.SPEAK | P.VIDEO | P.CREATE_EVENTS;
 // Em DM: mensagens, anexos, reações e chamadas de voz/vídeo.
 const DM_PERMS = P.SEND_MESSAGES | P.ATTACH_FILES | P.ADD_REACTIONS | P.CONNECT | P.SPEAK | P.VIDEO;
 // O que alguém de castigo deixa de poder fazer (continua lendo).
 const TIMEOUT_BLOCKED = P.SEND_MESSAGES | P.ATTACH_FILES | P.ADD_REACTIONS | P.MENTION_EVERYONE
-  | P.CONNECT | P.SPEAK | P.VIDEO | P.CREATE_INVITE;
+  | P.CONNECT | P.SPEAK | P.VIDEO | P.CREATE_INVITE | P.CREATE_EVENTS;
 
 const has = (perms, flag) => (perms & P.ADMINISTRATOR) !== 0 || (perms & flag) === flag;
 

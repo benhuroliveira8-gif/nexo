@@ -7,6 +7,7 @@ const messageRoutes = require('./messages');
 const socialRoutes = require('./social');
 const botRoutes = require('./bots');
 const voiceRoutes = require('./voice');
+const eventRoutes = require('./events');
 
 // Monta toda a API em /api.
 module.exports = function buildApi() {
@@ -25,6 +26,7 @@ module.exports = function buildApi() {
   socialRoutes(r);
   botRoutes(r);
   voiceRoutes(r);
+  eventRoutes(r);
 
   r.use((req, res) => res.status(404).json({ error: 'Rota não encontrada.' }));
   return r;

@@ -224,3 +224,39 @@ export function devicesSection() {
   refresh();
   return root;
 }
+
+// Escolha rápida dentro da chamada (botão ⚙️ do painel de voz).
+export function quickDevices({ canVideo = true } = {}) {
+  const box = h('div', { class: 'quick-devices' }, h('p', { class: 'muted small' }, 'Carregando…'));
+  if (!supported()) {
+    box.replaceChildren(h('p', { class: 'muted small' }, 'Este navegador não permite escolher aparelhos.'));
+    return box;
+  }
+  const kinds = ['mic', ...(canPickSpeaker() ? ['speaker'] : []), ...(canVideo ? ['cam'] : [])];
+  const labels = { mic: '🎙️ Microfone', speaker: '🎧 Saída de som', cam: '📷 Câmera' };
+  listDevices().then((list) => {
+    const st = voiceSettings();
+    const rows = kinds.map((which) => {
+      const opts = optionsFor(list, which);
+      const chosen = st[KEY[which]] || '';
+      if (chosen && !opts.some((o) => o.id === chosen)) opts.push({ id: chosen, label: '(desconectado — usando o padrão)' });
+      const sel = h('select', { class: 'dev-select', 'aria-label': labels[which] },
+        opts.map((o) => h('option', { value: o.id, selected: o.id === chosen }, o.label)));
+      sel.value = chosen;
+      sel.addEventListener('change', () => {
+        saveVoiceSettings({ [KEY[which]]: sel.value });
+        toast(which === 'speaker' ? 'Saída de som trocada.' : which === 'mic' ? 'Microfone trocado.' : 'Câmera trocada.');
+      });
+      return h('label', { class: 'qd-row' }, h('span', { class: 'qd-label' }, labels[which]), sel);
+    });
+    box.replaceChildren(...[
+      ...rows,
+      !hasLabels(list) ? h('p', { class: 'muted small' }, 'Os nomes aparecem depois que você deixa o Nexo usar o microfone.') : null,
+      h('button', {
+        type: 'button', class: 'btn small qd-more',
+        onclick: () => window.dispatchEvent(new CustomEvent('nexo:open-settings', { detail: 'voice' })),
+      }, 'Mais opções (testar microfone, câmera…)'),
+    ].filter(Boolean));
+  });
+  return box;
+}

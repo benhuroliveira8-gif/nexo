@@ -20,7 +20,8 @@ import {
 } from './voice.js';
 import { openDeveloper } from './developer.js';
 import { renderMarkdown, isJumbo, stripMarkdown } from './markdown.js';
-import { openGifPicker, buildGif } from './gifs.js';
+import { openGifPicker, buildGif, setGifUser } from './gifs.js';
+import { initEvents, loadEvents, wireEventSocket, eventsSidebarItem, openEventsPanel } from './events.js';
 import {
   createPollDialog, buildPoll, buildVoicePlayer, buildEmbeds, startRecording, canRecord, liveBars, fmtDuration,
 } from './extras.js';
@@ -214,6 +215,7 @@ async function boot() {
 
 async function start(user) {
   state.me = user;
+  setGifUser(user.id);
   $('#auth').hidden = true;
   $('#app').hidden = false;
   renderUserPanel();
@@ -250,10 +252,12 @@ async function openFromUrl(url) {
   const channelId = Number(q.get('canal'));
   const serverId = Number(q.get('servidor'));
   const msgId = q.get('msg');
-  if (!channelId) return;
+  const wantsEvents = !!q.get('eventos');
+  if (!channelId && !(serverId && wantsEvents)) return;
   if (serverId) {
     if (!state.servers.some((s) => s.id === serverId)) return toast('Você não está mais nesse servidor.');
-    await selectServer(serverId, channelId);
+    await selectServer(serverId, channelId || undefined);
+    if (wantsEvents) openEventsPanel(serverId);
   } else {
     if (!state.dms.some((d) => d.channelId === channelId)) await loadDms().catch(() => {});
     if (!state.dms.some((d) => d.channelId === channelId)) return toast('Essa conversa não existe mais.');
@@ -445,6 +449,8 @@ function connectSocket() {
     clearLocalUnread(channelId);
     renderBadges();
   });
+
+  wireEventSocket(socket);
 
   socket.on('server:changed', ({ serverId }) => {
     if (serverId === state.view) refreshDetailSoon();
@@ -654,6 +660,11 @@ async function goHome(channelId = null) {
   renderAll();
 }
 
+initEvents({
+  onChange: (serverId) => { if (state.view === serverId && state.detail) renderSidebar(); },
+  openChannel: (serverId, channelId) => (state.view === serverId ? selectChannel(channelId) : selectServer(serverId, channelId)),
+});
+
 async function selectServer(serverId, preferredChannelId) {
   if (state.view !== serverId) closeSearch();
   state.view = serverId;
@@ -669,6 +680,7 @@ async function selectServer(serverId, preferredChannelId) {
   if (state.view !== serverId) return; // clicou em outro no meio do caminho
   const { detail } = fetched;
   setDetail(detail, fetched.replay);
+  loadEvents(serverId);
 
   const saved = preferredChannelId || Number(storage(`nexo.channel.${serverId}`));
   const channel = detail.channels.find((c) => c.id === saved) || detail.channels.find((c) => c.kind === 'text') || detail.channels[0];
@@ -882,7 +894,7 @@ function renderSidebar() {
       gear(c)), ...threadsOf(c.id).map(threadRow)];
   };
 
-  const blocks = [];
+  const blocks = [eventsSidebarItem(state.detail.server.id)];
   // Canais sem categoria ficam no topo.
   const loose = listed.filter((c) => !c.categoryId || !catIds.has(c.categoryId));
   blocks.push(h('ul', { class: 'side-list cat-body', dataset: { categoryId: '' } }, loose.flatMap(channelRow),
@@ -2904,7 +2916,14 @@ function resultCard(m, { actions = [], channelLabel = null } = {}) {
 
 // ================================================================ Busca
 
-const search = { q: '', authorId: null, results: [], total: 0, hasMore: false, loading: false, scopeKey: '' };
+const search = { q: '', results: [], total: 0, hasMore: false, loading: false, scopeKey: '', ran: false,
+  filters: { authorId: null, has: '', since: '', until: '' } };
+
+const HAS_OPTIONS = [
+  ['', 'Qualquer coisa'], ['arquivo', '📎 Arquivo'], ['imagem', '🖼️ Imagem'], ['video', '🎬 Vídeo'],
+  ['link', '🔗 Link'], ['gif', '🎞️ GIF'], ['audio', '🎤 Áudio'], ['enquete', '📊 Enquete'],
+];
+const HAS_ALIASES = { arquivo: 'arquivo', arquivos: 'arquivo', anexo: 'arquivo', imagem: 'imagem', foto: 'imagem', video: 'video', vídeo: 'video', link: 'link', gif: 'gif', audio: 'audio', áudio: 'audio', voz: 'audio', enquete: 'enquete' };
 
 function searchScope() {
   if (state.view !== 'home') return { key: `s${state.view}`, qs: `serverId=${state.view}` };
@@ -2912,31 +2931,59 @@ function searchScope() {
   return { key: 'dms', qs: 'dms=1' };
 }
 
-// "de:fulano bolo" = mensagens do @fulano com "bolo".
+// Atalhos no texto: "de:ana", "tem:link", "depois:2026-10-01", "antes:2026-10-31".
 function parseSearch(text) {
-  let authorId = null;
+  const f = {};
   let unknown = null;
-  const q = text.replace(/(?:^|\s)(?:de|from):@?([a-z0-9_.]{1,32})/gi, (_, name) => {
-    const u = knownUsers().get(name.toLowerCase());
-    if (u) authorId = u.id; else unknown = name;
-    return ' ';
-  }).replace(/\s+/g, ' ').trim();
-  return { q, authorId, unknown };
+  const q = text
+    .replace(/(?:^|\s)(?:de|from):@?([a-z0-9_.]{1,32})/gi, (_, name) => {
+      const u = knownUsers().get(name.toLowerCase());
+      if (u) f.authorId = u.id; else unknown = `Não encontrei o usuário @${name}.`;
+      return ' ';
+    })
+    .replace(/(?:^|\s)tem:(\S+)/gi, (_, v) => {
+      const k = HAS_ALIASES[v.toLowerCase()];
+      if (k) f.has = k; else unknown = `Filtro "tem:${v}" não existe. Use: arquivo, imagem, video, link, gif, audio ou enquete.`;
+      return ' ';
+    })
+    .replace(/(?:^|\s)(depois|antes):(\d{4}-\d{2}-\d{2})/gi, (_, k, d) => {
+      f[k.toLowerCase() === 'depois' ? 'since' : 'until'] = d;
+      return ' ';
+    })
+    .replace(/\s+/g, ' ').trim();
+  return { q, f, unknown };
 }
+
+const hasFilters = () => !!(search.filters.authorId || search.filters.has || search.filters.since || search.filters.until);
 
 async function runSearch(more = false) {
   const text = $('#search-input').value.trim();
-  if (!text) return closeSearch();
-  const { q, authorId, unknown } = parseSearch(text);
-  if (unknown) return toast(`Não encontrei o usuário @${unknown}.`);
-  if (!q && !authorId) return;
   const scope = searchScope();
-  if (!more) Object.assign(search, { q, authorId, results: [], total: 0, hasMore: false, scopeKey: scope.key });
+  if (!more) {
+    const { q, f, unknown } = parseSearch(text);
+    if (unknown) return toast(unknown);
+    // Mudou de lugar (outro servidor/conversa): começa sem filtros.
+    if (search.scopeKey && search.scopeKey !== scope.key) search.filters = { authorId: null, has: '', since: '', until: '' };
+    Object.assign(search.filters, f);
+    Object.assign(search, { q, results: [], total: 0, hasMore: false, scopeKey: scope.key });
+  }
+  if (!search.q && !hasFilters()) {
+    // Nada para buscar ainda: mostra só os filtros.
+    Object.assign(search, { ran: false, loading: false, results: [], total: 0, hasMore: false, scopeKey: scope.key });
+    return renderSearch();
+  }
   search.loading = true;
+  search.ran = true;
   renderSearch();
   try {
-    const params = new URLSearchParams({ q: search.q });
-    if (search.authorId) params.set('authorId', search.authorId);
+    const params = new URLSearchParams();
+    if (search.q) params.set('q', search.q);
+    const f = search.filters;
+    if (f.authorId) params.set('authorId', f.authorId);
+    if (f.has) params.set('has', f.has);
+    // Datas do dia inteiro, no horário daqui.
+    if (f.since) params.set('since', new Date(`${f.since}T00:00:00`).toISOString());
+    if (f.until) params.set('until', new Date(`${f.until}T23:59:59.999`).toISOString());
     const last = search.results.at(-1);
     if (more && last) params.set('before', last.id);
     const data = await api(`/search?${scope.qs}&${params}`);
@@ -2952,11 +2999,40 @@ async function runSearch(more = false) {
   }
 }
 
+// Pessoas para o filtro "De": membros do servidor, ou quem está nas suas conversas.
+function searchPeople() {
+  const list = state.view !== 'home' && state.detail
+    ? state.detail.members
+    : [...knownUsers().values()];
+  const seen = new Set();
+  return list.filter((u) => u && !seen.has(u.id) && seen.add(u.id))
+    .sort((a, b) => a.displayName.localeCompare(b.displayName, 'pt-BR'));
+}
+
+function searchFilterBar() {
+  const f = search.filters;
+  const apply = () => runSearch();
+  const who = h('select', { class: 'sf-select', 'aria-label': 'De quem', onchange: (e) => { f.authorId = e.target.value ? Number(e.target.value) : null; apply(); } },
+    h('option', { value: '' }, 'Qualquer pessoa'),
+    searchPeople().map((u) => h('option', { value: String(u.id), selected: f.authorId === u.id }, u.displayName)));
+  const has = h('select', { class: 'sf-select', 'aria-label': 'Tem', onchange: (e) => { f.has = e.target.value; apply(); } },
+    HAS_OPTIONS.map(([v, label]) => h('option', { value: v, selected: f.has === v }, label)));
+  const since = h('input', { type: 'date', class: 'sf-date', value: f.since, 'aria-label': 'A partir de', onchange: (e) => { f.since = e.target.value; apply(); } });
+  const until = h('input', { type: 'date', class: 'sf-date', value: f.until, 'aria-label': 'Até', onchange: (e) => { f.until = e.target.value; apply(); } });
+  return h('div', { class: 'search-filters' },
+    h('label', { class: 'sf' }, h('span', {}, 'De'), who),
+    h('label', { class: 'sf' }, h('span', {}, 'Tem'), has),
+    h('label', { class: 'sf' }, h('span', {}, 'A partir de'), since),
+    h('label', { class: 'sf' }, h('span', {}, 'Até'), until),
+    hasFilters() ? h('button', { class: 'btn small sf-clear', onclick: () => { search.filters = { authorId: null, has: '', since: '', until: '' }; apply(); } }, 'Limpar filtros') : null);
+}
+
 function renderSearch() {
   const panel = $('#search-panel');
   panel.hidden = false;
   $('#app').classList.add('searching');
-  const countText = search.loading && search.results.length === 0 ? 'Buscando…'
+  const countText = !search.ran ? 'Buscar mensagens'
+    : search.loading && search.results.length === 0 ? 'Buscando…'
     : search.total === 0 ? 'Nenhum resultado'
       : search.total >= 1000 ? 'Mais de 1000 resultados' : `${search.total} ${search.total === 1 ? 'resultado' : 'resultados'}`;
   const channelName = (m) => {
@@ -2971,6 +3047,7 @@ function renderSearch() {
     h('div', { class: 'search-head' },
       h('strong', {}, countText),
       h('button', { class: 'icon-btn small', title: 'Fechar busca', onclick: closeSearch }, '✕')),
+    searchFilterBar(),
     h('div', { class: 'search-results' },
       search.results.map((m) => {
         const card = resultCard(m, { channelLabel: channelName(m) });
@@ -2983,7 +3060,9 @@ function renderSearch() {
         return card;
       }),
       search.hasMore ? h('button', { class: 'btn search-more', disabled: search.loading, onclick: () => runSearch(true) }, search.loading ? 'Carregando…' : 'Carregar mais') : null,
-      !search.loading && search.total === 0 ? h('p', { class: 'muted search-tip' }, 'Dica: use de:usuario para filtrar por quem escreveu. Ex.: de:ana bolo') : null),
+      !search.loading && search.total === 0 ? h('p', { class: 'muted search-tip' },
+        search.ran ? 'Nada encontrado. Tente outras palavras ou tire algum filtro.' : 'Digite algo ou escolha um filtro.',
+        h('br'), 'Atalhos: de:ana · tem:link · depois:2026-10-01 · antes:2026-10-31') : null),
   );
 }
 
@@ -3000,10 +3079,12 @@ function closeSearch() {
   panel.replaceChildren();
   $('#app').classList.remove('searching');
   search.scopeKey = '';
+  search.filters = { authorId: null, has: '', since: '', until: '' };
 }
 
 $('#search-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); runSearch(); }
+  if (e.key === 'Escape' && !e.currentTarget.value && !$('#search-panel').hidden) { e.preventDefault(); closeSearch(); e.currentTarget.blur(); return; }
   if (e.key === 'Escape') { e.preventDefault(); e.currentTarget.value = ''; closeSearch(); e.currentTarget.blur(); }
 });
 $('#search-input').addEventListener('search', (e) => { if (!e.currentTarget.value) closeSearch(); });

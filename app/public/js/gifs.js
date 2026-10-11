@@ -1,6 +1,6 @@
 // GIFs: pesquisa no KLIPY (feita direto pelo navegador, como o KLIPY exige)
 // e exibição dos GIFs nas mensagens.
-import { h, api, openPopover, closePopover, storage } from './util.js';
+import { h, api, openPopover, closePopover, storage, toast } from './util.js';
 
 const API = 'https://api.klipy.com/api/v1';
 const PER_PAGE = 24;
@@ -33,6 +33,49 @@ function remember(userId, gif) {
   const list = [gif, ...recent(userId).filter((g) => g.url !== gif.url)].slice(0, RECENT_MAX);
   storage(recentKey(userId), JSON.stringify(list));
 }
+
+// ---------------------------------------------------------------- Favoritos ⭐ (só neste navegador)
+
+const FAV_MAX = 100;
+let currentUserId = null;
+export const setGifUser = (id) => { currentUserId = id; };
+const favKey = (userId) => `nexo.favGifs.${userId}`;
+export function favorites(userId = currentUserId) {
+  try {
+    const list = JSON.parse(storage(favKey(userId)) || '[]');
+    return Array.isArray(list) ? list.filter((g) => g && g.url && g.width && g.height) : [];
+  } catch { return []; }
+}
+export const isFavorite = (gif, userId = currentUserId) => favorites(userId).some((g) => g.url === gif.url);
+// Liga/desliga; devolve true se ficou favorito.
+export function toggleFavorite(gif, userId = currentUserId) {
+  const list = favorites(userId);
+  const on = !list.some((g) => g.url === gif.url);
+  const next = on
+    ? [{ id: gif.id, title: gif.title, url: gif.url, mp4: gif.mp4, width: gif.width, height: gif.height, thumb: gif.thumb || gif.url, thumbW: gif.thumbW || gif.width, thumbH: gif.thumbH || gif.height }, ...list].slice(0, FAV_MAX)
+    : list.filter((g) => g.url !== gif.url);
+  storage(favKey(userId), JSON.stringify(next));
+  return on;
+}
+const starBtn = (gif, userId, onToggle) => {
+  const b = h('button', { type: 'button', class: 'gif-star' });
+  const paint = () => {
+    const on = isFavorite(gif, userId);
+    b.textContent = on ? '★' : '☆';
+    b.classList.toggle('on', on);
+    b.title = on ? 'Tirar dos favoritos' : 'Favoritar';
+    b.setAttribute('aria-label', b.title);
+  };
+  b.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const on = toggleFavorite(gif, userId);
+    paint();
+    if (onToggle) onToggle(on);
+  });
+  paint();
+  return b;
+};
 
 // ---------------------------------------------------------------- KLIPY
 
@@ -119,7 +162,10 @@ export function openGifPicker(anchor, onPick, { userId } = {}) {
       src: g.thumb || g.url, alt: g.title || 'GIF', loading: 'lazy', draggable: 'false',
       referrerpolicy: 'no-referrer', style: `aspect-ratio:${w}/${ht}`,
     });
-    return h('button', { class: 'gif-tile', type: 'button', title: g.title || 'GIF', onclick: () => pick(g) }, img);
+    const t = h('div', { class: 'gif-tile', role: 'button', tabindex: '0', title: g.title || 'GIF', onclick: () => pick(g) },
+      img, starBtn(g, userId));
+    t.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === t) { e.preventDefault(); pick(g); } });
+    return t;
   };
 
   const section = (title) => h('div', { class: 'gif-cat' }, title);
@@ -158,9 +204,11 @@ export function openGifPicker(anchor, onPick, { userId } = {}) {
     seq++;
     grid.replaceChildren();
     const rec = recent(userId);
+    const favs = favorites(userId);
     const on = !!(cfg && cfg.enabled);
+    if (favs.length) grid.append(section('⭐ Favoritos'), ...favs.map(tile));
     if (rec.length) grid.append(section('Recentes'), ...rec.map(tile));
-    if (rec.length && on) grid.append(section('Em alta'));
+    if ((rec.length || favs.length) && on) grid.append(section('Em alta'));
     if (!on) {
       mode = null;
       setStatus(cfg && cfg.error ? 'Não foi possível carregar os GIFs.' : 'A pesquisa de GIFs ainda não foi ativada neste Nexo. O dono precisa colocar a chave do KLIPY (KLIPY_API_KEY) no .env.');
@@ -230,5 +278,6 @@ export function buildGif(gif, { onLoad, pending } = {}) {
   img.addEventListener('error', () => img.replaceWith(h('span', { class: 'gif-gone muted small' }, '🎞️ GIF indisponível')));
   return h('div', { class: `gif-msg${pending ? ' pending' : ''}`, style: `width:${w}px;max-width:100%` },
     img,
-    h('span', { class: 'gif-badge', 'aria-hidden': 'true' }, 'GIF'));
+    h('span', { class: 'gif-badge', 'aria-hidden': 'true' }, 'GIF'),
+    currentUserId && !pending ? starBtn(gif, currentUserId, (on) => toast(on ? '⭐ GIF nos favoritos.' : 'GIF tirado dos favoritos.')) : null);
 }

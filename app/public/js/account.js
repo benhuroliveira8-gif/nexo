@@ -47,6 +47,8 @@ export function openAccountSettings(tab = 'account') {
 }
 
 export const refreshAccountSettings = () => { if (ui) render(); };
+// Outras telas pedem para abrir uma aba (ex.: o ⚙️ da chamada abre "Voz e vídeo").
+window.addEventListener('nexo:open-settings', (e) => { import('./util.js').then(({ closePopover }) => closePopover()); openAccountSettings(e.detail || 'account'); });
 onPwaChange(refreshAccountSettings);
 
 function render() {
