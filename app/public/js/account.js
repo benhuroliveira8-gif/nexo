@@ -569,5 +569,13 @@ function pageNotifications() {
       const { user } = await api('/me', { method: 'PATCH', body: changes });
       hooks.applyMe(user);
     })),
-    block('Instalar como app', install));
+    block('Instalar como app', install),
+    block('Sobre o Nexo',
+      h('div', { class: 'about-nexo' },
+        h('span', { class: 'brand-mark' }, 'N'),
+        h('div', {},
+          h('strong', {}, 'Nexo'),
+          h('div', { class: 'muted small' }, 'Conversas, voz e vídeo com seus amigos.'),
+          h('div', { class: 'small' }, '👑 Fundado por ', h('strong', {}, 'Ben-Hur Oliveira de Ramos')),
+          state.config && state.config.version ? h('div', { class: 'muted small' }, `Versão ${state.config.version}`) : null))));
 }

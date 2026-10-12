@@ -1,6 +1,6 @@
 {
   "name": "nexo",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Nexo - chat em tempo real com voz, vídeo e bots",
   "main": "src/server.js",
   "private": true,

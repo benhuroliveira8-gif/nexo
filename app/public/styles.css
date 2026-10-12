@@ -1645,3 +1645,7 @@ kbd { font: 600 12px ui-monospace, Consolas, monospace; padding: 1px 5px; border
 .run { display: grid; grid-template-columns: 170px 70px 70px 1fr auto; gap: 8px; align-items: center; padding: 6px 10px; border-radius: 8px; background: var(--bg-0); font-size: 14px; }
 .run.crash { border: 1px solid rgba(255, 92, 108, .4); }
 @media (max-width: 600px) { .run { grid-template-columns: 1fr 1fr; } }
+
+/* Sobre o Nexo */
+.about-nexo { display: flex; gap: 12px; align-items: center; }
+.about-nexo .brand-mark { flex: none; }

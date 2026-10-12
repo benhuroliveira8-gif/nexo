@@ -1,6 +1,6 @@
 // Service worker do Nexo: deixa o app instalável, abre mais rápido e mostra
 // as notificações push mesmo com o Nexo fechado.
-const CACHE = 'nexo-v15';
+const CACHE = 'nexo-v16';
 const SHARE_CACHE = 'nexo-share'; // o que foi compartilhado da galeria espera aqui até o app abrir
 const SHELL = [
   '/', '/styles.css', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/badge-96.png',
