@@ -113,6 +113,13 @@ export function roleColor(userId) {
   return colored ? colored.color : null;
 }
 
+// Emoji do cargo mais alto que tem emoji (aparece do lado do nome).
+export function roleIcon(userId) {
+  const m = memberById(userId);
+  const r = memberRoles(m).find((x) => x.icon);
+  return r ? { icon: r.icon, name: r.name } : null;
+}
+
 // Estilo do nome pela cor do cargo (com degradê se o cargo tiver duas cores).
 export function roleStyle(userId) {
   const m = memberById(userId);

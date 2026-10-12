@@ -12,6 +12,7 @@ const gifs = require('./gifs');
 const assets = require('./assets');
 const automod = require('./automod');
 const levels = require('./levels');
+const transcribe = require('./transcribe');
 const { P, roomsForChannel } = require('./permissions');
 
 const MAX_LENGTH = 4000;
@@ -21,6 +22,9 @@ const POLL_MAX_OPTIONS = 10;
 
 // Canais onde há conversa de servidor (para @everyone, apagar dos outros, fixar...).
 const isServerText = (kind) => kind === 'text' || kind === 'thread';
+
+// Colunas dos anexos (sem o texto inteiro dos PDFs, que só serve para a busca).
+const ATT_COLS = 'id, message_id, uploader_id, filename, content_type, size, is_voice, duration, waveform, transcript, purged_at, created_at, (text_content IS NOT NULL) AS has_text';
 
 const SELECT_MESSAGE = `
   SELECT msg.*, c.server_id, u.username AS author_username, u.display_name AS author_display_name,
@@ -47,7 +51,7 @@ async function hydrate(rows) {
   const ids = rows.map((r) => String(r.id));
   const replyIds = [...new Set(rows.filter((r) => r.reply_to_id).map((r) => String(r.reply_to_id)))];
   const [att, reac, ment, replies, threads, polls, votes] = await Promise.all([
-    db.query('SELECT * FROM attachments WHERE message_id = ANY($1::bigint[]) ORDER BY created_at, id', [ids]),
+    db.query(`SELECT ${ATT_COLS} FROM attachments WHERE message_id = ANY($1::bigint[]) ORDER BY created_at, id`, [ids]),
     db.query('SELECT message_id, emoji, user_id FROM reactions WHERE message_id = ANY($1::bigint[]) ORDER BY created_at, emoji', [ids]),
     db.query('SELECT message_id, user_id FROM message_mentions WHERE message_id = ANY($1::bigint[])', [ids]),
     replyIds.length
@@ -383,6 +387,8 @@ function announceNew(access, message, nonce) {
   refreshThreadParent(access.channel).catch(() => {});
   if (message.kind === 'default') scheduleEmbeds(message.id, message.content, access.rooms);
   notifyPush(access, message).catch((err) => console.error('Erro ao preparar push:', err.message));
+  // Áudio sem transcrição: o Whisper (se estiver ligado) transcreve e a mensagem atualiza.
+  if (message.attachments.some((a) => a.isVoice && !a.transcript)) transcribe.enqueue(message, emitUpdated);
   if (access.serverId && message.kind === 'default' && message.author && message.author.id) {
     levels.award(access, message.author.id).catch((err) => console.error('Erro no XP:', err.message));
   }

@@ -136,7 +136,7 @@ async function uploadBanner(file) {
 export async function bannerBlob(file) {
   if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) throw new Error('Escolha uma imagem PNG, JPG, GIF ou WEBP.');
   if (file.type === 'image/gif') {
-    if (file.size > 2 * 1024 * 1024) throw new Error('GIF animado pode ter no máximo 2 MB.');
+    if (file.size > 8 * 1024 * 1024) throw new Error('GIF animado pode ter no máximo 8 MB.');
     return file;
   }
   const bitmap = await createImageBitmap(file).catch(() => { throw new Error('Não deu para abrir essa imagem.'); });
@@ -191,7 +191,7 @@ export function profileLookSection(me, { applyMe, rerender }) {
           class: 'btn small danger-ghost',
           onclick: async () => { try { applyMe((await api('/me/banner', { method: 'DELETE' })).user); rerender(); } catch (err) { toast(err.message); } },
         }, 'Remover capa') : null,
-        h('span', { class: 'muted small' }, 'Dica: imagem deitada (5:2).'))),
+        h('span', { class: 'muted small' }, 'Dica: imagem deitada (5:2). GIF animado vale (até 8 MB).'))),
     h('div', { class: 'field' }, h('span', {}, 'Cor do perfil (usada quando não tem capa)'),
       h('div', { class: 'swatches' },
         COLORS.map((c) => h('button', {

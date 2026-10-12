@@ -125,7 +125,7 @@ function renderOverview() {
         d.server.bannerUrl ? null : h('span', { class: 'muted small' }, 'Sem capa')),
       h('div', { class: 'icon-text' },
         h('strong', {}, 'Capa do servidor'),
-        h('span', { class: 'muted small' }, 'Aparece no topo da lista de canais e no convite. Imagem deitada (5:2); GIF animado vale (até 2 MB).'),
+        h('span', { class: 'muted small' }, 'Aparece no topo da lista de canais e no convite. Imagem deitada (5:2); GIF animado vale (até 8 MB).'),
         manage ? h('div', { class: 'row-actions' },
           h('button', {
             class: 'btn small',
@@ -191,7 +191,7 @@ function deleteServerDialog() {
 
 function selectRole(role) {
   ui.roleId = role.id;
-  ui.draft = { name: role.name, color: role.color, color2: role.color2 || null, permissions: role.permissions };
+  ui.draft = { name: role.name, color: role.color, color2: role.color2 || null, icon: role.icon || null, permissions: role.permissions };
   ui.dirty = false;
 }
 
@@ -288,6 +288,16 @@ function roleEditor(role) {
       type: 'color', class: 'swatch-custom', title: 'Outra cor', value: draft.color || '#ff7a45', disabled: !editable || role.isDefault,
       onchange: (e) => { draft.color = e.target.value; mark(); render(); },
     }));
+  // Emoji do cargo (aparece do lado do nome da pessoa).
+  const ICONS = ['💎', '⭐', '👑', '🛡️', '🎮', '🔥', '🎨', '🤖', '🎵', '🏆'];
+  const iconPick = role.isDefault ? null : h('div', { class: 'swatches icon-pick' },
+    h('button', { class: `swatch none${!draft.icon ? ' active' : ''}`, title: 'Sem emoji', disabled: !editable, onclick: () => { draft.icon = null; mark(); render(); } }, '∅'),
+    ICONS.map((ic) => h('button', { class: `swatch emoji${draft.icon === ic ? ' active' : ''}`, title: ic, disabled: !editable, onclick: () => { draft.icon = ic; mark(); render(); } }, ic)),
+    h('input', {
+      class: 'icon-custom', maxlength: '16', placeholder: 'outro', value: draft.icon && !ICONS.includes(draft.icon) ? draft.icon : '', disabled: !editable,
+      title: 'Cole ou digite outro emoji (Windows: tecla Windows + ponto)',
+      onchange: (e) => { draft.icon = e.target.value.trim() || null; mark(); render(); },
+    }));
   // Segunda cor: o nome do cargo aparece em degradê.
   const gradient = role.isDefault ? null : h('div', { class: 'gradient-pick' },
     h('label', { class: 'switch-line' },
@@ -321,7 +331,7 @@ function roleEditor(role) {
     onclick: async (e) => {
       e.currentTarget.disabled = true;
       const body = { permissions: draft.permissions };
-      if (!role.isDefault) { body.name = draft.name.trim(); body.color = draft.color; body.color2 = draft.color ? draft.color2 : null; }
+      if (!role.isDefault) { body.name = draft.name.trim(); body.color = draft.color; body.color2 = draft.color ? draft.color2 : null; body.icon = draft.icon || ''; }
       try {
         await api(`/servers/${d.server.id}/roles/${role.id}`, { method: 'PATCH', body });
         ui.dirty = false;
@@ -339,6 +349,7 @@ function roleEditor(role) {
     role.isDefault ? h('div', { class: 'notice soft' }, 'O @everyone vale para todo mundo do servidor. Aqui você define o que qualquer membro pode fazer.') : null,
     h('label', { class: 'field' }, 'Nome do cargo', name),
     h('div', { class: 'field' }, h('span', {}, 'Cor do nome'), swatches, gradient),
+    iconPick ? h('div', { class: 'field' }, h('span', {}, 'Emoji do cargo (aparece do lado do nome)'), iconPick) : null,
     h('div', { class: 'field' }, h('span', {}, 'Permissões'), perms),
     h('div', { class: 'role-actions' },
       !role.isDefault && editable ? [
@@ -422,6 +433,29 @@ const untilText = (iso) => `até ${fullTime(new Date(iso)).replace(/^Hoje às /,
 
 // ---------------------------------------------------------------- Membros
 
+// Cargo temporário: ex. "VIP por 7 dias". Some sozinho no fim do prazo.
+function tempRoleDialog(m, assignable) {
+  const d = state.detail;
+  const role = h('select', { class: 'select' }, assignable.map((r) => h('option', { value: String(r.id) }, `${r.icon ? `${r.icon} ` : ''}${r.name}`)));
+  const DUR = [[24, '1 dia'], [72, '3 dias'], [168, '7 dias'], [720, '30 dias'], [2160, '90 dias'], [1, '1 hora (teste)']];
+  const dur = h('select', { class: 'select' }, DUR.map(([v, l]) => h('option', { value: String(v), selected: v === 168 }, l)));
+  openDialog({
+    title: `Cargo temporário para ${m.displayName}`,
+    text: 'A pessoa ganha o cargo agora e ele some sozinho no fim do prazo (ex.: VIP do mês, sorteio, evento).',
+    body: h('div', {}, h('label', { class: 'field' }, 'Cargo', role), h('label', { class: 'field' }, 'Por quanto tempo', dur)),
+    actions: [
+      { label: 'Cancelar' },
+      {
+        label: 'Dar cargo', kind: 'primary', submit: true,
+        onClick: async () => {
+          await api(`/servers/${d.server.id}/members/${m.id}/temp-role`, { method: 'POST', body: { roleId: Number(role.value), hours: Number(dur.value) } });
+          toast('Cargo temporário dado! ⏳');
+        },
+      },
+    ],
+  });
+}
+
 function renderMembersTab() {
   const d = state.detail;
   const q = ui.filter.toLowerCase();
@@ -457,16 +491,18 @@ function renderMembersTab() {
         h('span', { class: 'muted small truncate' }, `@${m.username}`),
         m.timeoutUntil ? h('span', { class: 'timeout-tag' }, `⏳ castigo ${untilText(m.timeoutUntil)}`) : null),
       h('div', { class: 'role-chips' },
-        roles.map((r) => h('span', { class: 'role-chip' },
-          h('i', { style: `background:${r.color || 'var(--text-3)'}` }), r.name,
+        roles.map((r) => h('span', { class: `role-chip${m.roleExpiry && m.roleExpiry[r.id] ? ' temp' : ''}`, title: m.roleExpiry && m.roleExpiry[r.id] ? `Cargo temporário: vence ${untilText(m.roleExpiry[r.id])}` : null },
+          h('i', { style: `background:${r.color || 'var(--text-3)'}` }), r.icon ? `${r.icon} ` : '', r.name,
+          m.roleExpiry && m.roleExpiry[r.id] ? h('span', { class: 'chip-temp' }, ` ⏳ ${untilText(m.roleExpiry[r.id])}`) : null,
           manageable && roleManageable(r) ? h('button', {
             class: 'chip-x', title: `Tirar ${r.name}`,
             onclick: () => setRoles(m, m.roleIds.filter((id) => id !== r.id)),
           }, '✕') : null)),
         manageable && missing.length ? h('button', {
           class: 'chip-add', title: 'Dar cargo',
-          onclick: (e) => openMenu(e.currentTarget, missing.map((r) => ({ label: r.name, onClick: () => setRoles(m, [...m.roleIds, r.id]) }))),
-        }, '+') : null),
+          onclick: (e) => openMenu(e.currentTarget, missing.map((r) => ({ label: `${r.icon ? `${r.icon} ` : ''}${r.name}`, onClick: () => setRoles(m, [...m.roleIds, r.id]) }))),
+        }, '+') : null,
+        manageable && assignable.length ? h('button', { class: 'chip-add temp', title: 'Dar cargo temporário (vence sozinho)', onclick: () => tempRoleDialog(m, assignable) }, '⏳') : null),
       mod ? h('button', {
         class: 'btn small', title: 'Moderar',
         onclick: (e) => {
@@ -742,6 +778,8 @@ function describe(e) {
     case 'sound_delete': return [`apagou o som ${t}`];
     case 'welcome_update': return ['mudou as boas-vindas', [x.enabled ? 'mensagem ligada' : 'mensagem desligada', x.roleId ? 'com cargo automático' : ''].filter(Boolean).join(' · ')];
     case 'automod_update': return ['mudou a moderação automática', [`${x.words || 0} palavra(s) bloqueada(s)`, x.spam ? 'anti-spam ligado' : 'anti-spam desligado'].join(' · ')];
+    case 'member_temp_role': return [`deu o cargo ${x.role} para ${who} por ${x.hours >= 24 ? `${Math.round(x.hours / 24)} dia(s)` : `${x.hours} h`}`, ''];
+    case 'role_expired': return [`o cargo ${x.role} de ${who} venceu`, ''];
     case 'levels_update': return ['mudou os níveis', [x.enabled ? 'níveis ligados' : 'níveis desligados', x.rewards ? `${x.rewards} recompensa(s)` : ''].filter(Boolean).join(' · ')];
     case 'levels_reset': return ['zerou o XP de todo mundo', ''];
     case 'automod_timeout': return [`castigou ${who} por ${mins(x.minutes)}`, x.reason ? `Motivo: ${x.reason}` : ''];
@@ -757,7 +795,7 @@ const AUDIT_ICONS = {
   invite_create: '✉️', invite_delete: '✉️', message_delete: '🗑️', bot_add: '🤖',
   emoji_create: '😺', emoji_update: '😺', emoji_delete: '😺',
   sticker_create: '🏷️', sticker_delete: '🏷️', sound_create: '🎵', sound_delete: '🎵',
-  welcome_update: '👋', automod_update: '🛡️', automod_timeout: '🤖', levels_update: '⭐', levels_reset: '⭐',
+  welcome_update: '👋', automod_update: '🛡️', automod_timeout: '🤖', levels_update: '⭐', levels_reset: '⭐', member_temp_role: '⏳', role_expired: '⌛',
 };
 
 function renderAudit() {
@@ -777,7 +815,7 @@ function renderAudit() {
           h('span', { class: 'audit-icon' }, AUDIT_ICONS[e.action] || '•'),
           e.actor ? avatar(e.actor, { size: 'sm' }) : null,
           h('div', { class: 'audit-text' },
-            h('div', {}, h('strong', {}, e.actor ? e.actor.displayName : e.action.startsWith('automod') ? '🤖 Moderação automática' : 'Alguém'), ` ${main}`),
+            h('div', {}, h('strong', {}, e.actor ? e.actor.displayName : e.action.startsWith('automod') ? '🤖 Moderação automática' : e.action === 'role_expired' ? '⌛ Nexo' : 'Alguém'), ` ${main}`),
             sub ? h('div', { class: 'muted small' }, sub) : null,
             h('div', { class: 'muted small' }, fullTime(new Date(e.createdAt))))));
       });

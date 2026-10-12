@@ -1,6 +1,6 @@
 // Service worker do Nexo: deixa o app instalável, abre mais rápido e mostra
 // as notificações push mesmo com o Nexo fechado.
-const CACHE = 'nexo-v14';
+const CACHE = 'nexo-v15';
 const SHARE_CACHE = 'nexo-share'; // o que foi compartilhado da galeria espera aqui até o app abrir
 const SHELL = [
   '/', '/styles.css', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/badge-96.png',
@@ -8,7 +8,7 @@ const SHELL = [
   '/js/voice.js', '/js/developer.js', '/js/markdown.js', '/js/theme.js', '/js/pwa.js', '/js/qr.js',
   '/js/sortable.js', '/js/account.js', '/js/extras.js', '/js/forum.js', '/js/commands.js', '/js/tts.js',
   '/js/profile.js', '/js/callsounds.js', '/js/levelsui.js', '/js/share.js', '/js/admin.js', '/js/updates.js',
-  '/js/translate.js', '/js/economy.js', '/socket.io/socket.io.js',
+  '/js/translate.js', '/js/economy.js', '/js/catchup.js', '/js/idle.js', '/socket.io/socket.io.js',
 ];
 
 self.addEventListener('install', (event) => {

@@ -7,7 +7,7 @@ import {
 } from './util.js';
 import { openEmojiPicker, setCustomEmojiProvider, emojiNode } from './emoji.js';
 import {
-  state, P, can, isOwner, myTop, memberById, memberRoles, memberTop, roleColor, roleStyle, knownUsers,
+  state, P, can, isOwner, myTop, memberById, memberRoles, memberTop, roleColor, roleStyle, roleIcon, knownUsers,
   currentDm, currentChannel, dmName,
 } from './state.js';
 import { renderFriendsPage } from './home.js';
@@ -16,7 +16,7 @@ import {
 } from './settings.js';
 import {
   initVoice, voiceState, inVoice, joinVoice, leaveVoice, resyncAfterReconnect, renderVoicePanel, renderStage,
-  openVolumePopover, playSoundEvent, onStageRole, noticeVoiceStates, quietVoiceSounds,
+  openVolumePopover, playSoundEvent, onStageRole, noticeVoiceStates, quietVoiceSounds, waitingState, onAdmitted, onDenied,
 } from './voice.js';
 import { startRingtone, stopRingtone, stopRingback, isRingingBack, playBusy } from './callsounds.js';
 import { quietNow, activityText, activityBlock, paintBanner, badgesRow, levelBlock } from './profile.js';
@@ -30,6 +30,8 @@ import { rankingSidebarItem } from './levelsui.js';
 import { readPendingShare, openShareDialog } from './share.js';
 import { openAdmin } from './admin.js';
 import { translateMessage, translationOf, hideTranslation, langName } from './translate.js';
+import { loadCatchup, renderCatchup, hideCatchup } from './catchup.js';
+import { initIdle, resendIdle, isAutoIdle } from './idle.js';
 import { initUpdates, onHello, onRestarting, onDisconnected, maybeReloadLater } from './updates.js';
 import { openDeveloper } from './developer.js';
 import { renderMarkdown, isJumbo, stripMarkdown } from './markdown.js';
@@ -504,6 +506,7 @@ function connectSocket() {
   socket.on('connect', () => {
     $('#conn-status').hidden = true;
     if (connectedBefore) quietVoiceSounds(8000);
+    resendIdle();
     socket.emit('client:visible', isVisible());
     if (connectedBefore) refreshAfterReconnect();
     connectedBefore = true;
@@ -582,6 +585,24 @@ function connectSocket() {
     loadMyEmojisSoon();
   });
 
+  // Sala de espera da voz.
+  socket.on('voice:admitted', onAdmitted);
+  socket.on('voice:denied', onDenied);
+  socket.on('voice:waiting', ({ channelId, waiting }) => {
+    if (!state.detail || !state.detail.channels.some((c) => c.id === channelId)) return;
+    const before = ((state.detail.voiceWaiting || {})[channelId] || []).length;
+    applyLive(() => {
+      if (!state.detail.voiceWaiting) state.detail.voiceWaiting = {};
+      if (waiting.length) state.detail.voiceWaiting[channelId] = waiting; else delete state.detail.voiceWaiting[channelId];
+    });
+    // Moderação: avisa quando chega alguém novo na sala de espera.
+    if (canAdmitWaiting() && waiting.length > before) {
+      const ch = state.detail.channels.find((c) => c.id === channelId);
+      toast(`⏳ ${waiting[waiting.length - 1].user.displayName} está esperando para entrar em 🔊 ${ch ? ch.name : 'voz'}.`);
+      if (state.soundOn && !silenced()) playPing();
+    }
+    renderSidebar();
+  });
   socket.on('voice:update', ({ serverId, channelId, states }) => {
     noticeVoiceStates(channelId, states);
     if (serverId === null) return onDmVoiceUpdate(channelId, states);
@@ -834,6 +855,12 @@ async function selectServer(serverId, preferredChannelId) {
 }
 
 async function selectChannel(channelId) {
+  // Muita coisa nova? Busca o resumo ANTES de marcar como lido.
+  if (state.channelId !== channelId) {
+    const ch = state.view === 'home' ? state.dms.find((d) => d.channelId === channelId) : state.detail && state.detail.channels.find((c) => c.id === channelId);
+    if (ch && ch.unread && ch.kind !== 'voice' && ch.kind !== 'forum') await loadCatchup(channelId).catch(() => {});
+    else hideCatchup();
+  }
   if (state.channelId !== channelId) {
     state.editingId = null;
     discardVoiceOnSwitch();
@@ -1019,8 +1046,10 @@ function renderSidebar() {
           class: `side-item channel voice${c.id === state.channelId ? ' active' : ''}${connectedHere ? ' connected' : ''}`,
           title: connectedHere ? 'Você está aqui' : 'Clique para entrar',
           onclick: () => openVoiceChannel(c),
-        }, h('span', { class: 'hash' }, c.stage ? '🎙️' : '🔊'), h('span', { class: 'truncate' }, c.name), c.private ? lockIcon() : null),
+        }, h('span', { class: 'hash' }, c.stage ? '🎙️' : '🔊'), h('span', { class: 'truncate' }, c.name), c.private ? lockIcon() : null,
+          c.waitingRoom ? h('span', { class: 'wait-mark', title: 'Sala de espera: a moderação libera a entrada' }, '⏳') : null),
         gear(c),
+        waitingRow(c),
         people.length ? h('ul', { class: 'voice-people' }, people.map((p) => {
           const m = memberById(p.userId);
           if (!m) return null;
@@ -1090,6 +1119,23 @@ function renderSidebar() {
   if (manage) enableChannelDrag(body);
 }
 
+// Quem pode liberar a entrada na sala de espera.
+const canAdmitWaiting = () => can(P.MODERATE_MEMBERS) || can(P.MANAGE_CHANNELS) || can(P.MANAGE_STAGE);
+
+// Sala de espera: para a moderação, quem está esperando (com Deixar entrar / Recusar).
+function waitingRow(c) {
+  const list = (state.detail.voiceWaiting || {})[c.id] || [];
+  if (!list.length || !canAdmitWaiting()) return null;
+  const decide = (userId, allow) => state.socket.timeout(5000).emit('voice:admit', { channelId: c.id, userId, allow }, (err, res) => {
+    if (err || !res || !res.ok) toast((res && res.error) || 'Não deu.');
+  });
+  return h('ul', { class: 'voice-waiting' }, list.map((w) => h('li', { class: 'wait-person' },
+    avatar(w.user, { size: 'xs' }),
+    h('span', { class: 'truncate' }, `⏳ ${w.user.displayName}`),
+    h('button', { class: 'icon-btn small ok', title: `Deixar ${w.user.displayName} entrar`, onclick: () => decide(w.user.id, true) }, '✔'),
+    h('button', { class: 'icon-btn small', title: 'Recusar', onclick: () => decide(w.user.id, false) }, '✕'))));
+}
+
 const lockIcon = () => h('span', { class: 'lock', title: 'Canal privado' }, '🔒');
 
 // Arrastar canais (entre categorias) e categorias (entre si).
@@ -1143,6 +1189,8 @@ function threadVisible(t) {
 // Clicar num canal de voz: abre a tela dele e entra (se ainda não estiver nele).
 function openVoiceChannel(channel) {
   selectChannel(channel.id);
+  const w = waitingState();
+  if (w && w.channelId === channel.id) return;
   if (voiceState().channelId !== channel.id) {
     joinVoice({ channelId: channel.id, channelName: channel.name, serverId: state.view, serverName: state.detail.server.name });
   }
@@ -1269,6 +1317,12 @@ function renderMain() {
       members: state.detail.members,
     });
   } else renderMessages(); // cores/permissões podem ter mudado
+  const dmC = currentDm();
+  renderCatchup({
+    channelId: friendsPage || voicePage || forumPage ? null : state.channelId,
+    label: dmC ? (dmC.isGroup ? dmName(dmC) : `a conversa com ${dmC.user.displayName}`) : channel ? (channel.kind === 'thread' ? `🧵 ${channel.name}` : `#${channel.name}`) : '',
+    jump: (id) => jumpToMessage(state.channelId, id),
+  });
 }
 
 // Chamada numa DM/grupo: aparece em cima das mensagens.
@@ -1331,6 +1385,7 @@ function renderMembers() {
           h('span', { class: 'member-info' },
             h('span', { class: 'member-name' },
               h('span', { class: 'name truncate', style: roleStyle(m.id) }, m.displayName),
+              roleIconTag(m.id),
               m.isBot ? botTag() : null,
               m.timeoutUntil ? h('span', { class: 'timeout-mark', title: 'De castigo' }, '⏳') : null,
               m.id === ownerId ? h('span', { class: 'owner-badge', title: 'Dono do servidor' }, '👑') : null),
@@ -1578,6 +1633,7 @@ function buildMessage(m, grouped) {
     const color = roleColor(m.author.id) || (effectiveTheme() === 'light' ? `hsl(${hueFor(m.author.id)} 60% 36%)` : `hsl(${hueFor(m.author.id)} 75% 72%)`);
     body.append(h('div', { class: 'msg-head' },
       h('button', { class: 'msg-author', style: roleStyle(m.author.id) || `color:${color}`, onclick: (e) => openProfile(e.currentTarget, authorUser) }, m.author.displayName),
+      state.view !== 'home' ? roleIconTag(m.author.id) : null,
       m.author.isBot ? botTag() : null,
       h('span', { class: 'msg-time', title: fullTime(date) }, fullTime(date)),
       m.pinnedAt ? h('span', { class: 'pin-mark', title: 'Mensagem fixada' }, '📌') : null));
@@ -2138,7 +2194,7 @@ async function sendVoiceMessage() {
   rec = null;
   if (r.previewUrl) URL.revokeObjectURL(r.previewUrl);
   renderRecBar();
-  const { file, duration, waveform } = r.result;
+  const { file, duration, waveform, transcript } = r.result;
   const nonce = `n${Date.now().toString(36)}${++tempSeq}`;
   const temp = {
     id: `tmp-${nonce}`, nonce, pending: true, channelId: r.channelId, serverId: state.view === 'home' ? null : state.view,
@@ -2150,7 +2206,12 @@ async function sendVoiceMessage() {
   bucket.items.push(temp);
   if (r.channelId === state.channelId) renderMessages({ stick: 'always' });
   try {
-    const att = await uploadFile(file, () => {}, { 'X-Voice-Duration': duration.toFixed(2), 'X-Voice-Waveform': waveform });
+    // Transcrição feita pelo navegador enquanto gravava (cabeçalho limitado a ~8 KB).
+    let tr = transcript || '';
+    while (tr && encodeURIComponent(tr).length > 8000) tr = tr.slice(0, Math.floor(tr.length * 0.8));
+    const att = await uploadFile(file, () => {}, {
+      'X-Voice-Duration': duration.toFixed(2), 'X-Voice-Waveform': waveform, ...(tr ? { 'X-Voice-Transcript': encodeURIComponent(tr) } : {}),
+    });
     state.socket.timeout(15000).emit('message:send', { channelId: r.channelId, content: '', attachmentIds: [att.id], nonce }, (err, res) => {
       const idx = bucket.items.indexOf(temp);
       if (err || !res || !res.ok) {
@@ -2582,7 +2643,7 @@ export function openProfile(anchor, user) {
     banner,
     h('div', { class: 'profile-avatar' }, avatar(freshUser(user), { size: 'xl', online: online === undefined && !isMe ? undefined : (isMe ? status : (online ? status : 'offline')) })),
     h('div', { class: 'profile-body' },
-      h('h3', { style: member ? roleStyle(member.id) : null }, freshUser(user).displayName, user.isBot ? botTag() : null),
+      h('h3', {}, h('span', { style: member ? roleStyle(member.id) : null }, freshUser(user).displayName), member ? roleIconTag(member.id) : null, user.isBot ? botTag() : null),
       h('div', { class: 'muted' }, `@${user.username}`),
       badgeSlot,
       statusText ? h('div', { class: 'profile-status' }, statusText) : null,
@@ -2730,6 +2791,7 @@ function editChannelDialog(channel) {
   const stageBox = channel.kind === 'voice' && can(P.MANAGE_CHANNELS) ? h('input', { type: 'checkbox', class: 'switch', checked: !!channel.stage }) : null;
   const topicBox = channel.kind === 'forum' && can(P.MANAGE_CHANNELS) ? h('textarea', { class: 'textarea', rows: '2', maxlength: '500' }) : null;
   const announceBox = channel.kind === 'text' && can(P.MANAGE_CHANNELS) ? h('input', { type: 'checkbox', class: 'switch', checked: !!channel.announce }) : null;
+  const waitBox = channel.kind === 'voice' && can(P.MANAGE_CHANNELS) ? h('input', { type: 'checkbox', class: 'switch', checked: !!channel.waitingRoom }) : null;
   if (topicBox) topicBox.value = channel.topic || '';
   openDialog({
     title: thread ? 'Editar thread' : 'Editar canal',
@@ -2741,7 +2803,9 @@ function editChannelDialog(channel) {
       stageBox ? h('label', { class: 'switch-row' },
         h('span', { class: 'kind-text' }, h('strong', {}, '🎙️ Modo palco'),
           h('span', { class: 'muted small' }, 'Só fala quem modera ou quem for chamado. Os outros ouvem e podem levantar a mão ✋.')),
-        stageBox) : null),
+        stageBox) : null,
+      waitBox ? h('label', { class: 'switch-row' },
+        h('span', { class: 'kind-text' }, h('strong', {}, '⏳ Sala de espera'), h('span', { class: 'muted small' }, 'Quem chega fica esperando até a moderação clicar em "Deixar entrar". Bom para servidores maiores.')), waitBox) : null),
     actions: [
       {
         label: thread ? 'Apagar thread' : 'Apagar canal', kind: 'danger-ghost',
@@ -2761,7 +2825,7 @@ function editChannelDialog(channel) {
         onClick: async () => {
           const name = input2.value.trim();
           if (!name) throw new Error('Dê um nome ao canal.');
-          await api(`/channels/${channel.id}`, { method: 'PATCH', body: { name, ...(opts ? opts.values() : {}), ...(stageBox ? { stage: stageBox.checked } : {}), ...(topicBox ? { topic: topicBox.value } : {}), ...(announceBox ? { announce: announceBox.checked } : {}) } });
+          await api(`/channels/${channel.id}`, { method: 'PATCH', body: { name, ...(opts ? opts.values() : {}), ...(stageBox ? { stage: stageBox.checked } : {}), ...(topicBox ? { topic: topicBox.value } : {}), ...(announceBox ? { announce: announceBox.checked } : {}), ...(waitBox ? { waitingRoom: waitBox.checked } : {}) } });
         },
       },
     ],
@@ -3014,7 +3078,9 @@ function stopRinging(channelId) {
 // ================================================================ Painel do usuário
 
 function renderUserPanel() {
-  $('#me-avatar').replaceChildren(avatar(state.me, { size: 'sm', online: state.me.status || 'online' }));
+  const shown = (state.me.status || 'online') === 'online' && isAutoIdle() ? 'idle' : (state.me.status || 'online');
+  $('#me-avatar').replaceChildren(avatar(state.me, { size: 'sm', online: shown }));
+  $('#me-avatar').title = shown === 'idle' && state.me.status === 'online' ? 'Ausente (automático: você está sem mexer há um tempo)' : '';
   $('#me-name').textContent = state.me.displayName;
   $('#me-username').textContent = state.me.statusText || `@${state.me.username}`;
   $('#me-username').title = state.me.statusText ? `@${state.me.username} • ${state.me.statusText}` : '';
@@ -3083,6 +3149,12 @@ $('#btn-toggle-members').addEventListener('click', () => {
   storage('nexo.hideMembers', hidden ? '1' : null);
 });
 $('#btn-toggle-sidebar').addEventListener('click', () => $('#app').classList.toggle('sidebar-open'));
+
+// Emoji do cargo do lado do nome.
+function roleIconTag(userId) {
+  const r = state.view !== 'home' ? roleIcon(userId) : null;
+  return r ? h('span', { class: 'role-icon', title: r.name }, r.icon) : null;
+}
 
 function botTag() {
   return h('span', { class: 'bot-tag', title: 'Conta automática (bot)' }, 'BOT');
@@ -3235,7 +3307,9 @@ function resultCard(m, { actions = [], channelLabel = null } = {}) {
           h('strong', { style: roleColor(m.author.id) ? `color:${roleColor(m.author.id)}` : null }, author.displayName),
           h('span', { class: 'msg-time' }, fullTime(date))),
         m.content ? h('div', { class: 'msg-text' }, renderContent(m.content)) : null,
-        m.attachments.length ? h('div', { class: 'muted small' }, `📎 ${m.attachments.length} anexo(s)`) : null,
+        ...m.attachments.map((a) => (a.isVoice
+          ? h('div', { class: 'vm-transcript' }, `🎤 ${a.transcript ? `"${a.transcript}"` : `Mensagem de voz (${fmtDuration(a.duration)})`}`)
+          : h('div', { class: 'muted small' }, `📎 ${a.filename}${a.hasText ? ' (busca também dentro do arquivo)' : ''}`))),
         m.gif ? h('div', { class: 'muted small' }, '🎞️ GIF') : null,
         m.sticker ? h('div', { class: 'muted small' }, `🏷️ Figurinha: ${m.sticker.name}`) : null,
         m.poll ? h('div', { class: 'muted small' }, `📊 ${m.poll.question}`) : null),
@@ -3431,3 +3505,6 @@ initUpdates({
   canReloadNow: () => !inVoice() && !input.value.trim() && !state.uploads.length
     && !document.querySelector('dialog[open]') && !document.querySelector('.settings-overlay'),
 });
+
+// Ausente automático (não conta enquanto estiver numa chamada).
+initIdle({ getSocket: () => state.socket, isBusy: () => inVoice(), onChange: () => { if (state.me) renderUserPanel(); } });

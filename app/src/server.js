@@ -111,6 +111,7 @@ db.init()
     require('./admin').startStorageJobs();
     require('./admin').syncEnvAdmins().catch(() => {});
     require('./lastfm').startLastfm();
+    require('./health').startRun().catch((err) => console.error('Erro no registro de execução:', err.message));
     server.listen(PORT, () => console.log(`Nexo rodando na porta ${PORT}`));
   })
   .catch((err) => {
@@ -132,7 +133,8 @@ process.on('SIGTERM', () => {
   if (stopping) return;
   stopping = true;
   events.announceRestart(0);
-  setTimeout(() => {
+  setTimeout(async () => {
+    await require('./health').stopRun();
     io.close();
     server.close(() => db.pool.end().then(() => process.exit(0)));
   }, 600);

@@ -45,6 +45,7 @@ const channel = (row) => ({
   private: !!row.private,
   stage: !!row.stage,
   ...(row.kind === 'text' ? { announce: !!row.announce } : {}),
+  ...(row.kind === 'voice' ? { waitingRoom: !!row.waiting_room } : {}),
   ...(row.kind === 'thread' ? { solved: !!row.solved, pinned: !!row.pinned } : {}),
   ...(row.kind === 'forum' ? { topic: row.topic || null } : {}),
   parentChannelId: row.parent_channel_id || null,
@@ -57,6 +58,7 @@ const role = (row) => ({
   name: row.name,
   color: row.color,
   color2: row.color2 || null,
+  icon: row.icon || null,
   permissions: Number(row.permissions),
   position: row.position,
   isDefault: row.is_default,
@@ -76,7 +78,8 @@ const attachment = (row) => ({
     : row.content_type.startsWith('video/') && MEDIA_TYPES.has(row.content_type) ? 'video'
     : row.content_type.startsWith('audio/') && MEDIA_TYPES.has(row.content_type) ? 'audio'
     : 'file',
-  ...(row.is_voice ? { isVoice: true, duration: row.duration || 0, waveform: row.waveform || null } : {}),
+  ...(row.is_voice ? { isVoice: true, duration: row.duration || 0, waveform: row.waveform || null, transcript: row.transcript || null } : {}),
+  ...(row.has_text ? { hasText: true } : {}),
 });
 
 // Espera colunas da mensagem + author_username/author_display_name (via JOIN).

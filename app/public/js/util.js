@@ -140,9 +140,9 @@ export function avatar(user, { size, online } = {}) {
 // Foto de perfil / ícone do servidor: recorta no centro (quadrado), reduz para 256x256 e envia.
 export async function uploadAvatar(file, path = '/api/me/avatar') {
   if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) throw new Error('Escolha uma imagem PNG, JPG, GIF ou WEBP.');
-  // GIF animado vai do jeito que está (para continuar animado). Até 2 MB.
+  // GIF animado vai do jeito que está (para continuar animado). Até 8 MB.
   if (file.type === 'image/gif') {
-    if (file.size > 2 * 1024 * 1024) throw new Error('GIF animado pode ter no máximo 2 MB.');
+    if (file.size > 8 * 1024 * 1024) throw new Error('GIF animado pode ter no máximo 8 MB.');
     return sendRawImage(path, file);
   }
   const bitmap = await createImageBitmap(file).catch(() => { throw new Error('Não deu para abrir essa imagem.'); });

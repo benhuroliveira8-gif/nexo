@@ -205,6 +205,7 @@ export function noticeVoiceStates(channelId, states) {
 
 export function joinVoice(opts) {
   peopleHere = null;
+  if (waitingFor && waitingFor.channelId !== opts.channelId) cancelWaiting({ silent: true });
   return joinVoiceInner(opts);
 }
 
@@ -219,10 +220,17 @@ async function joinVoiceInner({ channelId, channelName, serverId, serverName, is
   vs.connecting = true;
   onChange();
   try {
-    const [{ token, canSpeak, canVideo, stage, moderator }] = await Promise.all([
+    const [grant] = await Promise.all([
       api(`/voice/${channelId}/token`, { method: 'POST' }),
       loadLivekit(),
     ]);
+    // Sala de espera: fica aguardando a moderação liberar.
+    if (grant.waiting) {
+      startWaiting({ channelId, channelName, serverId, serverName, isDm, video });
+      return;
+    }
+    const { token, canSpeak, canVideo, stage, moderator } = grant;
+    if (waitingFor) cancelWaiting({ silent: true });
     if (vs.room) await leaveVoice({ silent: true });
 
     const { Room } = LK();
@@ -300,6 +308,51 @@ export async function leaveVoice({ silent = false } = {}) {
 // Depois de uma queda do Nexo (ex.: deploy), avisa de novo que estamos na voz.
 export function resyncAfterReconnect() {
   if (vs.room) announceJoin();
+  else if (waitingFor) emitWait();
+}
+
+// ---------------------------------------------------------------- Sala de espera
+let waitingFor = null; // { channelId, channelName, serverId, serverName, ... }
+export const waitingState = () => waitingFor;
+
+function emitWait() {
+  const socket = getSocket();
+  if (!socket || !waitingFor) return;
+  const target = waitingFor;
+  socket.emit('voice:wait', { channelId: target.channelId }, (res) => {
+    if (!res || !res.ok) { if (waitingFor === target) { waitingFor = null; onChange(); } return toast((res && res.error) || 'Não deu para entrar na fila.'); }
+    if (res.admitted && waitingFor === target) { waitingFor = null; joinVoice(target); }
+  });
+}
+
+function startWaiting(target) {
+  waitingFor = target;
+  emitWait();
+  toast('⏳ Este canal tem sala de espera. A moderação foi avisada: espere liberarem.');
+  onChange();
+}
+
+export function cancelWaiting({ silent = false } = {}) {
+  if (!waitingFor) return;
+  const socket = getSocket();
+  if (socket) socket.emit('voice:unwait', { channelId: waitingFor.channelId });
+  waitingFor = null;
+  if (!silent) onChange();
+}
+
+// A moderação liberou (ou não).
+export function onAdmitted({ channelId }) {
+  if (!waitingFor || waitingFor.channelId !== channelId) return;
+  const target = waitingFor;
+  waitingFor = null;
+  toast('✅ Liberaram a sua entrada!');
+  joinVoice(target);
+}
+export function onDenied({ channelId }) {
+  if (!waitingFor || waitingFor.channelId !== channelId) return;
+  waitingFor = null;
+  toast('A moderação não liberou a entrada agora.');
+  onChange();
 }
 
 window.addEventListener('pagehide', () => { if (vs.room) vs.room.disconnect(); });
@@ -885,6 +938,15 @@ function controlBanner() {
 
 // Painel "Voz conectada" acima do seu nome.
 export function renderVoicePanel(el) {
+  if (!vs.room && !vs.connecting && waitingFor) {
+    el.hidden = false;
+    el.replaceChildren(h('div', { class: 'vp-top' },
+      h('div', { class: 'vp-info' },
+        h('strong', { class: 'vp-status warn' }, '⏳ Na sala de espera'),
+        h('span', { class: 'muted truncate' }, `🔊 ${waitingFor.channelName} / ${waitingFor.serverName}`)),
+      h('button', { class: 'btn small', onclick: () => cancelWaiting() }, 'Cancelar')));
+    return;
+  }
   if (!vs.room && !vs.connecting) {
     el.hidden = true;
     return;

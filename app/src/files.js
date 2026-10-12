@@ -10,13 +10,15 @@ const events = require('./events');
 const { audit } = require('./audit');
 const { P, memberContext } = require('./permissions');
 const emojis = require('./emojis');
+const { extractText } = require('./pdftext');
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
 const MAX_SIZE = (Number(process.env.MAX_UPLOAD_MB) || 8) * 1024 * 1024;
 const ORPHAN_AFTER_MIN = 60; // anexos enviados mas nunca usados numa mensagem
 
 const AVATAR_DIR = path.join(UPLOAD_DIR, 'avatars');
-const AVATAR_MAX = 2 * 1024 * 1024;
+// Fotos, capas e ícones (GIF animado costuma ser maior: até 8 MB).
+const AVATAR_MAX = 8 * 1024 * 1024;
 
 fs.mkdirSync(AVATAR_DIR, { recursive: true });
 
@@ -59,10 +61,15 @@ function uploadRouter(requireAuth) {
         const duration = Number(req.get('x-voice-duration'));
         const isVoice = type.startsWith('audio/') && Number.isFinite(duration) && duration > 0 && duration <= 20 * 60;
         const waveform = isVoice && /^[A-Za-z0-9_-]{1,200}$/.test(req.get('x-voice-waveform') || '') ? req.get('x-voice-waveform') : null;
+        // Transcrição feita no navegador enquanto a pessoa gravava (quando o navegador sabe fazer).
+        let transcript = null;
+        if (isVoice && req.get('x-voice-transcript')) {
+          try { transcript = decodeURIComponent(req.get('x-voice-transcript')).replace(/\s+/g, ' ').trim().slice(0, 4000) || null; } catch { transcript = null; }
+        }
         const { rows } = await db.query(
-          `INSERT INTO attachments (id, uploader_id, filename, content_type, size, is_voice, duration, waveform)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-          [id, req.userId, cleanName(name), type, data.length, isVoice, isVoice ? duration : null, waveform],
+          `INSERT INTO attachments (id, uploader_id, filename, content_type, size, is_voice, duration, waveform, transcript)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+          [id, req.userId, cleanName(name), type, data.length, isVoice, isVoice ? duration : null, waveform, transcript],
         );
         try {
           await fs.promises.writeFile(filePath(id), data);
@@ -71,6 +78,13 @@ function uploadRouter(requireAuth) {
           throw err;
         }
         res.status(201).json({ attachment: S.attachment(rows[0]) });
+        // PDF/texto: guarda o que está escrito dentro, para a busca achar.
+        if (!isVoice && data.length <= 25 * 1024 * 1024) {
+          setImmediate(() => {
+            const text = extractText(data, type, rows[0].filename);
+            if (text) db.query('UPDATE attachments SET text_content = $2 WHERE id = $1', [id, text]).catch(() => {});
+          });
+        }
       } catch (err) {
         next(err);
       }

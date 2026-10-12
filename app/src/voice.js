@@ -78,6 +78,8 @@ function leave(userId) {
     if (map.size === 0) { channels.delete(channelId); stageSpeakers.delete(channelId); }
   }
   if (state) broadcast(state.serverId, channelId);
+  // eslint-disable-next-line global-require
+  require('./waiting').forget(channelId, userId);
 }
 
 function join({ userId, serverId, channelId, socketId, flags, rooms }) {

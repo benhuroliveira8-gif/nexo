@@ -218,16 +218,23 @@ module.exports = function messageRoutes(r) {
 
     const where = `msg.channel_id = ANY($1::int[])
        AND msg.kind = 'default'
-       AND ($2::text = '' OR msg.content ILIKE '%' || $2 || '%')
+       AND ($2::text = '' OR nexo_norm(msg.content) LIKE '%' || nexo_norm($2) || '%'
+            OR ($6::text <> '' AND nexo_norm($6) <% nexo_norm(msg.content))
+            OR EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = msg.id AND a.purged_at IS NULL
+                       AND (nexo_norm(a.filename) LIKE '%' || nexo_norm($2) || '%'
+                            OR nexo_norm(a.text_content) LIKE '%' || nexo_norm($2) || '%'
+                            OR nexo_norm(a.transcript) LIKE '%' || nexo_norm($2) || '%')))
        AND ($3::int IS NULL OR msg.author_id = $3)
        AND ($4::timestamptz IS NULL OR msg.created_at >= $4)
        AND ($5::timestamptz IS NULL OR msg.created_at <= $5)
        ${has ? `AND ${HAS_SQL[has]}` : ''}`;
-    const params = [channelIds, likeEscape(q), authorId, since, until];
+    // Erros de digitação ("obrigdo" acha "obrigado"): só para palavras de 4+ letras, sem coringas.
+    const fuzzy = q.length >= 4 && q.length <= 40 && !/[%_\\]/.test(q) ? q : '';
+    const params = [channelIds, likeEscape(q), authorId, since, until, fuzzy];
     const [found, total] = await Promise.all([
       db.query(
         `${M.SELECT_MESSAGE}
-         WHERE ${where} AND ($6::bigint IS NULL OR msg.id < $6::bigint)
+         WHERE ${where} AND ($7::bigint IS NULL OR msg.id < $7::bigint)
          ORDER BY msg.id DESC LIMIT ${SEARCH_PAGE}`,
         [...params, before],
       ),

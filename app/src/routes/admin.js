@@ -18,6 +18,10 @@ module.exports = function adminRoutes(r) {
     next();
   }));
 
+  r.get('/admin/health', wrap(async (req, res) => {
+    res.json(await require('../health').health()); // eslint-disable-line global-require
+  }));
+
   r.get('/admin/overview', wrap(async (req, res) => {
     res.json(await admin.overview());
   }));

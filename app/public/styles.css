@@ -1601,3 +1601,47 @@ kbd { font: 600 12px ui-monospace, Consolas, monospace; padding: 1px 5px; border
 /* Degradê no cargo */
 .gradient-pick { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
 .gradient-preview { font-weight: 700; font-size: 16px; }
+
+/* ================================================================ Fase 11 */
+
+/* Transcrição do áudio */
+.voice-wrap { display: grid; gap: 4px; max-width: 420px; }
+.vm-transcript { font-size: 13.5px; color: var(--text-2); padding: 4px 10px; border-left: 2px solid var(--line); line-height: 1.4; }
+
+/* Resumo do que você perdeu */
+.catchup-slot { padding: 10px 16px 0; }
+.catchup { display: grid; gap: 8px; padding: 12px 14px; border-radius: 12px; background: color-mix(in srgb, var(--accent) 9%, var(--bg-1)); border: 1px solid var(--accent-line); }
+.cu-head { display: flex; align-items: center; gap: 8px; }
+.cu-title { font-weight: 700; flex: 1; }
+.cu-group { display: grid; gap: 4px; }
+.cu-label { font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--text-2); }
+.cu-item { display: flex; align-items: center; gap: 8px; text-align: left; padding: 6px 8px; border-radius: 8px; background: var(--bg-2); min-width: 0; }
+.cu-item:hover { background: var(--bg-3); }
+.cu-item .truncate { flex: 1; color: var(--text-2); }
+
+/* Cargo: emoji e temporário */
+.role-icon { margin-left: 4px; font-size: 14px; line-height: 1; }
+.role-chip.temp { border: 1px dashed var(--accent-line); }
+.chip-temp { font-size: 11px; color: var(--text-2); }
+.chip-add.temp { font-size: 12px; }
+.icon-pick .swatch.emoji { display: grid; place-items: center; font-size: 16px; background: var(--bg-3); }
+.icon-custom { width: 70px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg-0); text-align: center; }
+
+/* Sala de espera */
+.wait-mark { margin-left: 4px; font-size: 12px; }
+.voice-waiting { list-style: none; margin: 2px 0 4px 26px; padding: 0; display: grid; gap: 2px; }
+.wait-person { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-2); padding: 2px 4px; border-radius: 6px; background: var(--accent-soft); }
+.wait-person .truncate { flex: 1; }
+.icon-btn.ok { color: var(--online); }
+
+/* Saúde */
+.svcs { display: grid; gap: 6px; }
+.svc { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 10px; background: var(--bg-0); border: 1px solid var(--line); }
+.svc-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--online); flex: none; }
+.svc.bad .svc-dot { background: var(--danger); }
+.meter { display: grid; gap: 4px; margin-bottom: 10px; }
+.meter-head { display: flex; justify-content: space-between; }
+.runs { display: grid; gap: 4px; }
+.run { display: grid; grid-template-columns: 170px 70px 70px 1fr auto; gap: 8px; align-items: center; padding: 6px 10px; border-radius: 8px; background: var(--bg-0); font-size: 14px; }
+.run.crash { border: 1px solid rgba(255, 92, 108, .4); }
+@media (max-width: 600px) { .run { grid-template-columns: 1fr 1fr; } }

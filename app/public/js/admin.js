@@ -6,6 +6,7 @@ let ui = null; // { root, tab, q }
 
 export function closeAdmin() {
   if (!ui) return;
+  clearInterval(ui.timer);
   ui.root.remove();
   document.removeEventListener('keydown', onKey);
   ui = null;
@@ -25,7 +26,7 @@ export function openAdmin(tab = 'overview') {
 }
 
 function render() {
-  const tabs = [['overview', '📊 Visão geral e disco'], ['users', '👥 Contas']];
+  const tabs = [['overview', '📊 Visão geral e disco'], ['health', '🩺 Saúde'], ['users', '👥 Contas']];
   const content = h('div', { class: 'settings-content' });
   ui.root.replaceChildren(h('div', { class: 'settings' },
     h('nav', { class: 'settings-nav' },
@@ -33,7 +34,8 @@ function render() {
       tabs.map(([k, label]) => h('button', { class: `settings-tab${ui.tab === k ? ' active' : ''}`, onclick: () => { ui.tab = k; render(); } }, label))),
     content,
     h('button', { class: 'settings-close', title: 'Fechar (Esc)', onclick: closeAdmin }, '✕')));
-  content.append(ui.tab === 'users' ? pageUsers() : pageOverview());
+  clearInterval(ui.timer);
+  content.append(ui.tab === 'users' ? pageUsers() : ui.tab === 'health' ? pageHealth() : pageOverview());
 }
 
 const block = (title, ...children) => h('div', { class: 'settings-block' }, title ? h('h3', {}, title) : null, ...children);
@@ -110,6 +112,64 @@ function fillOverview(page, d) {
           },
         }),
       }, 'Apagar arquivos antigos')));
+}
+
+// ---------------------------------------------------------------- Saúde
+
+const dur = (secs) => {
+  if (secs == null) return '—';
+  const d = Math.floor(secs / 86400); const hh = Math.floor((secs % 86400) / 3600); const m = Math.floor((secs % 3600) / 60);
+  if (d) return `${d} dia(s) e ${hh} h`;
+  if (hh) return `${hh} h ${m} min`;
+  if (m) return `${m} min`;
+  return `${secs} s`;
+};
+
+function pageHealth() {
+  const page = h('div', { class: 'settings-page' }, h('h2', {}, 'Saúde do Nexo'), h('p', { class: 'muted' }, 'Carregando…'));
+  const load = () => api('/admin/health').then((d) => { if (ui && ui.tab === 'health') fillHealth(page, d); }).catch((err) => toast(err.message));
+  load();
+  ui.timer = setInterval(load, 15000); // atualiza sozinho
+  return page;
+}
+
+function fillHealth(page, d) {
+  const meter = (label, pct, extra) => h('div', { class: 'meter' },
+    h('div', { class: 'meter-head' }, h('span', {}, label), h('strong', {}, `${pct}%`)),
+    h('div', { class: `disk-bar${pct >= 90 ? ' warn' : ''}` }, h('i', { style: `width:${Math.min(100, pct)}%` })),
+    extra ? h('div', { class: 'muted small' }, extra) : null);
+  const svc = (label, x, okText) => h('div', { class: `svc ${x.ok ? 'ok' : 'bad'}` },
+    h('span', { class: 'svc-dot' }), h('strong', {}, label), h('span', { class: 'muted small' }, x.ok ? `${okText} (${x.ms} ms)` : 'não respondeu'));
+  const b = d.backups;
+  const backupBox = !b.available
+    ? h('p', { class: 'muted' }, 'A pasta dos backups não está ligada ao app (veja docs/administracao.md).')
+    : !b.last ? h('div', { class: 'admin-alert' }, '⚠️ Nenhum backup encontrado.')
+      : h('div', {},
+        h('div', { class: b.old ? 'admin-alert' : 'svc ok' },
+          b.old ? `⚠️ O último backup tem ${Math.round(b.ageHours)} horas. O job "nexo-backup" do Jenkins pode estar parado.` : [h('span', { class: 'svc-dot' }), h('strong', {}, 'Backup em dia'), h('span', { class: 'muted small' }, ` último há ${b.ageHours < 1 ? 'menos de 1 hora' : `${Math.round(b.ageHours)} h`}`)]),
+        h('div', { class: 'muted small' }, `${b.count} backup(s) guardado(s). Último: ${new Date(b.last.at).toLocaleString('pt-BR')} (${formatSize(b.last.size)}).`));
+  page.replaceChildren(
+    h('h2', {}, 'Saúde do Nexo'),
+    h('p', { class: 'muted small' }, 'Atualiza sozinho a cada 15 segundos.'),
+    h('div', { class: 'stat-tiles' },
+      h('div', { class: 'stat-tile' }, h('span', { class: 'muted small' }, 'Nexo no ar há'), h('strong', {}, dur(d.app.uptimeSeconds))),
+      h('div', { class: 'stat-tile' }, h('span', { class: 'muted small' }, 'Versão'), h('strong', {}, d.app.version)),
+      h('div', { class: 'stat-tile' }, h('span', { class: 'muted small' }, 'VM ligada há'), h('strong', {}, dur(d.system.uptimeSeconds))),
+      h('div', { class: 'stat-tile' }, h('span', { class: 'muted small' }, 'Quedas (últimas 10 vezes)'), h('strong', {}, String(d.crashes)))),
+    block('Serviços',
+      h('div', { class: 'svcs' }, svc('Banco de dados', d.services.database, 'ok'), svc('Servidor de voz (LiveKit)', d.services.voice, 'ok'))),
+    block('Máquina (VM)',
+      meter('CPU', d.system.cpuPercent, `${d.system.cpus} núcleo(s) • carga: ${d.system.load.join(' / ')}`),
+      meter('Memória', d.system.memPercent, `${formatSize(d.system.memTotal - d.system.memFree)} de ${formatSize(d.system.memTotal)} • o app usa ${formatSize(d.app.memoryBytes)}`)),
+    block('Backup', backupBox),
+    block('Reinícios e quedas',
+      h('p', { class: 'muted small' }, '"Atualização/reinício" = o Nexo foi desligado direitinho (deploy, reinício). "Queda" = desligou de repente (falta de luz, VM travou).'),
+      h('div', { class: 'runs' }, d.restarts.map((r) => h('div', { class: `run${r.previousClean === false ? ' crash' : ''}` },
+        h('span', {}, new Date(r.startedAt).toLocaleString('pt-BR')),
+        h('span', { class: 'muted small' }, `v${r.version}`),
+        h('span', {}, r.current ? '🟢 agora' : ''),
+        h('span', { class: 'small' }, r.previousClean === null ? 'primeira vez' : r.previousClean ? '🔄 atualização/reinício' : '⚠️ queda'),
+        h('span', { class: 'muted small' }, r.downSeconds != null ? `fora do ar: ${dur(r.downSeconds)}` : ''))))));
 }
 
 // ---------------------------------------------------------------- Contas

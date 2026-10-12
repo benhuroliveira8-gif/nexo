@@ -93,6 +93,15 @@ Chat em tempo real no estilo de servidores e canais. Projeto pessoal, construíd
 - **Personalização do servidor**: **capa** (aparece no topo dos canais e no convite), **ícone e foto de perfil animados** (GIF) e **cargos com degradê** 🌈
 - **Canal de anúncios** 📢: só a moderação escreve; os outros reagem e comentam em threads
 - **Convite com cargo**: quem entra pelo link já ganha o cargo (ex.: "convite de staff")
+- **Áudios com transcrição** 📝: o texto do que foi falado aparece embaixo do áudio (Chrome/Edge). Opcional no servidor: [docs/transcricao.md](docs/transcricao.md)
+- **Busca melhor** 🔎: sem acento ("voce" acha "você"), com erro de digitação ("obrigdo" acha "obrigado"), dentro de **PDFs** e arquivos de texto e na fala dos áudios
+- **Resumo do que você perdeu** 📬: ao abrir um canal com muita coisa nova, mostra quantas mensagens, desde quando, quem mais falou, quem falou com você e as mais reagidas
+- **Cargo com emoji** 💎 do lado do nome e **cargo temporário** ⏳ (ex.: VIP por 7 dias, vence sozinho)
+- **Ausente automático** 🌙: depois de 10 min sem mexer (dá para mudar em ⚙️ → *Notificações e app*)
+- **Baixar os meus dados** 📦 (⚙️ → *Minha conta*): .zip com mensagens, salvas, perfil, fotos e arquivos
+- **Sala de espera** ⏳ num canal de voz: quem chega espera a moderação clicar em "Deixar entrar"
+- **Painel de saúde** 🩺 (Administração do Nexo → *Saúde*): no ar há quanto tempo, quedas e reinícios, CPU, memória, banco, voz e idade do último backup
+- **Foto de perfil e capa em GIF animado** (até 8 MB)
 - **App instalável melhorado** 📲: segure o ícone do Nexo para os **atalhos** (Mensagens, Amigos, Salvas, Último servidor) e, na galeria do celular, **Compartilhar → Nexo** para mandar fotos direto para uma conversa
 
 ## Como rodar (no servidor Ubuntu com Docker)

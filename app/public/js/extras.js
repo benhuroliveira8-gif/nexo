@@ -165,10 +165,12 @@ export async function startRecording({ maxSeconds = 300, onTick, audio = {} } = 
     if (secs >= maxSeconds && !stopped) api.stopAuto();
   }, 100);
   rec.start(250);
+  const speech = startTranscription();
 
   const finish = () => {
     stopped = true;
     clearInterval(sample);
+    if (speech) speech.stop();
     stream.getTracks().forEach((t) => t.stop());
     ctx.close().catch(() => {});
   };
@@ -180,12 +182,14 @@ export async function startRecording({ maxSeconds = 300, onTick, audio = {} } = 
       if (stopped || pausedAt !== null || rec.state !== 'recording') return;
       try { rec.pause(); } catch { return; }
       pausedAt = performance.now();
+      if (speech) speech.pause();
     },
     resume() {
       if (stopped || pausedAt === null) return;
       try { rec.resume(); } catch { return; }
       pausedTotal += performance.now() - pausedAt;
       pausedAt = null;
+      if (speech) speech.resume();
     },
     cancel() {
       if (stopped) return;
@@ -201,7 +205,8 @@ export async function startRecording({ maxSeconds = 300, onTick, audio = {} } = 
           const blob = new Blob(chunks, { type });
           const ext = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
           const file = new File([blob], `mensagem-de-voz.${ext}`, { type });
-          resolve({ file, duration, waveform: makeWaveform(levels) });
+          const done = (transcript) => resolve({ file, duration, waveform: makeWaveform(levels), transcript });
+          if (speech) speech.result().then(done); else done('');
         };
         finish();
         try { rec.requestData(); } catch { /* ignora */ }
@@ -211,6 +216,53 @@ export async function startRecording({ maxSeconds = 300, onTick, audio = {} } = 
     stopAuto: () => { if (api.onAutoStop) api.onAutoStop(); },
   };
   return api;
+}
+
+// ---------------------------------------------------------------- Transcrição (enquanto grava)
+// Usa o reconhecimento de voz do próprio navegador (Chrome/Edge/Safari). Se não tiver, segue sem.
+export const transcriptionSupported = () => !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+export const transcriptionOn = () => { try { return localStorage.getItem('nexo.transcribe') !== '0'; } catch { return true; } };
+
+function startTranscription() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR || !transcriptionOn()) return null;
+  const parts = [];
+  let r = null;
+  let active = true;    // deve estar ouvindo?
+  let ending = null;    // promessa de quando terminar
+  let endResolve = null;
+  const make = () => {
+    r = new SR();
+    r.lang = navigator.language || 'pt-BR';
+    r.continuous = true;
+    r.interimResults = false;
+    r.onresult = (e) => {
+      for (let i = e.resultIndex; i < e.results.length; i++) if (e.results[i].isFinal) parts.push(e.results[i][0].transcript);
+    };
+    r.onerror = () => {};
+    // O Chrome para sozinho depois de um silêncio: liga de novo enquanto estiver gravando.
+    r.onend = () => {
+      if (endResolve) { endResolve(); endResolve = null; return; }
+      if (active) { try { make(); r.start(); } catch { /* */ } }
+    };
+  };
+  try { make(); r.start(); } catch { return null; }
+  return {
+    pause() { active = false; try { r.stop(); } catch { /* */ } },
+    resume() { active = true; try { make(); r.start(); } catch { /* */ } },
+    stop() {
+      if (ending) return;
+      active = false;
+      ending = new Promise((res) => { endResolve = res; setTimeout(res, 1500); });
+      try { r.stop(); } catch { endResolve(); }
+    },
+    // Espera os últimos pedaços chegarem (até 1,5 s) e devolve o texto.
+    async result() {
+      if (!ending) this.stop();
+      await ending;
+      return parts.join(' ').replace(/\s+/g, ' ').trim();
+    },
+  };
 }
 
 // Resume os níveis em 48 barrinhas (0–255) e codifica em base64url.
@@ -251,7 +303,11 @@ export function buildVoicePlayer(att) {
   let speedIdx = 0;
   const speed = h('button', { type: 'button', class: 'vm-speed', title: 'Velocidade' }, '1×');
   const waveEl = h('div', { class: 'vm-wave', role: 'slider', 'aria-label': 'Posição do áudio', tabindex: '0' }, barEls);
-  const el = h('div', { class: 'voice-msg' }, playBtn, waveEl, time, speed);
+  const player = h('div', { class: 'voice-msg' }, playBtn, waveEl, time, speed);
+  // Transcrição embaixo (para quem não pode ouvir agora).
+  const el = att.transcript
+    ? h('div', { class: 'voice-wrap' }, player, h('div', { class: 'vm-transcript', title: 'Transcrição automática (pode ter erros)' }, h('span', { 'aria-hidden': 'true' }, '📝 '), att.transcript))
+    : player;
 
   const paint = () => {
     const d = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : duration;
@@ -282,8 +338,8 @@ export function buildVoicePlayer(att) {
     };
     if (audio.readyState >= 1) seek(); else { audio.preload = 'metadata'; audio.addEventListener('loadedmetadata', seek, { once: true }); audio.load(); }
   });
-  audio.addEventListener('play', () => { playBtn.textContent = '❚❚'; playBtn.title = 'Pausar'; el.classList.add('playing'); });
-  audio.addEventListener('pause', () => { playBtn.textContent = '▶'; playBtn.title = 'Tocar'; el.classList.remove('playing'); });
+  audio.addEventListener('play', () => { playBtn.textContent = '❚❚'; playBtn.title = 'Pausar'; player.classList.add('playing'); });
+  audio.addEventListener('pause', () => { playBtn.textContent = '▶'; playBtn.title = 'Tocar'; player.classList.remove('playing'); });
   audio.addEventListener('ended', () => { audio.currentTime = 0; paint(); });
   audio.addEventListener('timeupdate', paint);
   audio.addEventListener('loadedmetadata', () => { if (Number.isFinite(audio.duration)) duration = audio.duration; paint(); });

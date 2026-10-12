@@ -7,6 +7,7 @@ const S = require('./serializers');
 const M = require('./messages');
 const voice = require('./voice');
 const push = require('./push');
+const waiting = require('./waiting');
 const { P, channelAccess } = require('./permissions');
 
 const VERSION = require('../package.json').version;
@@ -174,6 +175,42 @@ module.exports = function setupRealtime(io) {
 
     socket.on('voice:leave', () => voice.disconnect(user.id, socket.id));
 
+    // ---------- Sala de espera da voz
+    const waitAccess = async (payload) => {
+      const channelId = Number(payload && payload.channelId);
+      if (!validId(channelId) || user.isBot) return null;
+      const access = await channelAccess(channelId, user.id);
+      return access && access.kind === 'voice' && access.channel.waiting_room ? access : null;
+    };
+    socket.on('voice:wait', async (payload, ack) => {
+      const reply = typeof ack === 'function' ? ack : () => {};
+      const access = await waitAccess(payload).catch(() => null);
+      if (!access || !access.can(P.CONNECT)) return reply({ ok: false, error: 'Canal sem sala de espera.' });
+      if (waiting.isAdmitted(access.channel.id, user.id) || waiting.canAdmit(access)) return reply({ ok: true, admitted: true });
+      waiting.add(access, user, socket.id);
+      reply({ ok: true });
+    });
+    socket.on('voice:unwait', async (payload) => {
+      const access = await waitAccess(payload).catch(() => null);
+      if (access) waiting.remove(access.channel.id, user.id, access.rooms);
+    });
+    // Moderação: { channelId, userId, allow }
+    socket.on('voice:admit', async (payload, ack) => {
+      const reply = typeof ack === 'function' ? ack : () => {};
+      const access = await waitAccess(payload).catch(() => null);
+      if (!access || !waiting.canAdmit(access)) return reply({ ok: false, error: 'Você não pode liberar a entrada.' });
+      const targetId = Number(payload.userId);
+      const channelId = access.channel.id;
+      if (!waiting.remove(channelId, targetId, access.rooms)) return reply({ ok: false, error: 'Essa pessoa não está mais esperando.' });
+      if (payload.allow) {
+        waiting.admit(channelId, targetId);
+        events.emitTo([`user:${targetId}`], 'voice:admitted', { channelId, by: user.displayName });
+      } else {
+        events.emitTo([`user:${targetId}`], 'voice:denied', { channelId, by: user.displayName });
+      }
+      reply({ ok: true });
+    });
+
     // ---------- Soundboard: um som curto para todo mundo da chamada.
     const lastSound = { t: 0 };
     socket.on('voice:sound', async (payload) => {
@@ -240,8 +277,17 @@ module.exports = function setupRealtime(io) {
     // A aba está aparecendo na tela? (se nenhuma estiver, mandamos notificação push)
     socket.on('client:visible', (visible) => presence.setVisible(user.id, socket.id, !!visible));
 
+    // Ausente automático (o navegador avisa depois de X minutos sem mexer).
+    socket.on('client:idle', (on) => {
+      if (presence.setIdle(user.id, socket.id, !!on)) broadcastPresence(user.id).catch(() => {});
+    });
+
     socket.on('disconnect', () => {
       presence.setVisible(user.id, socket.id, false);
+      presence.setIdle(user.id, socket.id, false);
+      for (const channelId of waiting.dropSocket(socket.id)) {
+        channelAccess(channelId, user.id).then((a) => a && waiting.announce(channelId, a.rooms)).catch(() => {});
+      }
       voice.disconnect(user.id, socket.id);
       if (!presence.disconnect(user.id)) return;
       db.query('UPDATE users SET last_seen_at = now() WHERE id = $1', [user.id]).catch(() => {});

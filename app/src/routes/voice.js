@@ -2,6 +2,7 @@
 const db = require('../db');
 const S = require('../serializers');
 const voice = require('../voice');
+const waiting = require('../waiting');
 const { humansOnly } = require('../auth');
 const { P, channelAccess } = require('../permissions');
 const { wrap, fail, parseId } = require('./util');
@@ -18,6 +19,10 @@ module.exports = function voiceRoutes(r) {
       fail(403, access.timeoutUntil ? 'Você está de castigo e não pode entrar na voz agora.' : 'Você não tem permissão para entrar neste canal de voz.');
     }
 
+    // Sala de espera: quem não modera precisa ser liberado antes de entrar.
+    if (access.kind === 'voice' && access.channel.waiting_room && !waiting.canAdmit(access) && !waiting.isAdmitted(channelId, req.userId)) {
+      return res.status(202).json({ waiting: true });
+    }
     const { rows } = await db.query('SELECT id, username, display_name, is_bot, avatar_id, status, status_text FROM users WHERE id = $1', [req.userId]);
     const user = S.user(rows[0]);
     // Modo palco: só fala quem modera ou quem foi chamado para o palco.

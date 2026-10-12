@@ -1,7 +1,7 @@
 // Configurações do usuário: conta, segurança (senha, 2FA, aparelhos), aparência,
 // voz e vídeo, notificações e instalar o app.
 import {
-  h, api, avatar, toast, openDialog, confirmDialog, uploadAvatar, copyText, storage, playPing,
+  h, api, avatar, toast, openDialog, confirmDialog, uploadAvatar, copyText, storage, playPing, getToken,
 } from './util.js';
 import { state } from './state.js';
 import { qrSvg } from './qr.js';
@@ -12,6 +12,8 @@ import { profileLookSection, dndScheduleSection, paintBanner } from './profile.j
 import { previewRingtone, playJoin, playLeave } from './callsounds.js';
 import { ttsSettingsSection } from './tts.js';
 import { economySection } from './economy.js';
+import { autoAwaySection } from './idle.js';
+import { transcriptionSupported, transcriptionOn } from './extras.js';
 import { downloadHelper } from './remote.js';
 import {
   pushStatus, enablePush, disablePush, canPromptInstall, promptInstall, isStandalone, isIos, onPwaChange,
@@ -114,6 +116,7 @@ function pageAccount() {
             class: 'btn small danger-ghost',
             onclick: busy(async () => { hooks.applyMe((await api('/me/avatar', { method: 'DELETE' })).user); render(); }),
           }, 'Remover') : null))),
+    h('p', { class: 'muted small' }, '🎞️ Foto e capa podem ser GIF animado (até 8 MB).'),
     h('label', { class: 'field' }, 'Nome de exibição', name),
     h('label', { class: 'field' }, h('span', { class: 'field-row' }, 'Sobre mim', counter), about),
     h('p', { class: 'muted small' }, 'Dica: dá para usar **negrito**, *itálico* e emojis.'),
@@ -127,6 +130,10 @@ function pageAccount() {
       }),
     }, 'Salvar perfil'),
     profileLookSection(me, { applyMe: hooks.applyMe, rerender: render }),
+    h('div', { class: 'settings-block' },
+      h('h3', {}, 'Baixar os meus dados'),
+      h('p', { class: 'muted' }, 'Um arquivo .zip com as suas mensagens (fácil de ler no navegador), mensagens salvas, perfil, foto, capa e os arquivos que você enviou.'),
+      h('button', { class: 'btn', onclick: (e) => downloadMyData(e.currentTarget) }, '📦 Baixar meus dados')),
     h('div', { class: 'settings-block danger-zone' },
       h('h3', {}, 'Apagar conta'),
       h('p', { class: 'muted' }, 'Sua conta some para sempre. Suas mensagens continuam nas conversas, mas aparecem como "Usuário removido". Se você for dono de algum servidor, apague-o antes.'),
@@ -257,6 +264,26 @@ function showRecoveryKey(key) {
       { label: 'Já guardei', kind: 'primary', submit: true },
     ],
   });
+}
+
+async function downloadMyData(btn) {
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = 'Preparando o arquivo…';
+  try {
+    const res = await fetch('/api/me/export', { headers: { Authorization: `Bearer ${getToken()}` } });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Erro ${res.status}`);
+    const name = (/filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '') || [])[1] || 'nexo-meus-dados.zip';
+    const url = URL.createObjectURL(await res.blob());
+    const a = h('a', { href: url, download: name });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    toast('Arquivo pronto! 📦');
+  } catch (err) { toast(err.message); }
+  btn.textContent = label;
+  btn.disabled = false;
 }
 
 function showRecoveryCodes(codes) {
@@ -465,6 +492,12 @@ function pageVoice() {
         h('button', { class: 'btn small', onclick: playLeave }, '▶️ Sair'),
         h('button', { class: 'btn small', onclick: () => previewRingtone() }, '📱 Toque de ligação'))),
     block('Leitura em voz alta', ttsSettingsSection()),
+    block('Mensagens de voz',
+      transcriptionSupported() ? h('label', { class: 'perm' },
+        h('div', { class: 'perm-text' }, h('strong', {}, '📝 Transcrever meus áudios'),
+          h('span', { class: 'muted small' }, 'Enquanto você grava, o navegador escreve o que você fala e o texto vai junto com o áudio (para quem não pode ouvir na hora). No Chrome, o reconhecimento de voz usa os servidores do Google.')),
+        h('input', { type: 'checkbox', class: 'switch', checked: transcriptionOn(), onchange: (e) => { storage('nexo.transcribe', e.target.checked ? '1' : '0'); } }))
+        : h('p', { class: 'muted' }, 'Este navegador não sabe transcrever áudio. No Chrome ou Edge, seus áudios vão com o texto do que você falou.')),
     block('Volume de cada pessoa',
       h('p', { class: 'muted' }, 'Na chamada, clique no quadrado de alguém (ou no nome na lista do canal de voz) para mudar o volume só para você.'),
       saved ? h('button', {
@@ -531,6 +564,7 @@ function pageNotifications() {
       h('label', { class: 'perm' },
         h('div', { class: 'perm-text' }, h('strong', {}, 'Som de notificação'), h('span', { class: 'muted small' }, 'Toca um "plim" quando chega mensagem direta ou menção com o Nexo aberto.')),
         soundToggle)),
+    block('Ausente automático', autoAwaySection(render)),
     block('"Não perturbe" agendado', dndScheduleSection(state.me, async (changes) => {
       const { user } = await api('/me', { method: 'PATCH', body: changes });
       hooks.applyMe(user);

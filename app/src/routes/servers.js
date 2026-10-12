@@ -83,6 +83,16 @@ async function assertCanModerate(ctx, targetId) {
   return target;
 }
 
+// Emoji do cargo: 1 emoji (ou até 2 caracteres comuns). Nada = sem ícone.
+const graphemes = new Intl.Segmenter('pt', { granularity: 'grapheme' });
+function cleanRoleIcon(v) {
+  const t = String(v || '').trim();
+  if (!t) return null;
+  const parts = [...graphemes.segment(t)];
+  if (parts.length > 2 || t.length > 16 || /[<>]/.test(t)) fail(400, 'O ícone do cargo pode ser 1 emoji.');
+  return t;
+}
+
 async function userName(userId) {
   const { rows } = await db.query('SELECT display_name, username FROM users WHERE id = $1', [userId]);
   return rows[0] ? rows[0].display_name : null;
@@ -107,7 +117,7 @@ async function serverDetail(serverId, userId) {
       [serverId],
     ),
     db.query('SELECT * FROM roles WHERE server_id = $1 ORDER BY position DESC, id', [serverId]),
-    db.query('SELECT user_id, role_id FROM member_roles WHERE server_id = $1', [serverId]),
+    db.query('SELECT user_id, role_id, expires_at FROM member_roles WHERE server_id = $1', [serverId]),
     manageChannels
       ? db.query('SELECT cr.channel_id, cr.role_id FROM channel_roles cr JOIN channels c ON c.id = cr.channel_id WHERE c.server_id = $1', [serverId])
       : { rows: [] },
@@ -118,9 +128,14 @@ async function serverDetail(serverId, userId) {
   const list = shown.filter((c) => c.kind !== 'category' || manageChannels || usedCategories.has(c.id));
   const states = await channelStates(userId, list.filter((c) => c.kind !== 'category').map((c) => c.id));
   const rolesByUser = new Map();
+  const expiryByUser = new Map(); // cargos temporários: { roleId: quando vence }
   memberRoles.rows.forEach((r) => {
     if (!rolesByUser.has(r.user_id)) rolesByUser.set(r.user_id, []);
     rolesByUser.get(r.user_id).push(r.role_id);
+    if (r.expires_at) {
+      if (!expiryByUser.has(r.user_id)) expiryByUser.set(r.user_id, {});
+      expiryByUser.get(r.user_id)[r.role_id] = r.expires_at;
+    }
   });
   const allowed = new Map();
   channelRoles.rows.forEach((r) => {
@@ -140,6 +155,7 @@ async function serverDetail(serverId, userId) {
       ...S.user(m),
       ...presence.publicPresence(m),
       roleIds: rolesByUser.get(m.id) || [],
+      ...(expiryByUser.has(m.id) ? { roleExpiry: expiryByUser.get(m.id) } : {}),
       timeoutUntil: m.timeout_until && new Date(m.timeout_until) > now ? m.timeout_until : null,
       profileColor: m.profile_color || null,
     })),
@@ -150,6 +166,7 @@ async function serverDetail(serverId, userId) {
     ...(ctx.can(P.MANAGE_SERVER) ? { settings: { welcome: server.rows[0].welcome || null, automod: server.rows[0].automod || null } } : {}),
     levelsEnabled: !!(server.rows[0].levels && server.rows[0].levels.enabled),
     voice: voice.statesForChannels(list.filter((c) => c.kind === 'voice').map((c) => c.id)),
+    voiceWaiting: require('../waiting').forChannels(list.filter((c) => c.kind === 'voice' && c.waiting_room).map((c) => c.id)), // eslint-disable-line global-require
     me: {
       permissions: ctx.perms,
       isOwner: ctx.isOwner,
@@ -529,9 +546,9 @@ module.exports = function serverRoutes(r) {
     const channel = await db.transaction(async (c) => {
       const position = await nextPosition(c, ctx.serverId, categoryId, kind === 'category');
       const { rows } = await c.query(
-        `INSERT INTO channels (server_id, name, kind, position, category_id, private, topic, announce)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-        [ctx.serverId, name, kind, position, categoryId, isPrivate, kind === 'forum' ? cleanTopic(req.body.topic) : null, kind === 'text' && !!req.body.announce],
+        `INSERT INTO channels (server_id, name, kind, position, category_id, private, topic, announce, waiting_room)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+        [ctx.serverId, name, kind, position, categoryId, isPrivate, kind === 'forum' ? cleanTopic(req.body.topic) : null, kind === 'text' && !!req.body.announce, kind === 'voice' && !!req.body.waitingRoom],
       );
       for (const roleId of roleIds) await c.query('INSERT INTO channel_roles (channel_id, role_id) VALUES ($1, $2)', [rows[0].id, roleId]);
       return rows[0];
@@ -588,6 +605,10 @@ module.exports = function serverRoutes(r) {
     }
     if (ctx.can(P.MANAGE_CHANNELS) && channel.kind === 'forum' && b.topic !== undefined) {
       vals.push(cleanTopic(b.topic)); sets.push(`topic = $${vals.length}`);
+    }
+    if (ctx.can(P.MANAGE_CHANNELS) && channel.kind === 'voice' && b.waitingRoom !== undefined) {
+      vals.push(!!b.waitingRoom); sets.push(`waiting_room = $${vals.length}`);
+      if (!!b.waitingRoom !== channel.waiting_room) changes.waitingRoom = !!b.waitingRoom;
     }
     if (ctx.can(P.MANAGE_CHANNELS) && channel.kind === 'voice' && b.stage !== undefined) {
       vals.push(!!b.stage); sets.push(`stage = $${vals.length}`);
@@ -741,6 +762,12 @@ module.exports = function serverRoutes(r) {
       const color = req.body.color && COLOR_RE.test(req.body.color) ? req.body.color.toLowerCase() : null;
       if (color !== role.color) changes.color = color;
       vals.push(color); sets.push(`color = $${vals.length}`);
+    }
+    // Emoji do cargo (aparece do lado do nome).
+    if (req.body.icon !== undefined && !role.is_default) {
+      const icon = cleanRoleIcon(req.body.icon);
+      if (icon !== role.icon) changes.icon = icon;
+      vals.push(icon); sets.push(`icon = $${vals.length}`);
     }
     // Segunda cor: o nome aparece em degradê.
     if (req.body.color2 !== undefined && !role.is_default) {

@@ -11,6 +11,7 @@ const eventRoutes = require('./events');
 const extraRoutes = require('./extras');
 const communityRoutes = require('./community');
 const adminRoutes = require('./admin');
+const extras3Routes = require('./extras3');
 const assets = require('../assets');
 
 // Monta toda a API em /api.
@@ -35,6 +36,7 @@ module.exports = function buildApi() {
   extraRoutes(r);
   communityRoutes(r);
   adminRoutes(r);
+  extras3Routes(r);
 
   r.use((req, res) => res.status(404).json({ error: 'Rota não encontrada.' }));
   return r;
