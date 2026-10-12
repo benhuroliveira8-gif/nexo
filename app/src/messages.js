@@ -11,6 +11,7 @@ const emojis = require('./emojis');
 const gifs = require('./gifs');
 const assets = require('./assets');
 const automod = require('./automod');
+const levels = require('./levels');
 const { P, roomsForChannel } = require('./permissions');
 
 const MAX_LENGTH = 4000;
@@ -221,7 +222,7 @@ function cleanPoll(poll) {
   return { question, options, multiple: !!poll.multiple, hours };
 }
 
-async function createMessage({ access, userId, content, attachmentIds, replyToId, poll, gif, stickerId }) {
+async function createMessage({ access, userId, content, attachmentIds, replyToId, poll, gif, stickerId, command = null, skipAutomod = false }) {
   if (!['text', 'thread', 'dm'].includes(access.kind)) throw new MessageError('Este canal não tem mensagens de texto.');
   if (!access.can(P.SEND_MESSAGES)) {
     throw new MessageError(access.timeoutUntil ? 'Você está de castigo e não pode enviar mensagens agora.' : 'Você não tem permissão para enviar mensagens aqui.');
@@ -248,7 +249,7 @@ async function createMessage({ access, userId, content, attachmentIds, replyToId
   }
   validateContent(content, ids.length > 0 || !!pollData || !!gifData || !!stickerData);
   // Moderação automática do servidor (palavras bloqueadas e anti-spam).
-  if (access.serverId) {
+  if (access.serverId && !skipAutomod) {
     const mentionCount = (content.match(/(^|[^\w@])@[a-z0-9_.]{3,32}/gi) || []).length;
     const verdict = await automod.check(access, userId, content, { mentions: mentionCount });
     if (verdict) {
@@ -269,9 +270,9 @@ async function createMessage({ access, userId, content, attachmentIds, replyToId
   const id = await db.transaction(async (c) => {
     const mentions = await parseMentions(c, content, access);
     const { rows } = await c.query(
-      `INSERT INTO messages (channel_id, author_id, content, mention_everyone, reply_to_id, gif, sticker)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-      [access.channel.id, userId, content, mentions.everyone, replyTo, gifData ? JSON.stringify(gifData) : null, stickerData ? JSON.stringify(stickerData) : null],
+      `INSERT INTO messages (channel_id, author_id, content, mention_everyone, reply_to_id, gif, sticker, command)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+      [access.channel.id, userId, content, mentions.everyone, replyTo, gifData ? JSON.stringify(gifData) : null, stickerData ? JSON.stringify(stickerData) : null, command ? JSON.stringify(command) : null],
     );
     // Responder alguém já avisa essa pessoa (como uma menção), se ela vê o canal.
     if (replyTo) {
@@ -378,6 +379,9 @@ function announceNew(access, message, nonce) {
   refreshThreadParent(access.channel).catch(() => {});
   if (message.kind === 'default') scheduleEmbeds(message.id, message.content, access.rooms);
   notifyPush(access, message).catch((err) => console.error('Erro ao preparar push:', err.message));
+  if (access.serverId && message.kind === 'default' && message.author && message.author.id) {
+    levels.award(access, message.author.id).catch((err) => console.error('Erro no XP:', err.message));
+  }
 }
 
 // Texto curto da notificação (sem a formatação **negrito**, ||spoiler|| etc.).

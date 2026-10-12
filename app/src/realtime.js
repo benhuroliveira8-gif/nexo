@@ -21,7 +21,7 @@ async function broadcastPresence(userId) {
   const [servers, friends, row] = await Promise.all([
     serverIdsOf(userId),
     events.friendIdsOf(userId),
-    db.query('SELECT id, status, status_text FROM users WHERE id = $1', [userId]).then((r) => r.rows[0]),
+    db.query('SELECT id, status, status_text, activity FROM users WHERE id = $1', [userId]).then((r) => r.rows[0]),
   ]);
   if (!row) return;
   const rooms = [...servers.map((id) => `server:${id}`), ...friends.map((id) => `user:${id}`)];

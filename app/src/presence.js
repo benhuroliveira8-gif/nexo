@@ -41,6 +41,7 @@ function publicPresence(row) {
     online: status !== 'offline',
     status,
     statusText: status === 'offline' ? null : (row.status_text || null),
+    activity: status === 'offline' ? null : (row.activity || null),
   };
 }
 

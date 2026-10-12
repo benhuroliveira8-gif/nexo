@@ -8,6 +8,9 @@ import { qrSvg } from './qr.js';
 import { ACCENTS, getTheme, getAccent, setTheme, setAccent } from './theme.js';
 import { voiceSettings, saveVoiceSettings, keyLabel } from './voice.js';
 import { devicesSection } from './devices.js';
+import { profileLookSection, dndScheduleSection, paintBanner } from './profile.js';
+import { previewRingtone, playJoin, playLeave } from './callsounds.js';
+import { ttsSettingsSection } from './tts.js';
 import { downloadHelper } from './remote.js';
 import {
   pushStatus, enablePush, disablePush, canPromptInstall, promptInstall, isStandalone, isIos, onPwaChange,
@@ -100,7 +103,7 @@ function pageAccount() {
   return h('div', { class: 'settings-page' },
     h('h2', {}, 'Minha conta'),
     h('div', { class: 'account-card' },
-      h('div', { class: 'profile-banner', style: `--hue:${(me.id * 137) % 360}` }),
+      (() => { const b = h('div', { class: 'profile-banner', style: `--hue:${(me.id * 137) % 360}` }); paintBanner(b, me); return b; })(),
       h('div', { class: 'account-head' },
         h('button', { class: 'account-avatar', title: 'Trocar foto', onclick: pickPhoto }, avatar(me, { size: 'xl' }), h('span', { class: 'avatar-edit' }, '✏️')),
         h('div', { class: 'account-names' }, h('strong', {}, me.displayName), h('span', { class: 'muted' }, `@${me.username}`)),
@@ -122,6 +125,7 @@ function pageAccount() {
         render();
       }),
     }, 'Salvar perfil'),
+    profileLookSection(me, { applyMe: hooks.applyMe, rerender: render }),
     h('div', { class: 'settings-block danger-zone' },
       h('h3', {}, 'Apagar conta'),
       h('p', { class: 'muted' }, 'Sua conta some para sempre. Suas mensagens continuam nas conversas, mas aparecem como "Usuário removido". Se você for dono de algum servidor, apague-o antes.'),
@@ -408,6 +412,14 @@ function pageVoice() {
         h('li', {}, 'Baixe e clique com o botão direito no arquivo → "Executar com o PowerShell".'),
         h('li', {}, 'Ele cria o atalho "Nexo Controle" na Área de Trabalho. Abra quando quiser poder ser controlado.')),
       h('button', { class: 'btn small', onclick: downloadHelper }, '⬇️ Baixar Nexo Controle')),
+    block('Sons da chamada',
+      h('div', { class: 'perm-list' },
+        toggle('callSounds', 'Som de entrar e sair', 'Toca um "plim" quando alguém entra ou sai da chamada em que você está.')),
+      h('div', { class: 'row-actions' },
+        h('button', { class: 'btn small', onclick: playJoin }, '▶️ Entrar'),
+        h('button', { class: 'btn small', onclick: playLeave }, '▶️ Sair'),
+        h('button', { class: 'btn small', onclick: () => previewRingtone() }, '📱 Toque de ligação'))),
+    block('Leitura em voz alta', ttsSettingsSection()),
     block('Volume de cada pessoa',
       h('p', { class: 'muted' }, 'Na chamada, clique no quadrado de alguém (ou no nome na lista do canal de voz) para mudar o volume só para você.'),
       saved ? h('button', {
@@ -474,5 +486,9 @@ function pageNotifications() {
       h('label', { class: 'perm' },
         h('div', { class: 'perm-text' }, h('strong', {}, 'Som de notificação'), h('span', { class: 'muted small' }, 'Toca um "plim" quando chega mensagem direta ou menção com o Nexo aberto.')),
         soundToggle)),
+    block('"Não perturbe" agendado', dndScheduleSection(state.me, async (changes) => {
+      const { user } = await api('/me', { method: 'PATCH', body: changes });
+      hooks.applyMe(user);
+    })),
     block('Instalar como app', install));
 }

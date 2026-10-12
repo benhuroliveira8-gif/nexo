@@ -1,5 +1,6 @@
 // Bot de exemplo do Nexo.
-// Ele fica conectado em tempo real e responde a comandos que começam com "!".
+// Ele fica conectado em tempo real e responde a comandos que começam com "!"
+// e também aos comandos de barra (/ping, /eco...), que aparecem no autocompletar do Nexo.
 //
 // Como rodar (no servidor):
 //   1. No Nexo, clique no seu nome (embaixo, à esquerda) → Desenvolvedor → Criar bot.
@@ -83,6 +84,25 @@ async function main() {
   console.log(`Conectando como ${me.displayName} (@${me.username})...`);
 
   const socket = io(NEXO_URL, { auth: { token: `Bot ${BOT_TOKEN}` } });
+
+  // Comandos de barra: registra os nossos (menos os que o Nexo já tem, como /dado).
+  const slash = Object.entries(COMMANDS).filter(([name]) => !['dado'].includes(name))
+    .map(([name, c]) => ({ name, description: c.help }));
+  await api('/commands', { method: 'PUT', body: { commands: slash } })
+    .then(() => console.log(`Comandos de barra: ${slash.map((c) => `/${c.name}`).join(', ')}`))
+    .catch((err) => console.error('Não deu para registrar os comandos de barra:', err.message));
+
+  // Alguém usou /comando: responde no canal.
+  socket.on('command', async ({ name, args, channelId, messageId, user }) => {
+    const command = COMMANDS[name];
+    if (!command) return;
+    const msg = { id: messageId, channelId, content: `/${name} ${args}`, author: user };
+    try {
+      await command.run(msg, String(args || '').split(/\s+/).filter(Boolean));
+    } catch (err) {
+      console.error(`Erro no comando /${name}:`, err.message);
+    }
+  });
 
   socket.on('connect', async () => {
     const { servers } = await api('/servers');

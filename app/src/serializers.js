@@ -17,6 +17,10 @@ const me = (row) => ({
   statusText: row.status_text || null,
   statusExpiresAt: row.status_expires_at || null,
   about: row.about || null,
+  bannerUrl: avatarUrl(row.banner_id),
+  profileColor: row.profile_color || null,
+  activity: row.activity || null,
+  dndSchedule: row.dnd_schedule || null,
   twoFactor: !!row.totp_enabled,
 });
 
@@ -36,6 +40,8 @@ const channel = (row) => ({
   categoryId: row.category_id || null,
   private: !!row.private,
   stage: !!row.stage,
+  ...(row.kind === 'thread' ? { solved: !!row.solved, pinned: !!row.pinned } : {}),
+  ...(row.kind === 'forum' ? { topic: row.topic || null } : {}),
   parentChannelId: row.parent_channel_id || null,
   parentMessageId: row.parent_message_id ? String(row.parent_message_id) : null,
   createdBy: row.created_by || null,
@@ -82,6 +88,7 @@ const message = (row, extras = {}) => ({
   poll: extras.poll || null,
   gif: row.gif || null,
   sticker: row.sticker ? { ...row.sticker, url: `/sticker/${row.sticker.id}` } : null,
+  command: row.command || null,
   replyTo: extras.replyTo || null,
   thread: extras.thread || null,
   mentions: extras.mentions || [],

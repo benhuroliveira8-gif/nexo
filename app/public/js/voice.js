@@ -9,6 +9,7 @@ import {
 } from './remote.js';
 import { quickDevices } from './devices.js';
 import { BUILTIN, builtinById, playSound } from './sounds.js';
+import { setSpeakerGetter, playJoin, playLeave, startRingback, stopRingback, isRingingBack } from './callsounds.js';
 
 const vs = {
   room: null,
@@ -37,6 +38,7 @@ const DEFAULT_SETTINGS = {
   screenQuality: '1080p30', screenContent: 'motion', screenAudio: true,
   micId: '', speakerId: '', camId: '', // '' = padrão do sistema
   soundboardVolume: 0.6, // 0 = não tocar os sons dos outros
+  callSounds: true, // sons de entrar/sair da chamada
 };
 export function voiceSettings() {
   try { return { ...DEFAULT_SETTINGS, ...JSON.parse(storage('nexo.voice') || '{}') }; } catch { return { ...DEFAULT_SETTINGS }; }
@@ -102,10 +104,13 @@ let onChange = () => {};
 const trackEls = new Map(); // track.sid -> elemento <video>/<audio>
 
 let getSounds = () => [];
+let myId = () => null;
 export function initVoice(opts) {
   getSocket = opts.getSocket;
   onChange = opts.onChange;
   if (opts.getSounds) getSounds = opts.getSounds;
+  if (opts.myId) myId = opts.myId;
+  setSpeakerGetter(() => voiceSettings().speakerId);
   initRemote({
     room: () => vs.room,
     Track: () => LK().Track,
@@ -173,7 +178,32 @@ function announceJoin() {
   });
 }
 
-export async function joinVoice({ channelId, channelName, serverId, serverName, isDm = false, video = false }) {
+// ---------------------------------------------------------------- Sons de entrar/sair
+
+const callSoundsOn = () => voiceSettings().callSounds !== false && !vs.deafened;
+let peopleHere = null; // Set de quem estava na chamada (para saber quem entrou/saiu)
+
+// O Nexo avisa quem está em cada canal de voz; aqui comparamos com a última lista.
+export function noticeVoiceStates(channelId, states) {
+  if (!vs.room || vs.connecting || channelId !== vs.channelId) return;
+  const me = myId();
+  const now = new Set(states.map((x) => x.userId).filter((id) => id !== me));
+  if (!peopleHere) { peopleHere = now; if (now.size) stopRingback(); return; }
+  const joined = [...now].some((id) => !peopleHere.has(id));
+  const left = [...peopleHere].some((id) => !now.has(id));
+  peopleHere = now;
+  if (now.size && isRingingBack()) stopRingback(); // atenderam!
+  if (!callSoundsOn()) return;
+  if (joined) playJoin();
+  else if (left) playLeave();
+}
+
+export function joinVoice(opts) {
+  peopleHere = null;
+  return joinVoiceInner(opts);
+}
+
+async function joinVoiceInner({ channelId, channelName, serverId, serverName, isDm = false, video = false, ringback = false }) {
   if (!window.isSecureContext) return explainHttps();
   if (vs.connecting) return;
   if (vs.room && vs.channelId === channelId) return;
@@ -218,6 +248,9 @@ export async function joinVoice({ channelId, channelName, serverId, serverName, 
       try { await room.localParticipant.setCameraEnabled(true, cameraOptions()); vs.video = true; } catch { /* sem câmera */ }
     }
     announceJoin();
+    if (callSoundsOn()) playJoin();
+    // Ligação em mensagem direta sem ninguém ainda: "tuuu… tuuu…" até atenderem.
+    if (ringback && isDm) startRingback();
   } catch (err) {
     toast(err.message || 'Não foi possível entrar na voz.');
     await leaveVoice({ silent: true });
@@ -236,6 +269,9 @@ function micErrorMessage(err) {
 
 export async function leaveVoice({ silent = false } = {}) {
   const room = vs.room;
+  stopRingback();
+  if (room && !silent && callSoundsOn()) playLeave();
+  peopleHere = null;
   resetRemote();
   unwatched.clear();
   if (rec) stopRecording();

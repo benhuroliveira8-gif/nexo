@@ -34,6 +34,9 @@ function normalizeChannelName(name) {
     .slice(0, 100);
 }
 
+// Descrição/regras de um fórum (aparece no topo da lista de posts).
+const cleanTopic = (v) => String(v || '').replace(/\r\n/g, '\n').trim().slice(0, 500) || null;
+
 // Nome livre (threads e categorias): com espaços e maiúsculas, uma linha.
 const cleanFreeName = (name, max = 100) => String(name || '').replace(/\s+/g, ' ').trim().slice(0, max);
 
@@ -98,7 +101,7 @@ async function serverDetail(serverId, userId) {
       [serverId],
     ),
     db.query(
-      `SELECT u.id, u.username, u.display_name, u.is_bot, u.avatar_id, u.status, u.status_text, m.timeout_until FROM users u
+      `SELECT u.id, u.username, u.display_name, u.is_bot, u.avatar_id, u.status, u.status_text, u.activity, u.profile_color, m.timeout_until FROM users u
        JOIN server_members m ON m.user_id = u.id
        WHERE m.server_id = $1 ORDER BY lower(u.display_name)`,
       [serverId],
@@ -138,12 +141,14 @@ async function serverDetail(serverId, userId) {
       ...presence.publicPresence(m),
       roleIds: rolesByUser.get(m.id) || [],
       timeoutUntil: m.timeout_until && new Date(m.timeout_until) > now ? m.timeout_until : null,
+      profileColor: m.profile_color || null,
     })),
     roles: roles.rows.map(S.role),
     emojis: await emojis.listForServer(serverId),
     stickers: await assets.list('sticker', serverId),
     sounds: await assets.list('sound', serverId),
     ...(ctx.can(P.MANAGE_SERVER) ? { settings: { welcome: server.rows[0].welcome || null, automod: server.rows[0].automod || null } } : {}),
+    levelsEnabled: !!(server.rows[0].levels && server.rows[0].levels.enabled),
     voice: voice.statesForChannels(list.filter((c) => c.kind === 'voice').map((c) => c.id)),
     me: {
       permissions: ctx.perms,
@@ -189,7 +194,7 @@ async function nextPosition(client, serverId, categoryId, isCategory) {
     ? await client.query("SELECT COALESCE(MAX(position), -1) + 1 AS p FROM channels WHERE server_id = $1 AND kind = 'category'", [serverId])
     : await client.query(
       `SELECT COALESCE(MAX(position), -1) + 1 AS p FROM channels
-       WHERE server_id = $1 AND kind IN ('text', 'voice') AND category_id IS NOT DISTINCT FROM $2`,
+       WHERE server_id = $1 AND kind IN ('text', 'voice', 'forum') AND category_id IS NOT DISTINCT FROM $2`,
       [serverId, categoryId],
     );
   return rows[0].p;
@@ -481,7 +486,7 @@ module.exports = function serverRoutes(r) {
 
   r.post('/servers/:id/channels', wrap(async (req, res) => {
     const ctx = await requireMember(req, P.MANAGE_CHANNELS);
-    const kind = ['voice', 'category'].includes(req.body.kind) ? req.body.kind : 'text';
+    const kind = ['voice', 'category', 'forum'].includes(req.body.kind) ? req.body.kind : 'text';
     const name = kind === 'category' ? cleanFreeName(req.body.name, 60) : normalizeChannelName(req.body.name);
     if (!name) fail(400, kind === 'category' ? 'Dê um nome à categoria.' : 'Dê um nome ao canal.');
     const { rows: count } = await db.query("SELECT count(*)::int AS n FROM channels WHERE server_id = $1 AND kind <> 'thread'", [ctx.serverId]);
@@ -493,9 +498,9 @@ module.exports = function serverRoutes(r) {
     const channel = await db.transaction(async (c) => {
       const position = await nextPosition(c, ctx.serverId, categoryId, kind === 'category');
       const { rows } = await c.query(
-        `INSERT INTO channels (server_id, name, kind, position, category_id, private)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-        [ctx.serverId, name, kind, position, categoryId, isPrivate],
+        `INSERT INTO channels (server_id, name, kind, position, category_id, private, topic)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+        [ctx.serverId, name, kind, position, categoryId, isPrivate, kind === 'forum' ? cleanTopic(req.body.topic) : null],
       );
       for (const roleId of roleIds) await c.query('INSERT INTO channel_roles (channel_id, role_id) VALUES ($1, $2)', [rows[0].id, roleId]);
       return rows[0];
@@ -539,13 +544,16 @@ module.exports = function serverRoutes(r) {
       if (name !== channel.name) changes.name = { from: channel.name, to: name };
       vals.push(name); sets.push(`name = $${vals.length}`);
     }
-    const canStructure = ctx.can(P.MANAGE_CHANNELS) && ['text', 'voice'].includes(channel.kind);
+    const canStructure = ctx.can(P.MANAGE_CHANNELS) && ['text', 'voice', 'forum'].includes(channel.kind);
     let roleIds = null;
     if (canStructure && b.private !== undefined) {
       vals.push(!!b.private); sets.push(`private = $${vals.length}`);
       if (!!b.private !== channel.private) changes.private = !!b.private;
     }
     if (canStructure && b.roleIds !== undefined) roleIds = await cleanRoleIds(channel.server_id, b.roleIds);
+    if (ctx.can(P.MANAGE_CHANNELS) && channel.kind === 'forum' && b.topic !== undefined) {
+      vals.push(cleanTopic(b.topic)); sets.push(`topic = $${vals.length}`);
+    }
     if (ctx.can(P.MANAGE_CHANNELS) && channel.kind === 'voice' && b.stage !== undefined) {
       vals.push(!!b.stage); sets.push(`stage = $${vals.length}`);
       if (!!b.stage !== channel.stage) changes.stage = !!b.stage;
@@ -582,7 +590,7 @@ module.exports = function serverRoutes(r) {
   // Corpo: { categoryId: id ou null, beforeId: id ou null }. Para categorias, só beforeId.
   r.post('/channels/:channelId/move', wrap(async (req, res) => {
     const { channel, ctx } = await channelForManage(req);
-    if (!ctx.can(P.MANAGE_CHANNELS) || !['text', 'voice', 'category'].includes(channel.kind)) fail(403, 'Você não pode mover esse canal.');
+    if (!ctx.can(P.MANAGE_CHANNELS) || !['text', 'voice', 'forum', 'category'].includes(channel.kind)) fail(403, 'Você não pode mover esse canal.');
     const isCategory = channel.kind === 'category';
     const categoryId = isCategory ? null : await categoryOf(channel.server_id, req.body.categoryId);
     const beforeId = req.body.beforeId ? parseId(req.body.beforeId) : null;
@@ -591,7 +599,7 @@ module.exports = function serverRoutes(r) {
       const { rows } = isCategory
         ? await c.query("SELECT id FROM channels WHERE server_id = $1 AND kind = 'category' ORDER BY position, id", [channel.server_id])
         : await c.query(
-          `SELECT id FROM channels WHERE server_id = $1 AND kind IN ('text', 'voice')
+          `SELECT id FROM channels WHERE server_id = $1 AND kind IN ('text', 'voice', 'forum')
              AND category_id IS NOT DISTINCT FROM $2 ORDER BY position, id`,
           [channel.server_id, categoryId],
         );

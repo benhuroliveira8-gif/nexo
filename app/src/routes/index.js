@@ -9,6 +9,7 @@ const botRoutes = require('./bots');
 const voiceRoutes = require('./voice');
 const eventRoutes = require('./events');
 const extraRoutes = require('./extras');
+const communityRoutes = require('./community');
 const assets = require('../assets');
 
 // Monta toda a API em /api.
@@ -31,6 +32,7 @@ module.exports = function buildApi() {
   voiceRoutes(r);
   eventRoutes(r);
   extraRoutes(r);
+  communityRoutes(r);
 
   r.use((req, res) => res.status(404).json({ error: 'Rota não encontrada.' }));
   return r;

@@ -76,6 +76,14 @@ Chat em tempo real no estilo de servidores e canais. Projeto pessoal, construíd
 - **Gravar a chamada** ⏺️ (só áudio, até 30 min, salva no seu aparelho; todos veem o aviso 🔴)
 - **Modo palco** 🎙️ num canal de voz: só fala quem modera ou quem for chamado; a plateia levanta a mão ✋. Nova permissão *Moderar palco*
 - Para o dono: **boas-vindas** (cargo automático + mensagem), **moderação automática** (palavras bloqueadas e anti-spam com castigo), **estatísticas** e **exportar conversa** (📥 HTML, TXT ou JSON)
+- **Fóruns** 💬: tipo de canal em que cada post vira um tópico com respostas (título, mensagem e imagens). Busca, ordenar por atividade/novos, ✅ *resolvido* (quem postou) e 📌 *fixar* (moderação)
+- **Perfis mais ricos**: capa (banner), cor do perfil, **"Jogando agora"** (aparece na lista de membros) e **insígnias**: 👑 fundador do servidor, 🔥 mais ativo do mês, 🏆 top 3 de níveis, 🚀 pioneiro, 🎖️ veterano, 🛠️ criador de bots
+- **Níveis e XP** ⭐ (opcional, Configurações do servidor → *Níveis*): 15–25 XP por mensagem (1 vez por minuto), aviso ao subir, **cargos automáticos por nível** e 🏆 ranking
+- **Comandos de barra** ⚡: `/dado 2d6`, `/moeda`, `/sortear pizza, lanche` (ou sem nada: sorteia alguém), `/enquete Pergunta? | A | B`, `/nivel`, `/ranking`, `/shrug` — e os bots podem criar os deles
+- **"Não perturbe" agendado** 🌙 (⚙️ → *Notificações e app*): ex. das 23h às 7h, sem push, sem som de mensagem e sem toque de ligação
+- **Leitura em voz alta** 🔈 (botão no topo do canal): o Nexo lê as mensagens novas, bom para jogar sem olhar a tela. Voz e velocidade em ⚙️ → *Voz e vídeo*
+- **Sons da chamada** 🔔: som ao entrar e ao sair, **toque de celular** (marimba) quando te ligam e **"chamando…"** para quem liga (tu-tu-tu se recusar)
+- **App instalável melhorado** 📲: segure o ícone do Nexo para os **atalhos** (Mensagens, Amigos, Salvas, Último servidor) e, na galeria do celular, **Compartilhar → Nexo** para mandar fotos direto para uma conversa
 
 ## Como rodar (no servidor Ubuntu com Docker)
 
@@ -146,6 +154,11 @@ Para programar o seu: edite `examples/bot-exemplo/index.js` (cada comando é uma
 | POST | `/api/channels/:id/messages` | Envia `{ content }` (ou uma enquete: `{ content, poll: { question, options: ["a","b"], multiple, hours } }`) |
 | PATCH/DELETE | `/api/messages/:id` | Edita/apaga as próprias mensagens |
 | PUT/DELETE | `/api/messages/:id/reactions/:emoji` | Reage |
+
+**Comandos de barra do bot**: registre com `PUT /api/commands` `{ "commands": [{ "name": "clima", "description": "Previsão do tempo" }] }`
+(até 25; nomes com letras minúsculas, números, `_` ou `-`). Quando alguém usa `/clima São Paulo`, o bot recebe pelo
+Socket.IO o evento `command` com `{ name, args, messageId, channelId, serverId, user }` e responde com
+`POST /api/channels/:channelId/messages` `{ content, replyToId: messageId }`.
 
 Tempo real: conecte no Socket.IO com `auth: { token: "Bot <token>" }` e escute `message:new`,
 `message:updated`, `message:deleted`, `message:reactions`, `message:poll`, `presence`.

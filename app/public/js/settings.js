@@ -6,6 +6,7 @@ import {
 import { state, P, PERMISSION_INFO, can, isOwner, myTop, memberRoles, memberTop } from './state.js';
 import { sortable } from './sortable.js';
 import { renderAssets, renderWelcome, renderAutomod, renderStats, canSeeStats } from './serverx.js';
+import { renderLevels } from './levelsui.js';
 
 const PRESET_COLORS = ['#ff7a45', '#f5c542', '#3ecf8e', '#2ec4b6', '#4d9fff', '#7c6cff', '#c86bfa', '#ff5c8a', '#ff5c6c', '#a7adbb'];
 
@@ -49,7 +50,7 @@ function tabsAvailable() {
   if (can(P.MANAGE_ROLES)) tabs.push(['roles', 'Cargos']);
   if (can(P.MANAGE_ROLES) || can(P.KICK_MEMBERS) || can(P.BAN_MEMBERS) || can(P.MODERATE_MEMBERS)) tabs.push(['members', 'Membros']);
   if (can(P.MANAGE_EMOJIS)) tabs.push(['emojis', 'Emojis'], ['stickers', 'Figurinhas'], ['sounds', 'Sons']);
-  if (can(P.MANAGE_SERVER)) tabs.push(['welcome', 'Boas-vindas'], ['automod', 'Moderação automática']);
+  if (can(P.MANAGE_SERVER)) tabs.push(['welcome', 'Boas-vindas'], ['automod', 'Moderação automática'], ['levels', 'Níveis']);
   if (canSeeStats()) tabs.push(['stats', 'Estatísticas']);
   if (can(P.CREATE_INVITE)) tabs.push(['invites', 'Convites']);
   if (can(P.BAN_MEMBERS)) tabs.push(['bans', 'Banimentos']);
@@ -71,7 +72,7 @@ function render() {
 
   const pages = {
     emojis: renderEmojis, roles: renderRoles, members: renderMembersTab, invites: renderInvites, bans: renderBans, audit: renderAudit, overview: renderOverview,
-    stickers: () => renderAssets('sticker'), sounds: () => renderAssets('sound'), welcome: renderWelcome, automod: renderAutomod,
+    stickers: () => renderAssets('sticker'), sounds: () => renderAssets('sound'), welcome: renderWelcome, automod: renderAutomod, levels: renderLevels,
     stats: () => renderStats({ cache: ui.cache, rerender: render }),
   };
   const content = (pages[ui.tab] || renderOverview)();
@@ -693,6 +694,8 @@ function describe(e) {
     case 'sound_delete': return [`apagou o som ${t}`];
     case 'welcome_update': return ['mudou as boas-vindas', [x.enabled ? 'mensagem ligada' : 'mensagem desligada', x.roleId ? 'com cargo automático' : ''].filter(Boolean).join(' · ')];
     case 'automod_update': return ['mudou a moderação automática', [`${x.words || 0} palavra(s) bloqueada(s)`, x.spam ? 'anti-spam ligado' : 'anti-spam desligado'].join(' · ')];
+    case 'levels_update': return ['mudou os níveis', [x.enabled ? 'níveis ligados' : 'níveis desligados', x.rewards ? `${x.rewards} recompensa(s)` : ''].filter(Boolean).join(' · ')];
+    case 'levels_reset': return ['zerou o XP de todo mundo', ''];
     case 'automod_timeout': return [`castigou ${who} por ${mins(x.minutes)}`, x.reason ? `Motivo: ${x.reason}` : ''];
     case 'event_create': return [`criou o evento ${t}`];
     default: return [e.action];
@@ -706,7 +709,7 @@ const AUDIT_ICONS = {
   invite_create: '✉️', invite_delete: '✉️', message_delete: '🗑️', bot_add: '🤖',
   emoji_create: '😺', emoji_update: '😺', emoji_delete: '😺',
   sticker_create: '🏷️', sticker_delete: '🏷️', sound_create: '🎵', sound_delete: '🎵',
-  welcome_update: '👋', automod_update: '🛡️', automod_timeout: '🤖',
+  welcome_update: '👋', automod_update: '🛡️', automod_timeout: '🤖', levels_update: '⭐', levels_reset: '⭐',
 };
 
 function renderAudit() {

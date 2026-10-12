@@ -112,6 +112,12 @@ async function sendOne(sub, payload, keys) {
 // payload: { title, body, url, tag }
 async function sendToUsers(userIds, payload) {
   if (!userIds.length) return;
+  // "Não perturbe" agendado (ex.: 23h às 7h): ninguém é acordado. O teste sempre chega.
+  if (payload.tag !== 'teste') {
+    // eslint-disable-next-line global-require
+    userIds = await require('./profile').notQuiet(userIds);
+    if (!userIds.length) return;
+  }
   const { rows } = await db.query('SELECT * FROM push_subscriptions WHERE user_id = ANY($1::int[])', [userIds]);
   if (!rows.length) return;
   const keys = await loadKeys();

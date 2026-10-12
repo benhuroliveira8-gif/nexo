@@ -10,7 +10,7 @@ const { channelAccess } = require('../permissions');
 const { wrap, fail, parseId, channelStates } = require('./util');
 
 const MAX_GROUP = 10; // pessoas num grupo (contando você)
-const U_COLS = 'u.id, u.username, u.display_name, u.is_bot, u.avatar_id, u.status, u.status_text';
+const U_COLS = 'u.id, u.username, u.display_name, u.is_bot, u.avatar_id, u.status, u.status_text, u.activity';
 
 const dmsChanged = (userIds) => events.emitTo(userIds.map((id) => `user:${id}`), 'dms:changed', {});
 
@@ -63,7 +63,7 @@ module.exports = function socialRoutes(r) {
 
   r.get('/friends', wrap(async (req, res) => {
     const { rows } = await db.query(
-      `SELECT f.status AS friendship_status, f.requester_id, u.id, u.username, u.display_name, u.is_bot, u.avatar_id, u.status, u.status_text
+      `SELECT f.status AS friendship_status, f.requester_id, u.id, u.username, u.display_name, u.is_bot, u.avatar_id, u.status, u.status_text, u.activity
        FROM friendships f
        JOIN users u ON u.id = CASE WHEN f.requester_id = $1 THEN f.addressee_id ELSE f.requester_id END
        WHERE f.requester_id = $1 OR f.addressee_id = $1
@@ -285,7 +285,7 @@ module.exports = function socialRoutes(r) {
   r.post('/dms', wrap(async (req, res) => {
     const otherId = parseId(req.body.userId);
     if (!otherId || otherId === req.userId) fail(400, 'Escolha outra pessoa.');
-    const { rows: users } = await db.query('SELECT id, username, display_name, is_bot, avatar_id, status, status_text FROM users WHERE id = $1', [otherId]);
+    const { rows: users } = await db.query('SELECT id, username, display_name, is_bot, avatar_id, status, status_text, activity FROM users WHERE id = $1', [otherId]);
     if (!users[0]) fail(404, 'Usuário não encontrado.');
 
     const key = [req.userId, otherId].sort((a, b) => a - b).join(':');

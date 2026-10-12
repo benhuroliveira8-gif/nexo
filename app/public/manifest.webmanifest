@@ -10,8 +10,102 @@
   "background_color": "#0f1115",
   "theme_color": "#0f1115",
   "icons": [
-    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
-  ]
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "id": "/",
+  "shortcuts": [
+    {
+      "name": "Mensagens diretas",
+      "short_name": "Mensagens",
+      "description": "Abrir suas conversas",
+      "url": "/?atalho=conversas",
+      "icons": [
+        {
+          "src": "/icons/shortcut-dms.png",
+          "sizes": "96x96",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Amigos",
+      "short_name": "Amigos",
+      "description": "Ver quem está online",
+      "url": "/?atalho=amigos",
+      "icons": [
+        {
+          "src": "/icons/shortcut-friends.png",
+          "sizes": "96x96",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Salvas e lembretes",
+      "short_name": "Salvas",
+      "description": "Mensagens salvas, lembretes e agendadas",
+      "url": "/?atalho=salvas",
+      "icons": [
+        {
+          "src": "/icons/shortcut-saved.png",
+          "sizes": "96x96",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Último servidor",
+      "short_name": "Servidor",
+      "description": "Voltar para o último servidor aberto",
+      "url": "/?atalho=servidor",
+      "icons": [
+        {
+          "src": "/icons/shortcut-server.png",
+          "sizes": "96x96",
+          "type": "image/png"
+        }
+      ]
+    }
+  ],
+  "share_target": {
+    "action": "/compartilhar",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url",
+      "files": [
+        {
+          "name": "files",
+          "accept": [
+            "image/*",
+            "video/*",
+            "audio/*",
+            "application/pdf",
+            ".pdf",
+            ".txt",
+            ".zip"
+          ]
+        }
+      ]
+    }
+  }
 }

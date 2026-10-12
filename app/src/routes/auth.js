@@ -8,9 +8,10 @@ const totp = require('../totp');
 const voice = require('../voice');
 const push = require('../push');
 const gifs = require('../gifs');
+const profile = require('../profile');
 const { wrap, fail, parseId } = require('./util');
 
-const USER_COLS = 'id, username, display_name, is_bot, avatar_id, status, status_text, status_expires_at, about, totp_enabled, token_version';
+const USER_COLS = 'id, username, display_name, is_bot, avatar_id, status, status_text, status_expires_at, about, totp_enabled, token_version, banner_id, profile_color, activity, dnd_schedule';
 
 // Código de convite para criar conta (opcional). Útil quando o Nexo fica
 // aberto na internet: sem o código, ninguém de fora consegue se cadastrar.
@@ -203,10 +204,30 @@ function meRoutes(r) {
       expires = d.toISOString();
     }
     if (!statusText) expires = null;
+    // Perfil mais rico: cor do perfil, "jogando agora" e horário de silêncio.
+    let color = u.profile_color;
+    if (b.profileColor !== undefined) color = profile.cleanColor(b.profileColor, fail);
+    let activity = u.activity;
+    if (b.activity !== undefined) activity = profile.cleanActivity(b.activity, u.activity, fail);
+    let dnd = u.dnd_schedule;
+    if (b.dndSchedule !== undefined) dnd = profile.cleanDndSchedule(b.dndSchedule, fail);
     const { rows } = await db.query(
-      `UPDATE users SET display_name = $2, status = $3, status_text = $4, about = $5, status_expires_at = $6 WHERE id = $1 RETURNING ${USER_COLS}`,
-      [req.userId, displayName, status, statusText, about, expires],
+      `UPDATE users SET display_name = $2, status = $3, status_text = $4, about = $5, status_expires_at = $6,
+         profile_color = $7, activity = $8, dnd_schedule = $9 WHERE id = $1 RETURNING ${USER_COLS}`,
+      [req.userId, displayName, status, statusText, about, expires, color,
+        activity ? JSON.stringify(activity) : null, dnd ? JSON.stringify(dnd) : null],
     );
+    await profileChanged(req.userId);
+    res.json({ user: S.me(rows[0]) });
+  }));
+
+  r.delete('/me/banner', auth.humansOnly, wrap(async (req, res) => {
+    const { rows } = await db.query(
+      `UPDATE users u SET banner_id = NULL FROM users old WHERE u.id = $1 AND old.id = u.id
+       RETURNING old.banner_id AS previous, ${USER_COLS.split(', ').map((c) => `u.${c}`).join(', ')}`,
+      [req.userId],
+    );
+    if (rows[0]?.previous) files.removeAvatar(rows[0].previous);
     await profileChanged(req.userId);
     res.json({ user: S.me(rows[0]) });
   }));
@@ -227,7 +248,8 @@ function meRoutes(r) {
   r.get('/users/:userId/profile', wrap(async (req, res) => {
     const id = parseId(req.params.userId);
     const { rows } = id ? await db.query(
-      `SELECT u.id, u.username, u.display_name, u.is_bot, u.avatar_id, u.about, u.created_at FROM users u
+      `SELECT u.id, u.username, u.display_name, u.is_bot, u.avatar_id, u.about, u.created_at, u.status, u.status_text,
+              u.banner_id, u.profile_color, u.activity FROM users u
        WHERE u.id = $1 AND ($1 = $2
          OR EXISTS (SELECT 1 FROM server_members x JOIN server_members y ON y.server_id = x.server_id WHERE x.user_id = $1 AND y.user_id = $2)
          OR EXISTS (SELECT 1 FROM dm_members x JOIN dm_members y ON y.channel_id = x.channel_id WHERE x.user_id = $1 AND y.user_id = $2)
@@ -240,11 +262,18 @@ function meRoutes(r) {
        JOIN server_members y ON y.server_id = s.id AND y.user_id = $2 ORDER BY s.name LIMIT 20`,
       [id, req.userId],
     );
+    const serverId = req.query.serverId ? parseId(req.query.serverId) : null;
+    const pres = presence.publicPresence(rows[0]);
     res.json({
       user: S.user(rows[0]),
       about: rows[0].about || null,
       createdAt: rows[0].created_at,
       mutualServers: id === req.userId ? [] : mutual.rows,
+      bannerUrl: S.avatarUrl(rows[0].banner_id),
+      profileColor: rows[0].profile_color || null,
+      activity: id === req.userId ? (rows[0].activity || null) : pres.activity,
+      badges: await profile.badgesFor(rows[0], serverId, req.userId),
+      level: serverId ? await profile.levelInfo(serverId, id, req.userId) : null,
     });
   }));
 
@@ -345,7 +374,7 @@ function meRoutes(r) {
       [req.userId],
     );
     const bots = await db.query('SELECT id, avatar_id FROM users WHERE bot_owner_id = $1', [req.userId]);
-    const me = await db.query('SELECT avatar_id FROM users WHERE id = $1', [req.userId]);
+    const me = await db.query('SELECT avatar_id, banner_id FROM users WHERE id = $1', [req.userId]);
     voice.leave(req.userId);
     disconnectEverywhere(req.userId);
     bots.rows.forEach((b) => disconnectEverywhere(b.id));
@@ -365,6 +394,7 @@ function meRoutes(r) {
       );
     });
     [me.rows[0], ...bots.rows].forEach((u) => { if (u && u.avatar_id) files.removeAvatar(u.avatar_id); });
+    if (me.rows[0] && me.rows[0].banner_id) files.removeAvatar(me.rows[0].banner_id);
     servers.rows.forEach((s) => events.serverChanged(s.server_id));
     events.friendsChanged(...friends);
     events.emitTo(partners.rows.map((p) => `user:${p.user_id}`), 'dms:changed', {});

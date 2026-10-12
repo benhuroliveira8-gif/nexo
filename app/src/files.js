@@ -91,8 +91,33 @@ function uploadRouter(requireAuth) {
         const { rows } = await db.query(
           `UPDATE users u SET avatar_id = $2 FROM users old
            WHERE u.id = $1 AND old.id = u.id
-           RETURNING old.avatar_id AS previous, u.id, u.username, u.display_name, u.is_bot,
-                     u.avatar_id, u.status, u.status_text, u.about, u.totp_enabled`,
+           RETURNING old.avatar_id AS previous, u.*`,
+          [req.userId, id],
+        );
+        if (rows[0]?.previous) removeAvatar(rows[0].previous);
+        res.json({ user: S.me(rows[0]) });
+        avatarChanged(req.userId);
+      } catch (err) {
+        next(err);
+      }
+    });
+
+  // Capa do perfil (banner): imagem crua, o navegador já reduz para 960x384.
+  r.post('/me/banner',
+    requireAuth,
+    express.raw({ type: 'application/octet-stream', limit: AVATAR_MAX }),
+    async (req, res, next) => {
+      try {
+        if (req.isBot) return res.status(403).json({ error: 'Bots não podem fazer isso.' });
+        const data = req.body;
+        const ext = Buffer.isBuffer(data) && imageExt(data);
+        if (!ext) return res.status(400).json({ error: 'Envie uma imagem PNG, JPG, GIF ou WEBP.' });
+        const id = `${crypto.randomBytes(12).toString('hex')}.${ext}`;
+        await fs.promises.writeFile(path.join(AVATAR_DIR, id), data);
+        const { rows } = await db.query(
+          `UPDATE users u SET banner_id = $2 FROM users old
+           WHERE u.id = $1 AND old.id = u.id
+           RETURNING old.banner_id AS previous, u.*`,
           [req.userId, id],
         );
         if (rows[0]?.previous) removeAvatar(rows[0].previous);

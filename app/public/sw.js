@@ -1,11 +1,13 @@
 // Service worker do Nexo: deixa o app instalável, abre mais rápido e mostra
 // as notificações push mesmo com o Nexo fechado.
-const CACHE = 'nexo-v12';
+const CACHE = 'nexo-v13';
+const SHARE_CACHE = 'nexo-share'; // o que foi compartilhado da galeria espera aqui até o app abrir
 const SHELL = [
   '/', '/styles.css', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/badge-96.png',
   '/js/main.js', '/js/util.js', '/js/state.js', '/js/home.js', '/js/settings.js', '/js/emoji.js',
   '/js/voice.js', '/js/developer.js', '/js/markdown.js', '/js/theme.js', '/js/pwa.js', '/js/qr.js',
-  '/js/sortable.js', '/js/account.js', '/js/extras.js', '/socket.io/socket.io.js',
+  '/js/sortable.js', '/js/account.js', '/js/extras.js', '/js/forum.js', '/js/commands.js', '/js/tts.js',
+  '/js/profile.js', '/js/callsounds.js', '/js/levelsui.js', '/js/share.js', '/socket.io/socket.io.js',
 ];
 
 self.addEventListener('install', (event) => {
@@ -15,7 +17,7 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
-    for (const key of await caches.keys()) if (key !== CACHE) await caches.delete(key);
+    for (const key of await caches.keys()) if (key !== CACHE && key !== SHARE_CACHE) await caches.delete(key);
     await self.clients.claim();
   })());
 });
@@ -23,8 +25,35 @@ self.addEventListener('activate', (event) => {
 // Sempre tenta a rede primeiro (assim uma atualização do Nexo aparece na hora);
 // o cache só é usado quando a internet cai.
 const NEVER_CACHE = /^\/(api|files|avatars|link-image|vendor)\/|^\/socket\.io\/(?!socket\.io\.js)/;
+// "Compartilhar → Nexo" na galeria do celular: o sistema manda um POST com as fotos.
+// Guardamos tudo e abrimos o app, que pergunta para qual conversa mandar.
+async function receiveShare(request) {
+  try {
+    const form = await request.formData();
+    const cache = await caches.open(SHARE_CACHE);
+    for (const key of await cache.keys()) await cache.delete(key);
+    const files = form.getAll('files').filter((f) => f && typeof f === 'object' && f.size > 0).slice(0, 10);
+    const meta = {
+      at: Date.now(),
+      title: String(form.get('title') || '').slice(0, 300),
+      text: String(form.get('text') || '').slice(0, 2000),
+      url: String(form.get('url') || '').slice(0, 2000),
+      files: files.map((f, i) => ({ key: `/compartilhado/${i}`, name: f.name || `arquivo-${i + 1}`, type: f.type || 'application/octet-stream', size: f.size })),
+    };
+    await Promise.all(files.map((f, i) => cache.put(`/compartilhado/${i}`, new Response(f, { headers: { 'Content-Type': f.type || 'application/octet-stream' } }))));
+    await cache.put('/compartilhado/meta', new Response(JSON.stringify(meta), { headers: { 'Content-Type': 'application/json' } }));
+    return Response.redirect('/?compartilhar=1', 303);
+  } catch {
+    return Response.redirect('/?compartilhar=falhou', 303);
+  }
+}
+
 self.addEventListener('fetch', (event) => {
   const req = event.request;
+  if (req.method === 'POST' && new URL(req.url).pathname === '/compartilhar') {
+    event.respondWith(receiveShare(req));
+    return;
+  }
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin || NEVER_CACHE.test(url.pathname)) return;

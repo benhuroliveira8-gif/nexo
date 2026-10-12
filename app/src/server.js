@@ -81,6 +81,10 @@ app.get('/vendor/livekit-client.js', (req, res) => {
 // Frontend (arquivos estáticos). Qualquer outra rota devolve o index.html
 // (assim links como /convite/abc123 funcionam).
 const publicDir = path.join(__dirname, '..', 'public');
+// Compartilhar foto da galeria direto para o Nexo (app instalado): quem recebe é o
+// service worker. Se ele ainda não estiver ativo, o pedido chega aqui e só volta para o app.
+app.post('/compartilhar', (req, res) => res.redirect(303, '/?compartilhar=falhou'));
+
 app.use(express.static(publicDir));
 app.get('*', (req, res) => res.sendFile(path.join(publicDir, 'index.html')));
 
