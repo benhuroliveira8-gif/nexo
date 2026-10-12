@@ -53,7 +53,7 @@ module.exports = function messageRoutes(r) {
     const before = parseBigId(req.query.before || '');
     const { rows } = await db.query(
       `${M.SELECT_MESSAGE}
-       WHERE msg.channel_id = $1 AND ($2::bigint IS NULL OR msg.id < $2::bigint)
+       WHERE msg.channel_id = $1 AND ($2::bigint IS NULL OR msg.id < $2::bigint) AND (msg.expires_at IS NULL OR msg.expires_at > now())
        ORDER BY msg.id DESC
        LIMIT $3`,
       [channelId, before, PAGE_SIZE],

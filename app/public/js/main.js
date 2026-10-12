@@ -49,6 +49,11 @@ import {
   registerServiceWorker, syncPushAfterLogin, forgetPushOnLogout, pushStatus, canPromptInstall, promptInstall, onPwaChange,
 } from './pwa.js';
 import { sortable } from './sortable.js';
+import {
+  initComunidade, applyServerTheme, maybeOnboarding, onboardingBlocked, openOnboarding, disappearButton, expiresMark,
+  loadFolders, setFolders, railNodes, canReport, reportDialog, loadReportCount, wireReportsSocket, reportsSidebarItem, openReportsPanel,
+} from './comunidade.js';
+import { initClips } from './clips.js';
 
 const isVisible = () => document.visibilityState === 'visible';
 let tempSeq = 0;
@@ -290,7 +295,7 @@ async function start(user) {
   if (storage('nexo.hideMembers') === '1') $('#app').classList.add('no-members');
 
   connectSocket();
-  await Promise.all([loadServers(), loadDms(), loadFriends(), loadMyEmojis()]);
+  await Promise.all([loadServers(), loadDms(), loadFriends(), loadMyEmojis(), loadFolders()]);
 
   const savedView = storage('nexo.view');
   const savedServer = state.servers.find((s) => String(s.id) === savedView);
@@ -474,6 +479,9 @@ function setDetail(detail, replay) {
   replay.forEach((fn) => fn());
   state.detailVersion++;
   syncServerFromDetail();
+  applyServerTheme();
+  loadReportCount(detail.server.id);
+  setTimeout(maybeOnboarding, 0);
   // Castigo acabando: recarrega na hora certa para liberar o envio.
   clearTimeout(timeoutTimer);
   if (detail.me.timeoutUntil) {
@@ -575,6 +583,8 @@ function connectSocket() {
 
   wireEventSocket(socket);
   wireMoreSocket(socket);
+  wireReportsSocket(socket);
+  socket.on('folders:changed', ({ folders }) => setFolders(folders));
   socket.on('voice:sound', (data) => playSoundEvent(data, memberById(data.userId) || freshUser({ id: data.userId })));
   socket.on('stage:role', (data) => onStageRole(data));
 
@@ -801,6 +811,7 @@ async function goHome(channelId = null) {
   if (!channelId) discardVoiceOnSwitch();
   state.view = 'home';
   state.detail = null;
+  applyServerTheme();
   storage('nexo.view', 'home');
   closeServerSettings();
   if (channelId) return selectChannel(channelId);
@@ -824,6 +835,32 @@ initMore({
     else if (!r.serverId && state.view !== 'home') await goHome(r.channelId);
     jumpToMessage(r.channelId, r.messageId);
   },
+});
+
+initComunidade({
+  refreshDetail: () => refreshDetail(),
+  renderRail: () => renderRail(),
+  renderSidebar: () => { if (state.detail) renderSidebar(); },
+  renderComposer: () => renderComposerState(),
+  jumpTo: async (r) => {
+    if (r.serverId && state.view !== r.serverId) await selectServer(r.serverId, r.channelId);
+    jumpToMessage(r.channelId, r.messageId);
+  },
+});
+
+initClips({
+  // O canal de clipes do servidor da chamada (só quando é o servidor aberto).
+  clipsChannel: () => {
+    const vs = voiceState();
+    if (!vs.serverId || !state.detail || state.detail.server.id !== vs.serverId) return null;
+    return state.detail.channels.find((c) => c.kind === 'text' && c.isClips) || null;
+  },
+  send: (channelId, content, attachmentIds) => new Promise((resolve, reject) => {
+    state.socket.timeout(15000).emit('message:send', { channelId, content, attachmentIds, nonce: `clip-${Date.now()}` }, (err, res) => {
+      if (err || !res || !res.ok) reject(new Error((res && res.error) || 'Não foi possível enviar o clipe.'));
+      else resolve(res.message);
+    });
+  }),
 });
 
 initEvents({
@@ -933,14 +970,7 @@ function renderRail() {
   home.classList.toggle('active', state.view === 'home');
   home.querySelector('.badge-slot').replaceChildren(badge(homeCount) || '');
 
-  $('#server-list').replaceChildren(...state.servers.map((s) => {
-    const btn = h('button', {
-      class: `rail-btn${s.id === state.view ? ' active' : ''}${s.unread ? ' unread' : ''}${s.iconUrl ? ' has-icon' : ''}`,
-      title: s.name,
-      onclick: () => selectServer(s.id),
-    }, serverIcon(s), h('span', { class: 'badge-slot' }, badge(s.mentions) || ''));
-    return btn;
-  }));
+  $('#server-list').replaceChildren(...railNodes({ servers: state.servers, view: state.view, badge, select: (id) => selectServer(id) }));
 }
 
 // ---------------------------------------------------------------- Barra lateral
@@ -995,6 +1025,7 @@ function renderSidebar() {
             h('span', { class: 'truncate' }, dmName(d)),
             d.isGroup ? h('span', { class: 'dm-sub muted truncate' }, `${d.users.length + 1} pessoas`) : null),
           d.voice && d.voice.length ? h('span', { class: 'call-dot', title: 'Chamada em andamento' }, '📞') : null,
+          d.disappearingSeconds ? h('span', { class: 'disappear-dot', title: 'Mensagens temporárias ligadas' }, '⏳') : null,
           badge(d.mentions))))),
     );
     return;
@@ -1087,11 +1118,11 @@ function renderSidebar() {
       h('button', {
         class: `side-item channel${c.id === state.channelId ? ' active' : ''}${c.unread ? ' unread' : ''}`,
         onclick: () => selectChannel(c.id),
-      }, h('span', { class: 'hash', title: c.announce ? 'Canal de anúncios' : null }, c.announce ? '📢' : '#'), h('span', { class: 'truncate' }, c.name), c.private ? lockIcon() : null, badge(c.mentions)),
+      }, h('span', { class: 'hash', title: c.announce ? 'Canal de anúncios' : c.isClips ? 'Canal de clipes' : null }, c.announce ? '📢' : c.isClips ? '🎬' : '#'), h('span', { class: 'truncate' }, c.name), c.private ? lockIcon() : null, badge(c.mentions)),
       gear(c)), ...threadsOf(c.id).map(threadRow)];
   };
 
-  const blocks = [eventsSidebarItem(state.detail.server.id), rankingSidebarItem(state.detail.server.id)].filter(Boolean);
+  const blocks = [eventsSidebarItem(state.detail.server.id), rankingSidebarItem(state.detail.server.id), reportsSidebarItem(state.detail.server.id)].filter(Boolean);
   // Canais sem categoria ficam no topo.
   const loose = listed.filter((c) => !c.categoryId || !catIds.has(c.categoryId));
   blocks.push(h('ul', { class: 'side-list cat-body', dataset: { categoryId: '' } }, loose.flatMap(channelRow),
@@ -1253,7 +1284,7 @@ function renderHeader() {
   } else if (channel && channel.kind === 'forum') {
     title.replaceChildren(...[h('span', { class: 'hash' }, '💬'), h('span', { class: 'truncate' }, channel.name), channel.private ? lockIcon() : null].filter(Boolean));
   } else {
-    title.replaceChildren(...[h('span', { class: 'hash' }, channel && channel.kind === 'voice' ? (channel.stage ? '🎙️' : '🔊') : channel && channel.announce ? '📢' : '#'), h('span', { class: 'truncate' }, channel ? channel.name : ''),
+    title.replaceChildren(...[h('span', { class: 'hash' }, channel && channel.kind === 'voice' ? (channel.stage ? '🎙️' : '🔊') : channel && channel.announce ? '📢' : channel && channel.isClips ? '🎬' : '#'), h('span', { class: 'truncate' }, channel ? channel.name : ''),
       channel && channel.private ? lockIcon() : null].filter(Boolean));
   }
   if (dm) {
@@ -1265,6 +1296,7 @@ function renderHeader() {
         h('button', { class: 'icon-btn call-btn', title: 'Chamada de vídeo', onclick: () => startDmCall(dm, true) }, '📹'),
       );
     }
+    actions.append(disappearButton(dm));
     actions.append(h('button', { class: 'icon-btn mobile-hide', title: 'Adicionar pessoas', onclick: () => addToGroupDialog(dm) }, '➕👤'));
     if (dm.isGroup) {
       actions.append(h('button', { class: 'icon-btn', title: 'Opções do grupo', onclick: (e) => groupMenu(e.currentTarget, dm) }, '⋯'));
@@ -1515,7 +1547,9 @@ function renderMessages({ stick = 'if-near' } = {}) {
 
   const view = `${state.detailVersion}|${state.view}|${effectiveTheme()}`;
   let prev = null;
+  const now = Date.now();
   for (const m of bucket.items) {
+    if (m.expiresAt && new Date(m.expiresAt).getTime() <= now) continue; // já sumiu
     const date = new Date(m.createdAt);
     const newDay = !prev || new Date(prev.createdAt).toDateString() !== date.toDateString();
     if (newDay) {
@@ -1636,7 +1670,8 @@ function buildMessage(m, grouped) {
       state.view !== 'home' ? roleIconTag(m.author.id) : null,
       m.author.isBot ? botTag() : null,
       h('span', { class: 'msg-time', title: fullTime(date) }, fullTime(date)),
-      m.pinnedAt ? h('span', { class: 'pin-mark', title: 'Mensagem fixada' }, '📌') : null));
+      m.pinnedAt ? h('span', { class: 'pin-mark', title: 'Mensagem fixada' }, '📌') : null,
+      expiresMark(m)));
   } else if (m.pinnedAt) {
     body.append(h('span', { class: 'pin-mark floating', title: 'Mensagem fixada' }, '📌'));
   }
@@ -1709,6 +1744,7 @@ function buildMessage(m, grouped) {
     }
     if (canPin()) tools.push(h('button', { class: 'tool', title: m.pinnedAt ? 'Desafixar' : 'Fixar', onclick: () => togglePin(m) }, m.pinnedAt ? '📍' : '📌'));
     if (mine) tools.push(h('button', { class: 'tool', title: 'Editar', onclick: () => startEdit(m) }, '✏️'));
+    if (canReport(m)) tools.push(h('button', { class: 'tool report-tool', title: 'Denunciar para a moderação', onclick: () => reportDialog(m) }, '🚩'));
     if (canDelete(m)) tools.push(h('button', { class: 'tool danger', title: 'Apagar (Shift+clique apaga direto)', onclick: (e) => deleteMessage(m, e.shiftKey) }, '🗑️'));
     if (tools.length) el.append(h('div', { class: 'msg-tools' }, tools));
   }
@@ -1870,14 +1906,23 @@ function renderComposerState() {
   $('#composer-area').hidden = !show;
   if (!show) return;
   const announceOnly = !!(ch && ch.kind === 'text' && ch.announce && !can(P.MANAGE_MESSAGES));
-  const allowed = can(P.SEND_MESSAGES) && !announceOnly;
+  const needsRules = onboardingBlocked();
+  const allowed = can(P.SEND_MESSAGES) && !announceOnly && !needsRules;
   input.disabled = !allowed;
   $('#composer').classList.toggle('disabled', !allowed);
   $('#btn-attach').hidden = !allowed;
   const dm = currentDm();
   const channel = currentChannel();
   const timeout = state.view !== 'home' && state.detail && state.detail.me.timeoutUntil;
-  input.placeholder = timeout
+  $('#composer-area').classList.toggle('needs-rules', needsRules);
+  let gate = $('#rules-gate');
+  if (needsRules && !gate) {
+    gate = h('button', { id: 'rules-gate', class: 'btn primary small rules-gate', onclick: () => openOnboarding() }, '📜 Ler as regras e começar a conversar');
+    $('#composer-area').prepend(gate);
+  } else if (!needsRules && gate) gate.remove();
+  input.placeholder = needsRules
+    ? 'Leia e aceite as regras do servidor para conversar.'
+    : timeout
     ? `Você está de castigo até ${fullTime(new Date(timeout)).replace(/^Hoje às /, '')} e só pode ler.`
     : announceOnly
       ? '📢 Canal de anúncios: só a moderação escreve. Reaja ou comente numa thread 🧵.'
@@ -2670,6 +2715,9 @@ function openServerMenu(anchor) {
     { label: '😺  Emojis, figurinhas e sons', hidden: !can(P.MANAGE_EMOJIS), onClick: () => openServerSettings('emojis') },
     { label: '📊  Estatísticas', hidden: !(can(P.MANAGE_SERVER) || can(P.VIEW_AUDIT_LOG)), onClick: () => openServerSettings('stats') },
     { label: '📜  Registro de auditoria', hidden: !can(P.VIEW_AUDIT_LOG), onClick: () => openServerSettings('audit') },
+    { label: `🚩  Denúncias`, hidden: !can(P.MANAGE_MESSAGES), onClick: () => openReportsPanel(d.server.id) },
+    { label: '📖  Rever regras e interesses', hidden: !d.onboarding, onClick: () => openOnboarding({ review: true }) },
+    { label: '👋  Primeiros passos (regras e interesses)', hidden: !can(P.MANAGE_SERVER), onClick: () => openServerSettings('onboarding') },
     { separator: true, hidden: isOwner() },
     { label: '🚪  Sair do servidor', danger: true, hidden: isOwner(), onClick: leaveServerDialog },
   ], { className: 'popover-menu' });
@@ -2710,8 +2758,11 @@ function createChannelDialog(kind = 'text', categoryId) {
   const announceBox = h('input', { type: 'checkbox', class: 'switch' });
   const announceField = h('label', { class: 'switch-row', hidden: chosen !== 'text' },
     h('span', { class: 'kind-text' }, h('strong', {}, '📢 Canal de anúncios'), h('span', { class: 'muted small' }, 'Só a moderação escreve; os outros reagem e comentam em threads.')), announceBox);
+  const clipsBox = h('input', { type: 'checkbox', class: 'switch', id: 'new-clips-box' });
+  const clipsField = h('label', { class: 'switch-row', hidden: chosen !== 'text' },
+    h('span', { class: 'kind-text' }, h('strong', {}, '🎬 Canal de clipes'), h('span', { class: 'muted small' }, 'Quem assiste uma tela compartilhada ganha o botão 🎬, que posta aqui os últimos ~30 segundos.')), clipsBox);
   const option = (value, icon, label, desc) => h('label', { class: 'kind-option' },
-    h('input', { type: 'radio', name: 'kind', value, checked: chosen === value, onchange: () => { chosen = value; topicField.hidden = value !== 'forum'; announceField.hidden = value !== 'text'; } }),
+    h('input', { type: 'radio', name: 'kind', value, checked: chosen === value, onchange: () => { chosen = value; topicField.hidden = value !== 'forum'; announceField.hidden = value !== 'text'; clipsField.hidden = value !== 'text'; } }),
     h('span', { class: 'kind-icon' }, icon),
     h('span', { class: 'kind-text' }, h('strong', {}, label), h('span', { class: 'muted small' }, desc)));
   const fallbackCat = categoryId !== undefined ? categoryId
@@ -2727,6 +2778,7 @@ function createChannelDialog(kind = 'text', categoryId) {
       h('label', { class: 'field' }, 'Nome do canal', name),
       topicField,
       announceField,
+      clipsField,
       opts.el),
     actions: [
       { label: 'Cancelar' },
@@ -2734,7 +2786,7 @@ function createChannelDialog(kind = 'text', categoryId) {
         label: 'Criar canal', kind: 'primary', submit: true,
         onClick: async () => {
           if (!name.value.trim()) throw new Error('Dê um nome ao canal.');
-          const { channel } = await api(`/servers/${state.view}/channels`, { method: 'POST', body: { name: name.value.trim(), kind: chosen, ...(chosen === 'forum' ? { topic: topic.value } : {}), ...(chosen === 'text' ? { announce: announceBox.checked } : {}), ...opts.values() } });
+          const { channel } = await api(`/servers/${state.view}/channels`, { method: 'POST', body: { name: name.value.trim(), kind: chosen, ...(chosen === 'forum' ? { topic: topic.value } : {}), ...(chosen === 'text' ? { announce: announceBox.checked, isClips: clipsBox.checked } : {}), ...opts.values() } });
           await refreshDetail();
           await selectChannel(channel.id);
         },
@@ -2792,6 +2844,7 @@ function editChannelDialog(channel) {
   const topicBox = channel.kind === 'forum' && can(P.MANAGE_CHANNELS) ? h('textarea', { class: 'textarea', rows: '2', maxlength: '500' }) : null;
   const announceBox = channel.kind === 'text' && can(P.MANAGE_CHANNELS) ? h('input', { type: 'checkbox', class: 'switch', checked: !!channel.announce }) : null;
   const waitBox = channel.kind === 'voice' && can(P.MANAGE_CHANNELS) ? h('input', { type: 'checkbox', class: 'switch', checked: !!channel.waitingRoom }) : null;
+  const clipsBox = channel.kind === 'text' && can(P.MANAGE_CHANNELS) ? h('input', { type: 'checkbox', class: 'switch', id: 'edit-clips-box', checked: !!channel.isClips }) : null;
   if (topicBox) topicBox.value = channel.topic || '';
   openDialog({
     title: thread ? 'Editar thread' : 'Editar canal',
@@ -2799,6 +2852,8 @@ function editChannelDialog(channel) {
       topicBox ? h('label', { class: 'field' }, 'Descrição / regras do fórum', topicBox) : null,
       announceBox ? h('label', { class: 'switch-row' },
         h('span', { class: 'kind-text' }, h('strong', {}, '📢 Canal de anúncios'), h('span', { class: 'muted small' }, 'Só a moderação escreve; os outros reagem e comentam em threads.')), announceBox) : null,
+      clipsBox ? h('label', { class: 'switch-row' },
+        h('span', { class: 'kind-text' }, h('strong', {}, '🎬 Canal de clipes'), h('span', { class: 'muted small' }, 'Os clipes (últimos ~30 s de uma tela compartilhada) são postados aqui.')), clipsBox) : null,
       opts ? opts.el : null,
       stageBox ? h('label', { class: 'switch-row' },
         h('span', { class: 'kind-text' }, h('strong', {}, '🎙️ Modo palco'),
@@ -2825,7 +2880,7 @@ function editChannelDialog(channel) {
         onClick: async () => {
           const name = input2.value.trim();
           if (!name) throw new Error('Dê um nome ao canal.');
-          await api(`/channels/${channel.id}`, { method: 'PATCH', body: { name, ...(opts ? opts.values() : {}), ...(stageBox ? { stage: stageBox.checked } : {}), ...(topicBox ? { topic: topicBox.value } : {}), ...(announceBox ? { announce: announceBox.checked } : {}), ...(waitBox ? { waitingRoom: waitBox.checked } : {}) } });
+          await api(`/channels/${channel.id}`, { method: 'PATCH', body: { name, ...(opts ? opts.values() : {}), ...(stageBox ? { stage: stageBox.checked } : {}), ...(topicBox ? { topic: topicBox.value } : {}), ...(announceBox ? { announce: announceBox.checked } : {}), ...(waitBox ? { waitingRoom: waitBox.checked } : {}), ...(clipsBox ? { isClips: clipsBox.checked } : {}) } });
         },
       },
     ],

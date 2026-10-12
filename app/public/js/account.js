@@ -5,7 +5,7 @@ import {
 } from './util.js';
 import { state } from './state.js';
 import { qrSvg } from './qr.js';
-import { ACCENTS, getTheme, getAccent, setTheme, setAccent } from './theme.js';
+import { ACCENTS, getTheme, getAccent, setTheme, setAccent, serverColorsOn, setServerColorsOn } from './theme.js';
 import { voiceSettings, saveVoiceSettings, keyLabel } from './voice.js';
 import { devicesSection } from './devices.js';
 import { profileLookSection, dndScheduleSection, paintBanner } from './profile.js';
@@ -431,7 +431,11 @@ function pageAppearance() {
       h('div', { class: 'accent-preview' },
         h('button', { class: 'btn primary small' }, 'Botão'),
         h('span', { class: 'mention' }, '@menção'),
-        h('a', { href: '#', onclick: (e) => e.preventDefault() }, 'um link'))));
+        h('a', { href: '#', onclick: (e) => e.preventDefault() }, 'um link')),
+      h('label', { class: 'perm' },
+        h('div', { class: 'perm-text' }, h('strong', {}, 'Usar a cor de cada servidor'),
+          h('span', { class: 'muted small' }, 'Quando o servidor escolhe uma cor, ela aparece enquanto você está nele. Desligado: sempre a sua cor.')),
+        h('input', { type: 'checkbox', class: 'switch', id: 'server-colors', checked: serverColorsOn(), onchange: (e) => setServerColorsOn(e.target.checked) }))));
 }
 
 // ---------------------------------------------------------------- Voz e vídeo

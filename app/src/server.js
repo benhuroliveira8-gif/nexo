@@ -83,6 +83,20 @@ app.get('/vendor/livekit-client.js', (req, res) => {
 const publicDir = path.join(__dirname, '..', 'public');
 // Compartilhar foto da galeria direto para o Nexo (app instalado): quem recebe é o
 // service worker. Se ele ainda não estiver ativo, o pedido chega aqui e só volta para o app.
+// Calendário para assinar no Google Agenda / celular: /calendario/<link secreto>.ics
+app.get('/calendario/:token.ics', async (req, res) => {
+  try {
+    const proto = String(req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim();
+    const ics = await require('./routes/extras4').calendarFeed(req.params.token, `${proto}://${req.get('host')}`);
+    if (!ics) return res.status(404).type('text/plain').send('Calendário não encontrado (o link pode ter sido trocado).');
+    res.set({ 'Content-Type': 'text/calendar; charset=utf-8', 'Cache-Control': 'private, max-age=300', 'Content-Disposition': 'inline; filename="nexo.ics"' });
+    res.send(ics);
+  } catch (err) {
+    console.error('Erro no calendário:', err.message);
+    res.status(500).end();
+  }
+});
+
 app.post('/compartilhar', (req, res) => res.redirect(303, '/?compartilhar=falhou'));
 
 app.use(express.static(publicDir));

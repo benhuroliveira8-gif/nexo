@@ -103,6 +103,13 @@ Chat em tempo real no estilo de servidores e canais. Projeto pessoal, construíd
 - **Painel de saúde** 🩺 (Administração do Nexo → *Saúde*): no ar há quanto tempo, quedas e reinícios, CPU, memória, banco, voz e idade do último backup
 - **Foto de perfil e capa em GIF animado** (até 8 MB)
 - **App instalável melhorado** 📲: segure o ícone do Nexo para os **atalhos** (Mensagens, Amigos, Salvas, Último servidor) e, na galeria do celular, **Compartilhar → Nexo** para mandar fotos direto para uma conversa
+- **Primeiros passos** 👋: quem entra no servidor vê as regras, clica em "Li e aceito" e escolhe interesses (🎮 Jogo X, 📚 Estudos) que já dão os cargos certos (⚙️ do servidor → *Primeiros passos*)
+- **Mensagens que somem** ⏳: numa conversa direta, botão ⏳ no topo → somem depois de 24 horas ou 7 dias
+- **Pastas de servidores** 📁: botão direito (ou toque longo) num servidor → *Nova pasta* / *Mover para…*; a pasta vale em todos os seus aparelhos
+- **Canal de clipes** 🎬: marque um canal de texto como "Canal de clipes"; quem assiste uma tela compartilhada ganha o botão 🎬, que posta os últimos ~30 segundos ali
+- **Calendário do servidor** 📅: em Eventos → *Mês*; e **🔗 Google Agenda** dá um link secreto (.ics) que mostra os eventos de todos os seus servidores na sua agenda: [docs/calendario.md](docs/calendario.md)
+- **Denúncias** 🚩: passe o mouse numa mensagem → 🚩; cai numa fila que só a moderação vê (barra do servidor → *Denúncias*)
+- **Cor do servidor** 🎨: cada servidor escolhe uma cor de destaque (⚙️ do servidor → *Visão geral*); dá para desligar em ⚙️ → *Aparência*
 
 ## Como rodar (no servidor Ubuntu com Docker)
 

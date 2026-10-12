@@ -1649,3 +1649,94 @@ kbd { font: 600 12px ui-monospace, Consolas, monospace; padding: 1px 5px; border
 /* Sobre o Nexo */
 .about-nexo { display: flex; gap: 12px; align-items: center; }
 .about-nexo .brand-mark { flex: none; }
+
+/* ---------- 0.12: pastas de servidores ---------- */
+.rail-folder { display: flex; flex-direction: column; align-items: center; gap: 8px; flex: none; border-radius: 16px; }
+.rail-folder.open { background: color-mix(in srgb, var(--folder) 18%, transparent); padding: 0 0 8px; }
+.folder-btn { background: color-mix(in srgb, var(--folder) 30%, var(--bg-3)); }
+.folder-btn.open { background: transparent; font-size: 20px; }
+.folder-btn:hover { background: color-mix(in srgb, var(--folder) 45%, var(--bg-3)); color: var(--text); }
+.folder-btn.open:hover { background: color-mix(in srgb, var(--folder) 25%, transparent); }
+.folder-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; width: 34px; height: 34px; pointer-events: none; }
+.folder-grid .server-icon { width: 16px; height: 16px; border-radius: 5px; font-size: 7px; background: var(--bg-2); }
+.rail-btn.in-folder { width: 44px; height: 44px; }
+.rail-btn.folder-btn.active { background: color-mix(in srgb, var(--folder) 45%, var(--bg-3)); }
+
+/* ---------- 0.12: primeiros passos ---------- */
+.onboarding { display: grid; gap: 16px; }
+.ob-head { display: flex; align-items: center; gap: 14px; }
+.ob-head h2 { margin: 0 0 4px; }
+.ob-head .server-icon { width: 64px; height: 64px; border-radius: 18px; background: var(--bg-3); font-size: 22px; flex: none; }
+.onboarding h3 { margin: 0 0 8px; font-size: 15px; }
+.ob-rules { background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; max-height: 40vh; overflow: auto; white-space: pre-wrap; line-height: 1.5; }
+.ob-interests { display: flex; flex-wrap: wrap; gap: 8px; }
+.ob-chip { border: 1px solid var(--line); background: var(--bg-2); color: var(--text); border-radius: 999px; padding: 8px 14px; font-size: 14px; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; }
+.ob-chip:hover { border-color: var(--accent-line); }
+.ob-chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--text); font-weight: 600; }
+.ob-edit-list { display: grid; gap: 8px; }
+.ob-edit-row { display: grid; grid-template-columns: 56px minmax(0, 1fr) minmax(0, 1fr) auto; gap: 6px; align-items: center; }
+.ob-edit-row input, .ob-edit-row select { min-width: 0; }
+.ob-e-emoji { text-align: center; }
+.rules-gate { margin: 0 0 8px; width: 100%; }
+@media (max-width: 600px) { .ob-edit-row { grid-template-columns: 48px minmax(0, 1fr) auto; } .ob-edit-row .ob-e-role { grid-column: 2 / 3; } }
+
+/* ---------- 0.12: mensagens que somem ---------- */
+.disappear-btn { width: auto; padding: 0 8px; gap: 4px; display: inline-flex; align-items: center; }
+.disappear-btn.on { color: var(--accent); }
+.disappear-label { font-size: 12px; font-weight: 700; }
+.expires-mark { font-size: 11px; color: var(--text-3); }
+.disappear-dot { font-size: 12px; opacity: .8; }
+
+/* ---------- 0.12: calendário ---------- */
+.seg { display: inline-flex; background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px; padding: 2px; gap: 2px; }
+.seg-btn { border: 0; background: transparent; color: var(--text-2); padding: 5px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; }
+.seg-btn.active { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.events-top { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+.events-top .grow { flex: 1; }
+.calendar { display: grid; gap: 10px; }
+.cal-head { display: flex; align-items: center; gap: 8px; }
+.cal-title { min-width: 150px; text-align: center; font-size: 16px; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+.cal-wd { text-align: center; text-transform: uppercase; font-size: 11px; padding-bottom: 2px; }
+.cal-cell { min-height: 74px; border: 1px solid var(--line); background: var(--bg-1); border-radius: 8px; padding: 4px; text-align: left; display: flex; flex-direction: column; gap: 2px; color: var(--text); cursor: pointer; min-width: 0; font: inherit; }
+.cal-cell.empty { background: transparent; border-color: transparent; cursor: default; }
+.cal-cell.past { opacity: .6; }
+.cal-cell.today .cal-num { background: var(--accent); color: var(--accent-ink); }
+.cal-cell.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.cal-cell:hover:not(.empty) { border-color: var(--accent-line); }
+.cal-num { font-size: 12px; font-weight: 700; width: 22px; height: 22px; border-radius: 11px; display: grid; place-items: center; }
+.cal-events { display: grid; gap: 2px; min-width: 0; }
+.cal-ev { font-size: 11px; background: var(--accent-soft); border-left: 3px solid var(--accent); border-radius: 3px; padding: 1px 4px; display: block; }
+.cal-day { border-top: 1px solid var(--line); padding-top: 10px; display: grid; gap: 8px; }
+.cal-day h3 { margin: 0; font-size: 15px; }
+.cal-link-box { display: grid; gap: 10px; }
+.cal-link-box .row-actions { display: flex; gap: 6px; }
+.cal-link { flex: 1; min-width: 0; font-family: ui-monospace, monospace; font-size: 12px; }
+.cal-steps { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
+@media (max-width: 600px) {
+  .cal-cell { min-height: 46px; }
+  .cal-ev { font-size: 0; padding: 0; height: 5px; border-left: 0; background: var(--accent); }
+  .cal-ev b { display: none; }
+}
+
+/* ---------- 0.12: denúncias ---------- */
+.report-reasons { display: grid; gap: 6px; margin: 10px 0; }
+.report-preview { display: flex; gap: 8px; align-items: center; background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+.report-preview .truncate { flex: 1; min-width: 0; }
+.reports-item.has-reports .hash, .reports-item.has-reports .truncate { color: var(--danger); font-weight: 600; }
+.reports-panel { display: grid; gap: 12px; }
+.reports-list { display: grid; gap: 10px; }
+.report-card { border: 1px solid var(--line); background: var(--bg-1); border-radius: var(--radius); padding: 12px; display: grid; gap: 8px; }
+.report-card.open { border-left: 4px solid var(--danger); }
+.report-top { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.report-reason { font-weight: 700; }
+.report-same { background: var(--danger); color: #fff; border-radius: 999px; padding: 1px 8px; font-size: 12px; font-weight: 700; }
+.report-details { margin: 0; font-style: italic; color: var(--text-2); }
+.report-msg { display: flex; gap: 8px; align-items: flex-start; background: var(--bg-2); border-radius: 8px; padding: 8px 10px; }
+.report-msg-body { min-width: 0; display: grid; gap: 2px; }
+.report-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.report-card .row-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+
+/* ---------- 0.12: clipes ---------- */
+.clip-slot { display: contents; }
+.sc-clip { font-size: 17px; }

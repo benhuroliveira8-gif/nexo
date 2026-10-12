@@ -21,6 +21,22 @@ function luminance([r, g, b]) {
 export const getTheme = () => storage('nexo.theme') || 'dark';
 export const getAccent = () => (/^#[0-9a-f]{6}$/i.test(storage('nexo.accent') || '') ? storage('nexo.accent') : DEFAULT_ACCENT);
 
+// Cor do servidor: quando você entra num servidor que escolheu uma cor, ela vale
+// enquanto você estiver nele (dá para desligar em Aparência).
+let serverAccent = null;
+export const serverColorsOn = () => storage('nexo.serverColors') !== 'off';
+export function setServerColorsOn(on) {
+  storage('nexo.serverColors', on ? null : 'off');
+  applyTheme();
+}
+export function setServerAccent(hex) {
+  const next = /^#[0-9a-f]{6}$/i.test(hex || '') ? hex.toLowerCase() : null;
+  if (next === serverAccent) return;
+  serverAccent = next;
+  applyTheme();
+}
+export const activeServerAccent = () => (serverColorsOn() ? serverAccent : null);
+
 const systemDark = () => !window.matchMedia || window.matchMedia('(prefers-color-scheme: dark)').matches;
 export const effectiveTheme = () => {
   const t = getTheme();
@@ -34,7 +50,8 @@ export function applyTheme() {
   const root = document.documentElement;
   const theme = effectiveTheme();
   root.dataset.theme = theme;
-  const accent = getAccent();
+  const accent = activeServerAccent() || getAccent();
+  root.dataset.serverAccent = activeServerAccent() ? '1' : '';
   const rgb = hexToRgb(accent);
   const light = theme === 'light';
   // No tema claro a cor de destaque fica um pouco mais escura (para dar contraste no texto).

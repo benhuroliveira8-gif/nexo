@@ -235,6 +235,15 @@ async function createMessage({ access, userId, content, attachmentIds, replyToId
   if (access.kind === 'text' && access.channel.announce && !access.isAdmin && !access.can(P.MANAGE_MESSAGES)) {
     throw new MessageError('Este é um canal de anúncios: só a moderação escreve aqui. Você pode reagir ou comentar numa thread 🧵.');
   }
+  // Primeiros passos: quem ainda não aceitou as regras do servidor não escreve.
+  if (access.serverId && !access.isOwner) {
+    const { rows: ob } = await db.query(
+      `SELECT (s.onboarding->>'enabled') = 'true' AS active, m.onboarded_at FROM servers s
+       JOIN server_members m ON m.server_id = s.id AND m.user_id = $2 WHERE s.id = $1`,
+      [access.serverId, userId],
+    );
+    if (ob[0] && ob[0].active && !ob[0].onboarded_at) throw new MessageError('Antes de conversar, leia e aceite as regras do servidor.');
+  }
   content = String(content || '').trim();
   const ids = [...new Set((Array.isArray(attachmentIds) ? attachmentIds : []).map(String))];
   if (ids.length > MAX_ATTACHMENTS) throw new MessageError(`No máximo ${MAX_ATTACHMENTS} anexos por mensagem.`);
@@ -278,9 +287,10 @@ async function createMessage({ access, userId, content, attachmentIds, replyToId
   const id = await db.transaction(async (c) => {
     const mentions = await parseMentions(c, content, access);
     const { rows } = await c.query(
-      `INSERT INTO messages (channel_id, author_id, content, mention_everyone, reply_to_id, gif, sticker, command)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-      [access.channel.id, userId, content, mentions.everyone, replyTo, gifData ? JSON.stringify(gifData) : null, stickerData ? JSON.stringify(stickerData) : null, command ? JSON.stringify(command) : null],
+      `INSERT INTO messages (channel_id, author_id, content, mention_everyone, reply_to_id, gif, sticker, command, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CASE WHEN $9::int > 0 THEN now() + make_interval(secs => $9::int) END) RETURNING id`,
+      [access.channel.id, userId, content, mentions.everyone, replyTo, gifData ? JSON.stringify(gifData) : null, stickerData ? JSON.stringify(stickerData) : null, command ? JSON.stringify(command) : null,
+        access.kind === 'dm' ? (access.channel.disappearing_seconds || 0) : 0],
     );
     // Responder alguém já avisa essa pessoa (como uma menção), se ela vê o canal.
     if (replyTo) {

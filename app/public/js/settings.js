@@ -8,6 +8,7 @@ import { sortable } from './sortable.js';
 import { renderAssets, renderWelcome, renderAutomod, renderStats, canSeeStats } from './serverx.js';
 import { renderLevels } from './levelsui.js';
 import { bannerBlob } from './profile.js';
+import { serverThemeBlock, renderOnboardingSettings } from './comunidade.js';
 
 const PRESET_COLORS = ['#ff7a45', '#f5c542', '#3ecf8e', '#2ec4b6', '#4d9fff', '#7c6cff', '#c86bfa', '#ff5c8a', '#ff5c6c', '#a7adbb'];
 
@@ -51,7 +52,7 @@ function tabsAvailable() {
   if (can(P.MANAGE_ROLES)) tabs.push(['roles', 'Cargos']);
   if (can(P.MANAGE_ROLES) || can(P.KICK_MEMBERS) || can(P.BAN_MEMBERS) || can(P.MODERATE_MEMBERS)) tabs.push(['members', 'Membros']);
   if (can(P.MANAGE_EMOJIS)) tabs.push(['emojis', 'Emojis'], ['stickers', 'Figurinhas'], ['sounds', 'Sons']);
-  if (can(P.MANAGE_SERVER)) tabs.push(['welcome', 'Boas-vindas'], ['automod', 'Moderação automática'], ['levels', 'Níveis']);
+  if (can(P.MANAGE_SERVER)) tabs.push(['welcome', 'Boas-vindas'], ['onboarding', 'Primeiros passos'], ['automod', 'Moderação automática'], ['levels', 'Níveis']);
   if (canSeeStats()) tabs.push(['stats', 'Estatísticas']);
   if (can(P.CREATE_INVITE)) tabs.push(['invites', 'Convites']);
   if (can(P.BAN_MEMBERS)) tabs.push(['bans', 'Banimentos']);
@@ -75,6 +76,7 @@ function render() {
     emojis: renderEmojis, roles: renderRoles, members: renderMembersTab, invites: renderInvites, bans: renderBans, audit: renderAudit, overview: renderOverview,
     stickers: () => renderAssets('sticker'), sounds: () => renderAssets('sound'), welcome: renderWelcome, automod: renderAutomod, levels: renderLevels,
     stats: () => renderStats({ cache: ui.cache, rerender: render }),
+    onboarding: () => renderOnboardingSettings(render),
   };
   const content = (pages[ui.tab] || renderOverview)();
 
@@ -148,14 +150,16 @@ function renderOverview() {
   if (manage) {
     parts.push(h('button', {
       class: 'btn primary', onclick: async (e) => {
-        e.currentTarget.disabled = true;
+        const btn = e.currentTarget;
+        btn.disabled = true;
         try {
           await api(`/servers/${d.server.id}`, { method: 'PATCH', body: { name: name.value.trim() } });
           toast('Nome salvo!');
-        } catch (err) { toast(err.message); } finally { e.currentTarget.disabled = false; }
+        } catch (err) { toast(err.message); } finally { btn.disabled = false; }
       },
     }, 'Salvar nome'));
   }
+  parts.push(serverThemeBlock());
 
   if (isOwner()) {
     parts.push(h('div', { class: 'settings-block danger-zone' },
@@ -784,11 +788,15 @@ function describe(e) {
     case 'levels_reset': return ['zerou o XP de todo mundo', ''];
     case 'automod_timeout': return [`castigou ${who} por ${mins(x.minutes)}`, x.reason ? `Motivo: ${x.reason}` : ''];
     case 'event_create': return [`criou o evento ${t}`];
+    case 'server_theme': return ['mudou a cor do servidor', x.color ? x.color : 'sem cor (cada um usa a sua)'];
+    case 'onboarding_update': return ['mudou os primeiros passos', [x.enabled ? 'tela de boas-vindas ligada' : 'tela de boas-vindas desligada', x.interests ? `${x.interests} interesse(s)` : ''].filter(Boolean).join(' · ')];
+    case 'report_close': return [`${x.status === 'dismissed' ? 'descartou' : 'resolveu'} uma denúncia contra ${who}`, [x.reason ? `motivo: ${x.reason}` : '', x.deleted ? 'mensagem apagada' : ''].filter(Boolean).join(' · ')];
     default: return [e.action];
   }
 }
 
 const AUDIT_ICONS = {
+  server_theme: '🎨', onboarding_update: '👋', report_close: '🚩',
   member_kick: '👢', member_ban: '🔨', member_unban: '🕊️', member_timeout: '⏳', member_timeout_remove: '✅', member_roles: '🏷️',
   role_create: '🏷️', role_update: '🏷️', role_delete: '🏷️', role_reorder: '↕️', channel_create: '#️⃣', channel_update: '#️⃣',
   channel_delete: '#️⃣', category_create: '📁', category_update: '📁', category_delete: '📁', server_update: '⚙️', server_icon: '🖼️', server_banner: '🖼️',

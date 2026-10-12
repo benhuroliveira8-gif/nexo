@@ -1,8 +1,10 @@
-// Eventos do servidor: lista, criar/editar, "Vou"/"Talvez", lembretes e arquivo de agenda (.ics).
-import { h, api, toast, openDialog, confirmDialog, avatar, openMenu, playPing } from './util.js';
+// Eventos do servidor: lista, calendário do mês, criar/editar, "Vou"/"Talvez", lembretes,
+// arquivo de agenda (.ics) e link para assinar no Google Agenda.
+import { h, api, toast, openDialog, confirmDialog, avatar, openMenu, playPing, copyText, storage } from './util.js';
 import { state, P, can, memberById } from './state.js';
 
 const byServer = new Map(); // serverId -> [eventos]
+const byMonth = new Map(); // `${serverId}:${ano}-${mês}` -> [eventos] (calendário)
 let hooks = { onChange: () => {}, openChannel: () => {} };
 let openPanel = null; // { serverId, render }
 
@@ -25,6 +27,13 @@ function upsert(ev) {
   const list = (byServer.get(ev.serverId) || []).filter((x) => x.id !== ev.id);
   list.push(ev);
   byServer.set(ev.serverId, list);
+  const d = new Date(ev.startsAt);
+  for (const [key, arr] of byMonth) {
+    if (!key.startsWith(`${ev.serverId}:`)) continue;
+    const next = arr.filter((x) => x.id !== ev.id);
+    if (key === monthKey(ev.serverId, d.getFullYear(), d.getMonth())) next.push(ev);
+    byMonth.set(key, next);
+  }
   hooks.onChange(ev.serverId);
   if (openPanel && openPanel.serverId === ev.serverId) openPanel.render();
 }
@@ -39,6 +48,7 @@ export function wireEventSocket(socket) {
     upsert(event);
   });
   socket.on('event:deleted', ({ serverId, id }) => {
+    for (const [key, arr] of byMonth) if (key.startsWith(`${serverId}:`)) byMonth.set(key, arr.filter((e) => e.id !== id));
     if (!byServer.has(serverId)) return;
     byServer.set(serverId, byServer.get(serverId).filter((e) => e.id !== id));
     hooks.onChange(serverId);
@@ -88,21 +98,124 @@ export function eventsSidebarItem(serverId) {
 
 // ---------------------------------------------------------------- Painel
 
-export function openEventsPanel(serverId) {
+const monthKey = (serverId, y, m) => `${serverId}:${y}-${m}`;
+
+async function loadMonth(serverId, y, m) {
+  const from = new Date(y, m, 1);
+  const to = new Date(y, m + 1, 1);
+  const { events } = await api(`/servers/${serverId}/events?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`);
+  byMonth.set(monthKey(serverId, y, m), events);
+}
+
+const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+const WEEKDAYS = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
+
+export function openEventsPanel(serverId, { view } = {}) {
   const body = h('div', { class: 'events-panel' });
+  const today = new Date();
+  const ui = {
+    view: view || (storage('nexo.eventsView') === 'month' ? 'month' : 'list'),
+    y: today.getFullYear(), m: today.getMonth(), day: null, loading: false,
+  };
+  const setView = (v) => { ui.view = v; storage('nexo.eventsView', v === 'month' ? 'month' : null); render(); };
+  const goMonth = (delta) => {
+    const d = new Date(ui.y, ui.m + delta, 1);
+    ui.y = d.getFullYear(); ui.m = d.getMonth(); ui.day = null;
+    render();
+  };
+
+  const monthView = () => {
+    const key = monthKey(serverId, ui.y, ui.m);
+    if (!byMonth.has(key) && !ui.loading) {
+      ui.loading = true;
+      loadMonth(serverId, ui.y, ui.m).catch((err) => toast(err.message)).finally(() => { ui.loading = false; if (openPanel && openPanel.render === render) render(); });
+    }
+    const list = (byMonth.get(key) || []).slice().sort((a, b) => new Date(a.startsAt) - new Date(b.startsAt));
+    const first = new Date(ui.y, ui.m, 1);
+    const daysInMonth = new Date(ui.y, ui.m + 1, 0).getDate();
+    const cells = [];
+    for (let i = 0; i < first.getDay(); i++) cells.push(h('div', { class: 'cal-cell empty' }));
+    for (let day = 1; day <= daysInMonth; day++) {
+      const date = new Date(ui.y, ui.m, day);
+      const evs = list.filter((e) => sameDay(new Date(e.startsAt), date));
+      const isToday = sameDay(date, today);
+      const past = date < new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      cells.push(h('button', {
+        class: `cal-cell${isToday ? ' today' : ''}${evs.length ? ' has-events' : ''}${ui.day === day ? ' selected' : ''}${past ? ' past' : ''}`,
+        dataset: { day: String(day) },
+        title: evs.length ? evs.map((e) => `${timeFmt.format(new Date(e.startsAt))} ${e.title}`).join('\n') : null,
+        onclick: () => { ui.day = ui.day === day ? null : day; render(); },
+      },
+      h('span', { class: 'cal-num' }, String(day)),
+      h('span', { class: 'cal-events' }, evs.slice(0, 3).map((e) => h('span', { class: 'cal-ev truncate' }, h('b', {}, timeFmt.format(new Date(e.startsAt))), ' ', e.title)),
+        evs.length > 3 ? h('span', { class: 'cal-more muted small' }, `+${evs.length - 3}`) : null)));
+    }
+    const dayEvents = ui.day ? list.filter((e) => sameDay(new Date(e.startsAt), new Date(ui.y, ui.m, ui.day))) : [];
+    const monthName = first.toLocaleString('pt-BR', { month: 'long', year: 'numeric' });
+    return h('div', { class: 'calendar' },
+      h('div', { class: 'cal-head' },
+        h('button', { class: 'icon-btn', title: 'Mês anterior', onclick: () => goMonth(-1) }, '‹'),
+        h('strong', { class: 'cal-title' }, cap(monthName)),
+        h('button', { class: 'icon-btn', title: 'Próximo mês', onclick: () => goMonth(1) }, '›'),
+        (ui.y !== today.getFullYear() || ui.m !== today.getMonth()) ? h('button', { class: 'btn small', onclick: () => { ui.y = today.getFullYear(); ui.m = today.getMonth(); ui.day = today.getDate(); render(); } }, 'Hoje') : null),
+      h('div', { class: 'cal-grid' }, WEEKDAYS.map((w) => h('div', { class: 'cal-wd muted small' }, w)), cells),
+      ui.day ? h('div', { class: 'cal-day' },
+        h('h3', {}, cap(new Date(ui.y, ui.m, ui.day).toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' }))),
+        dayEvents.length ? h('div', { class: 'events-list' }, dayEvents.map((e) => eventCard(e)))
+          : h('p', { class: 'muted' }, 'Nada marcado neste dia.'),
+        can(P.CREATE_EVENTS) && new Date(ui.y, ui.m, ui.day + 1) > today ? h('button', { class: 'btn small', onclick: () => editEventDialog(serverId, null, new Date(ui.y, ui.m, ui.day)) }, '➕ Criar evento neste dia') : null)
+        : list.length ? null : h('p', { class: 'muted cal-empty' }, ui.loading ? 'Carregando…' : 'Nenhum evento neste mês.'));
+  };
+
   const render = () => {
     const list = upcoming(serverId);
     body.replaceChildren(
       h('div', { class: 'events-top' },
-        h('p', { class: 'muted' }, list.length ? 'Confirme presença para receber um lembrete 15 minutos antes.' : 'Nenhum evento marcado.'),
+        h('div', { class: 'seg', role: 'tablist' },
+          h('button', { class: `seg-btn${ui.view === 'list' ? ' active' : ''}`, onclick: () => setView('list') }, 'Próximos'),
+          h('button', { class: `seg-btn${ui.view === 'month' ? ' active' : ''}`, id: 'events-month-btn', onclick: () => setView('month') }, 'Mês')),
+        h('span', { class: 'grow' }),
+        h('button', { class: 'btn small', title: 'Ver os eventos dos seus servidores no Google Agenda ou no celular', onclick: calendarLinkDialog }, '🔗 Google Agenda'),
         can(P.CREATE_EVENTS) ? h('button', { class: 'btn primary small', onclick: () => editEventDialog(serverId) }, '➕ Criar evento') : null),
-      h('div', { class: 'events-list' }, list.map((e) => eventCard(e))),
+      ui.view === 'month' ? monthView() : h('div', {},
+        h('p', { class: 'muted' }, list.length ? 'Confirme presença para receber um lembrete 15 minutos antes.' : 'Nenhum evento marcado.'),
+        h('div', { class: 'events-list' }, list.map((e) => eventCard(e)))),
     );
   };
   openPanel = { serverId, render };
   render();
   openDialog({ title: '📅 Eventos', body, wide: true, actions: [{ label: 'Fechar' }], onClose: () => { if (openPanel && openPanel.render === render) openPanel = null; } });
   loadEvents(serverId);
+}
+
+// ---------------------------------------------------------------- Link para o Google Agenda
+
+export async function calendarLinkDialog() {
+  let url;
+  try { ({ url } = await api('/me/calendar-link')); } catch (err) { return toast(err.message); }
+  const input = h('input', { readonly: true, value: url, class: 'cal-link', onclick: (e) => e.target.select() });
+  const body = h('div', { class: 'cal-link-box' },
+    h('p', {}, 'Com este link, o Google Agenda (ou a agenda do celular) mostra os eventos de ', h('strong', {}, 'todos os seus servidores'), ' e atualiza sozinho.'),
+    h('div', { class: 'row-actions' }, input, h('button', { class: 'btn primary small', onclick: () => copyText(input.value, input).then((ok) => toast(ok ? 'Link copiado!' : 'Selecione o link e copie (Ctrl+C).')) }, 'Copiar')),
+    h('ol', { class: 'cal-steps' },
+      h('li', {}, 'Copie o link acima.'),
+      h('li', {}, 'No computador, abra o ', h('strong', {}, 'Google Agenda'), '.'),
+      h('li', {}, 'Na esquerda, em ', h('strong', {}, 'Outras agendas'), ', clique em ', h('strong', {}, '+'), ' e depois em ', h('strong', {}, 'Do URL'), '.'),
+      h('li', {}, 'Cole o link e clique em ', h('strong', {}, 'Adicionar agenda'), '.')),
+    h('p', { class: 'muted small' }, 'O Google atualiza essas agendas de tempos em tempos (pode levar algumas horas para aparecer um evento novo). No iPhone: Ajustes → Calendário → Contas → Adicionar conta → Outra → Adicionar calendário assinado.'),
+    h('p', { class: 'muted small' }, '🔒 O link é secreto: quem tiver ele vê os seus eventos. Se vazar, gere outro (o antigo para de funcionar).'));
+  openDialog({
+    title: '🔗 Assinar no Google Agenda', body,
+    actions: [
+      { label: 'Gerar outro link', onClick: async () => {
+        const res = await api('/me/calendar-link', { method: 'POST' });
+        input.value = res.url;
+        toast('Link novo criado. O antigo parou de funcionar.');
+        return false;
+      } },
+      { label: 'Fechar', kind: 'primary' },
+    ],
+  });
 }
 
 function eventCard(e) {
@@ -159,9 +272,13 @@ function closeDialogs() {
 
 // ---------------------------------------------------------------- Criar / editar
 
-function editEventDialog(serverId, ev = null) {
+function editEventDialog(serverId, ev = null, onDay = null) {
   const title = h('input', { maxlength: '100', placeholder: 'Ex.: Jogatina de sexta', value: ev ? ev.title : '' });
-  const start = ev ? new Date(ev.startsAt) : (() => { const d = new Date(Date.now() + 86400000); d.setMinutes(0, 0, 0); d.setHours(21); return d; })();
+  const start = ev ? new Date(ev.startsAt) : (() => {
+    const d = onDay ? new Date(onDay) : new Date(Date.now() + 86400000);
+    d.setMinutes(0, 0, 0); d.setHours(21);
+    return d < new Date() ? new Date(Date.now() + 3600000) : d;
+  })();
   const when = h('input', { type: 'datetime-local', value: toLocalInput(start), min: toLocalInput(new Date()) });
   const desc = h('textarea', { maxlength: '1000', rows: '3', placeholder: 'Detalhes (opcional)' });
   desc.value = ev ? ev.description : '';

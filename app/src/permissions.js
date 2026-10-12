@@ -123,7 +123,7 @@ async function roomsForChannel(channel) {
   return { rooms: viewerIds.map((id) => `user:${id}`), viewerIds };
 }
 
-const CHANNEL_COLS = 'id, server_id, kind, name, dm_key, private, stage, announce, waiting_room, category_id, parent_channel_id, parent_message_id, created_by';
+const CHANNEL_COLS = 'id, server_id, kind, name, dm_key, private, stage, announce, waiting_room, disappearing_seconds, is_clips, category_id, parent_channel_id, parent_message_id, created_by';
 
 // Acesso a um canal (de servidor ou DM). null = sem acesso.
 async function channelAccess(channelId, userId) {

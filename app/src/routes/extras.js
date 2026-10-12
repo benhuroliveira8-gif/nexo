@@ -433,6 +433,8 @@ function startJobs() {
       await expireStatuses();
       // eslint-disable-next-line global-require
       await require('./extras3').expireTempRoles();
+      // eslint-disable-next-line global-require
+      await require('./extras4').expireMessages();
     } catch (err) {
       console.error('Erro nas tarefas de fundo:', err.message);
     } finally {

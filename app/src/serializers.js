@@ -33,6 +33,7 @@ const server = (row) => ({
   ownerId: row.owner_id,
   iconUrl: avatarUrl(row.icon_id),
   bannerUrl: avatarUrl(row.banner_id),
+  themeColor: row.theme_color || null,
 });
 
 const channel = (row) => ({
@@ -44,7 +45,7 @@ const channel = (row) => ({
   categoryId: row.category_id || null,
   private: !!row.private,
   stage: !!row.stage,
-  ...(row.kind === 'text' ? { announce: !!row.announce } : {}),
+  ...(row.kind === 'text' ? { announce: !!row.announce, isClips: !!row.is_clips } : {}),
   ...(row.kind === 'voice' ? { waitingRoom: !!row.waiting_room } : {}),
   ...(row.kind === 'thread' ? { solved: !!row.solved, pinned: !!row.pinned } : {}),
   ...(row.kind === 'forum' ? { topic: row.topic || null } : {}),
@@ -99,6 +100,7 @@ const message = (row, extras = {}) => ({
   gif: row.gif || null,
   sticker: row.sticker ? { ...row.sticker, url: `/sticker/${row.sticker.id}` } : null,
   command: row.command || null,
+  ...(row.expires_at ? { expiresAt: row.expires_at } : {}),
   replyTo: extras.replyTo || null,
   thread: extras.thread || null,
   mentions: extras.mentions || [],

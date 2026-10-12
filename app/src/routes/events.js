@@ -100,6 +100,14 @@ function routes(r) {
     const ctx = serverId && await memberContext(serverId, req.userId);
     if (!ctx) fail(404, 'Servidor não encontrado.');
     const visible = new Set(await visibleChannelIds(serverId, req.userId, ctx.isAdmin));
+    // ?from=...&to=... (calendário do mês): tudo o que cai nesse intervalo, até passado.
+    const from = req.query.from ? new Date(String(req.query.from)) : null;
+    const to = req.query.to ? new Date(String(req.query.to)) : null;
+    if (from && to && !Number.isNaN(from.getTime()) && !Number.isNaN(to.getTime())) {
+      if (to - from > 62 * 86400000 || to <= from) fail(400, 'Intervalo inválido.');
+      const rows = await loadEvents('e.server_id = $1 AND e.starts_at >= $2 AND e.starts_at < $3', [serverId, from.toISOString(), to.toISOString()]);
+      return res.json({ events: rows.slice(0, 300).map((row) => serialize(row, visible)) });
+    }
     const rows = await loadEvents("e.server_id = $1 AND e.starts_at > now() - interval '6 hours'", [serverId]);
     res.json({ events: rows.slice(0, MAX_UPCOMING).map((row) => serialize(row, visible)) });
   }));

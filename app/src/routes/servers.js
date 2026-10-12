@@ -83,6 +83,17 @@ async function assertCanModerate(ctx, targetId) {
   return target;
 }
 
+// Primeiros passos: o que todo mundo vê (regras e interesses, sem nada secreto).
+function onboardingPublic(o) {
+  if (!o || !o.enabled) return null;
+  return { enabled: true, rules: o.rules || '', interests: (o.interests || []).map(({ id, emoji, label, roleId }) => ({ id, emoji, label, roleId })) };
+}
+async function onboardingPending(serverId, userId, o, ctx) {
+  if (!o || !o.enabled || ctx.isOwner) return false;
+  const { rows } = await db.query('SELECT onboarded_at FROM server_members WHERE server_id = $1 AND user_id = $2', [serverId, userId]);
+  return !!rows[0] && !rows[0].onboarded_at;
+}
+
 // Emoji do cargo: 1 emoji (ou até 2 caracteres comuns). Nada = sem ícone.
 const graphemes = new Intl.Segmenter('pt', { granularity: 'grapheme' });
 function cleanRoleIcon(v) {
@@ -165,6 +176,7 @@ async function serverDetail(serverId, userId) {
     sounds: await assets.list('sound', serverId),
     ...(ctx.can(P.MANAGE_SERVER) ? { settings: { welcome: server.rows[0].welcome || null, automod: server.rows[0].automod || null } } : {}),
     levelsEnabled: !!(server.rows[0].levels && server.rows[0].levels.enabled),
+    onboarding: onboardingPublic(server.rows[0].onboarding),
     voice: voice.statesForChannels(list.filter((c) => c.kind === 'voice').map((c) => c.id)),
     voiceWaiting: require('../waiting').forChannels(list.filter((c) => c.kind === 'voice' && c.waiting_room).map((c) => c.id)), // eslint-disable-line global-require
     me: {
@@ -173,6 +185,8 @@ async function serverDetail(serverId, userId) {
       isAdmin: ctx.isAdmin,
       top: ctx.isOwner ? null : ctx.top,
       timeoutUntil: ctx.timeoutUntil,
+      // Precisa aceitar as regras (primeiros passos)?
+      onboardingPending: await onboardingPending(serverId, userId, server.rows[0].onboarding, ctx),
     },
   };
 }
@@ -310,11 +324,21 @@ module.exports = function serverRoutes(r) {
 
   r.patch('/servers/:id', wrap(async (req, res) => {
     const ctx = await requireMember(req, P.MANAGE_SERVER);
-    const name = String(req.body.name || '').trim().slice(0, 100);
-    if (!name) fail(400, 'Dê um nome ao servidor.');
-    const old = await db.query('SELECT name FROM servers WHERE id = $1', [ctx.serverId]);
-    await db.query('UPDATE servers SET name = $2 WHERE id = $1', [ctx.serverId, name]);
-    if (old.rows[0].name !== name) audit(ctx.serverId, req.userId, 'server_update', { details: { from: old.rows[0].name, to: name } });
+    const old = await db.query('SELECT name, theme_color FROM servers WHERE id = $1', [ctx.serverId]);
+    // Cor do servidor: muda o destaque do visual para quem entra nele.
+    if (req.body.themeColor !== undefined) {
+      const c = req.body.themeColor;
+      if (c !== null && c !== '' && !COLOR_RE.test(String(c))) fail(400, 'Cor inválida.');
+      const color = c ? String(c).toLowerCase() : null;
+      await db.query('UPDATE servers SET theme_color = $2 WHERE id = $1', [ctx.serverId, color]);
+      if (color !== old.rows[0].theme_color) audit(ctx.serverId, req.userId, 'server_theme', { details: { color } });
+    }
+    if (req.body.name !== undefined) {
+      const name = String(req.body.name || '').trim().slice(0, 100);
+      if (!name) fail(400, 'Dê um nome ao servidor.');
+      await db.query('UPDATE servers SET name = $2 WHERE id = $1', [ctx.serverId, name]);
+      if (old.rows[0].name !== name) audit(ctx.serverId, req.userId, 'server_update', { details: { from: old.rows[0].name, to: name } });
+    }
     events.serverChanged(ctx.serverId);
     res.json({ ok: true });
   }));
@@ -504,9 +528,11 @@ module.exports = function serverRoutes(r) {
         [code],
       );
       if (!used.rowCount) fail(404, 'Convite inválido ou expirado.');
+      const needsOnboarding = !!(server.onboarding && server.onboarding.enabled);
       const ins = await c.query(
-        'INSERT INTO server_members (server_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-        [server.id, req.userId],
+        `INSERT INTO server_members (server_id, user_id, onboarded_at) VALUES ($1, $2, CASE WHEN $3 THEN NULL ELSE now() END)
+         ON CONFLICT DO NOTHING`,
+        [server.id, req.userId, needsOnboarding],
       );
       if (ins.rowCount === 0) fail(409, 'Você já está nesse servidor.');
       // Convite com cargo: já entra com ele.
@@ -546,9 +572,9 @@ module.exports = function serverRoutes(r) {
     const channel = await db.transaction(async (c) => {
       const position = await nextPosition(c, ctx.serverId, categoryId, kind === 'category');
       const { rows } = await c.query(
-        `INSERT INTO channels (server_id, name, kind, position, category_id, private, topic, announce, waiting_room)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-        [ctx.serverId, name, kind, position, categoryId, isPrivate, kind === 'forum' ? cleanTopic(req.body.topic) : null, kind === 'text' && !!req.body.announce, kind === 'voice' && !!req.body.waitingRoom],
+        `INSERT INTO channels (server_id, name, kind, position, category_id, private, topic, announce, waiting_room, is_clips)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+        [ctx.serverId, name, kind, position, categoryId, isPrivate, kind === 'forum' ? cleanTopic(req.body.topic) : null, kind === 'text' && !!req.body.announce, kind === 'voice' && !!req.body.waitingRoom, kind === 'text' && !!req.body.isClips],
       );
       for (const roleId of roleIds) await c.query('INSERT INTO channel_roles (channel_id, role_id) VALUES ($1, $2)', [rows[0].id, roleId]);
       return rows[0];
@@ -605,6 +631,10 @@ module.exports = function serverRoutes(r) {
     }
     if (ctx.can(P.MANAGE_CHANNELS) && channel.kind === 'forum' && b.topic !== undefined) {
       vals.push(cleanTopic(b.topic)); sets.push(`topic = $${vals.length}`);
+    }
+    if (ctx.can(P.MANAGE_CHANNELS) && channel.kind === 'text' && b.isClips !== undefined) {
+      vals.push(!!b.isClips); sets.push(`is_clips = $${vals.length}`);
+      if (!!b.isClips !== channel.is_clips) changes.isClips = !!b.isClips;
     }
     if (ctx.can(P.MANAGE_CHANNELS) && channel.kind === 'voice' && b.waitingRoom !== undefined) {
       vals.push(!!b.waitingRoom); sets.push(`waiting_room = $${vals.length}`);

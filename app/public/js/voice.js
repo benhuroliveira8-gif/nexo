@@ -10,6 +10,7 @@ import {
 import { quickDevices } from './devices.js';
 import { isEconomy } from './economy.js';
 import { BUILTIN, builtinById, playSound } from './sounds.js';
+import { syncClipBuffers, clipButton, stopAllClips } from './clips.js';
 import { setSpeakerGetter, playJoin, playLeave, startRingback, stopRingback, isRingingBack } from './callsounds.js';
 
 const vs = {
@@ -293,6 +294,7 @@ export async function leaveVoice({ silent = false } = {}) {
   resetRemote();
   unwatched.clear();
   if (rec) stopRecording();
+  stopAllClips();
   vs.room = null;
   if (room) {
     try { await room.disconnect(); } catch { /* já caiu */ }
@@ -1113,9 +1115,10 @@ function screenTile(track, user, { isLocal, hasAudio, identity, participant }) {
     const ctlBtn = h('button', { type: 'button', class: 'sc-btn sc-ctl' });
     const hideBtn = h('button', { type: 'button', class: 'sc-btn sc-hide', title: 'Parar de assistir (economiza internet)', 'aria-label': 'Parar de assistir' }, '🙈');
     const hint = h('div', { class: 'rc-hint', hidden: true });
+    const clipSlot = h('span', { class: 'clip-slot' });
     tile = h('div', { class: 'tile screen', dataset: { sid: track.sid }, tabindex: '0' },
-      video, name, hint, h('div', { class: 'screen-controls' }, volBox, badge, ctlBtn, hideBtn, fsBtn));
-    Object.assign(tile, { _name: name, _volBox: volBox, _slider: slider, _volIcon: volIcon, _ctlBtn: ctlBtn, _video: video, _hideBtn: hideBtn });
+      video, name, hint, h('div', { class: 'screen-controls' }, volBox, badge, clipSlot, ctlBtn, hideBtn, fsBtn));
+    Object.assign(tile, { _clipSlot: clipSlot, _name: name, _volBox: volBox, _slider: slider, _volIcon: volIcon, _ctlBtn: ctlBtn, _video: video, _hideBtn: hideBtn });
     hideBtn.addEventListener('click', () => { if (tile._participant) setWatching(tile._participant, false); });
     ctlBtn.addEventListener('click', () => {
       const { viewing } = remoteState();
@@ -1155,6 +1158,7 @@ function screenTile(track, user, { isLocal, hasAudio, identity, participant }) {
   tile._hideBtn.hidden = isLocal;
   tile._userName = user.displayName;
   tile._name.textContent = `🖥️ Tela de ${user.displayName}${isLocal ? ' (você)' : ''}`;
+  tile._clipSlot.replaceChildren(...[clipButton(track.sid)].filter(Boolean));
   // Controle remoto (só na tela dos outros).
   const { viewing } = remoteState();
   const mine = viewing && viewing.identity === identity ? viewing.state : null;
@@ -1175,6 +1179,7 @@ function screenTile(track, user, { isLocal, hasAudio, identity, participant }) {
 export function renderStage(el, { channel, serverId, serverName, others, members, isDm = false, compact = false }) {
   const here = vs.room && vs.channelId === channel.id;
   el.classList.toggle('compact', compact);
+  if (!here && !vs.room) syncClipBuffers([]);
   if (!here && isDm) {
     el.replaceChildren(h('div', { class: 'stage-lobby small' },
       h('div', { class: 'lobby-people' }, others.map((s) => {
@@ -1232,6 +1237,21 @@ export function renderStage(el, { channel, serverId, serverName, others, members
     exitFullscreen();
   }
   for (const sid of [...screenTiles.keys()]) if (!liveScreens.has(sid)) screenTiles.delete(sid);
+  // Clipes: guarda os últimos segundos das telas que estão sendo vistas.
+  const clipScreens = [];
+  for (const p of people) {
+    const pub = p.getTrackPublication(Track.Source.ScreenShare);
+    if (!pub || !pub.track || pub.isMuted || (p !== room.localParticipant && unwatched.has(p.identity))) continue;
+    const apub = Track.Source.ScreenShareAudio ? p.getTrackPublication(Track.Source.ScreenShareAudio) : null;
+    const uid = participantUserId(p);
+    const m = members.find((x) => x.id === uid);
+    clipScreens.push({
+      sid: pub.track.sid, videoTrack: pub.track.mediaStreamTrack,
+      audioTrack: apub && apub.track && !apub.isMuted ? apub.track.mediaStreamTrack : null,
+      name: m ? m.displayName : (p.name || p.identity),
+    });
+  }
+  syncClipBuffers(clipScreens);
   const tiles = [];
   for (const p of people) {
     const isLocal = p === room.localParticipant;

@@ -132,7 +132,7 @@ module.exports = function socialRoutes(r) {
 
   r.get('/dms', wrap(async (req, res) => {
     const { rows: chans } = await db.query(
-      `SELECT c.id, c.name, c.dm_key, c.created_by,
+      `SELECT c.id, c.name, c.dm_key, c.created_by, c.disappearing_seconds,
               (SELECT max(m.created_at) FROM messages m WHERE m.channel_id = c.id) AS last_at
        FROM dm_members me JOIN channels c ON c.id = me.channel_id AND c.kind = 'dm'
        WHERE me.user_id = $1
@@ -165,6 +165,7 @@ module.exports = function socialRoutes(r) {
         user: isGroup ? null : users[0],
         users,
         lastMessageAt: c.last_at,
+        disappearingSeconds: c.disappearing_seconds || 0,
         voice: voiceStates[c.id] || [],
         ...(states.get(c.id) || { unread: false, mentions: 0 }),
       });
