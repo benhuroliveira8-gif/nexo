@@ -157,6 +157,35 @@ function uploadRouter(requireAuth) {
       }
     });
 
+  // Capa do servidor (banner), quem pode gerenciar o servidor. Imagem crua (GIF animado vale).
+  r.post('/servers/:id/banner',
+    requireAuth,
+    express.raw({ type: 'application/octet-stream', limit: AVATAR_MAX }),
+    async (req, res, next) => {
+      try {
+        const serverId = Number(req.params.id);
+        const ctx = Number.isInteger(serverId) && serverId > 0 && await memberContext(serverId, req.userId);
+        if (!ctx) return res.status(404).json({ error: 'Servidor não encontrado.' });
+        if (!ctx.can(P.MANAGE_SERVER)) return res.status(403).json({ error: 'Você não tem permissão para isso.' });
+        const data = req.body;
+        const ext = Buffer.isBuffer(data) && imageExt(data);
+        if (!ext) return res.status(400).json({ error: 'Envie uma imagem PNG, JPG, GIF ou WEBP.' });
+        const id = `${crypto.randomBytes(12).toString('hex')}.${ext}`;
+        await fs.promises.writeFile(path.join(AVATAR_DIR, id), data);
+        const { rows } = await db.query(
+          `UPDATE servers s SET banner_id = $2 FROM servers old WHERE s.id = $1 AND old.id = s.id
+           RETURNING old.banner_id AS previous, s.*`,
+          [serverId, id],
+        );
+        if (rows[0]?.previous) removeAvatar(rows[0].previous);
+        audit(serverId, req.userId, 'server_banner');
+        events.serverChanged(serverId);
+        res.json({ server: S.server(rows[0]) });
+      } catch (err) {
+        next(err);
+      }
+    });
+
   // Emoji personalizado: imagem crua (até 256 KB), nome no cabeçalho X-Emoji-Name.
   r.post('/servers/:id/emojis',
     requireAuth,
@@ -228,6 +257,7 @@ function serveFile(req, res, next) {
     .then(({ rows }) => {
       const a = rows[0];
       if (!a) return res.status(404).end();
+      if (a.purged_at) return res.status(410).type('text/plain').send('Arquivo antigo removido pela limpeza automática.');
       const inline = S.MEDIA_TYPES.has(a.content_type);
       const encoded = encodeURIComponent(a.filename);
       res.set({

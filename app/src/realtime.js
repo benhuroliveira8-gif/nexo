@@ -9,6 +9,8 @@ const voice = require('./voice');
 const push = require('./push');
 const { P, channelAccess } = require('./permissions');
 
+const VERSION = require('../package.json').version;
+
 const validId = (v) => Number.isInteger(v) && v > 0 && v < 2 ** 31;
 
 async function serverIdsOf(userId) {
@@ -51,6 +53,10 @@ module.exports = function setupRealtime(io) {
   io.on('connection', (socket) => {
     const user = socket.data.user;
     const becameOnline = presence.connect(user.id);
+
+    // Versão do Nexo: o navegador compara para saber se precisa recarregar depois de uma atualização.
+    socket.emit('hello', { version: VERSION, restarting: events.restartNotice() });
+    db.query('UPDATE users SET last_seen_at = now() WHERE id = $1', [user.id]).catch(() => {});
 
     // Cada usuário tem uma sala própria e entra na sala de cada servidor seu.
     socket.join(`user:${user.id}`);
@@ -238,6 +244,7 @@ module.exports = function setupRealtime(io) {
       presence.setVisible(user.id, socket.id, false);
       voice.disconnect(user.id, socket.id);
       if (!presence.disconnect(user.id)) return;
+      db.query('UPDATE users SET last_seen_at = now() WHERE id = $1', [user.id]).catch(() => {});
       broadcastPresence(user.id).catch(() => {});
     });
   });

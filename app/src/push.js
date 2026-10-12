@@ -128,9 +128,30 @@ async function sendToUsers(userIds, payload) {
     tag: payload.tag || undefined,
     kind: payload.kind || 'message',
   };
-  await Promise.all(rows.map((sub) => sendOne(sub, data, keys).catch((err) => {
+  // Mensagem: cada pessoa recebe um "vale-resposta" próprio (responder pela notificação).
+  const forUser = (userId) => (payload.reply ? { ...data, reply: replyToken({ u: userId, ...payload.reply }) } : data);
+  await Promise.all(rows.map((sub) => sendOne(sub, forUser(sub.user_id), keys).catch((err) => {
     console.warn('Falha ao enviar push:', err.message);
   })));
+}
+
+// ---------------------------------------------------------------- Responder pela notificação
+// Vale-resposta assinado: { u: quem recebeu, c: canal, m: mensagem } por 3 dias.
+const SECRET = () => `${process.env.JWT_SECRET || ''}:push-reply`;
+function replyToken({ u, c, m }) {
+  const body = Buffer.from(JSON.stringify({ u, c, m: String(m), e: Date.now() + 3 * 86400000 })).toString('base64url');
+  const sig = crypto.createHmac('sha256', SECRET()).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
+function readReplyToken(token) {
+  const [body, sig] = String(token || '').split('.');
+  if (!body || !sig || body.length > 400) return null;
+  const want = crypto.createHmac('sha256', SECRET()).update(body).digest('base64url');
+  if (sig.length !== want.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(want))) return null;
+  try {
+    const t = JSON.parse(Buffer.from(body, 'base64url').toString());
+    return t.e > Date.now() && Number.isInteger(t.u) && Number.isInteger(t.c) ? t : null;
+  } catch { return null; }
 }
 
 async function subscribe(userId, { endpoint, keys }) {
@@ -156,4 +177,4 @@ async function subscribe(userId, { endpoint, keys }) {
 const unsubscribe = (userId, endpoint) =>
   db.query('DELETE FROM push_subscriptions WHERE user_id = $1 AND endpoint = $2', [userId, String(endpoint || '')]);
 
-module.exports = { publicKey, sendToUsers, subscribe, unsubscribe, encrypt, validEndpoint };
+module.exports = { publicKey, sendToUsers, replyToken, readReplyToken, subscribe, unsubscribe, encrypt, validEndpoint };

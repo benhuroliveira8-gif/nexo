@@ -47,6 +47,22 @@
         </label>
         <p class="form-error" id="auth-error" role="alert"></p>
         <button class="btn primary" type="submit" id="auth-submit">Entrar</button>
+        <button class="link forgot-link" type="button" id="forgot-link">Esqueci a senha</button>
+      </form>
+      <form id="recover-form" class="twofa-form" hidden autocomplete="off">
+        <label>Usuário
+          <input name="username" required minlength="3" maxlength="32" autocomplete="username" autocapitalize="none" spellcheck="false" />
+        </label>
+        <label>Chave de recuperação ou código da administração
+          <input name="code" required maxlength="40" autocapitalize="characters" spellcheck="false" placeholder="ABCD-EFGH" />
+        </label>
+        <label>Nova senha
+          <input name="newPassword" type="password" required minlength="6" maxlength="128" autocomplete="new-password" />
+        </label>
+        <p class="muted small">Não tem a chave? Peça para a administração do Nexo um código para criar senha nova (vale 24 horas).</p>
+        <p class="form-error" id="recover-error" role="alert"></p>
+        <button class="btn primary" type="submit" id="recover-submit">Criar senha nova</button>
+        <button class="link" type="button" id="recover-back">← Voltar</button>
       </form>
       <form id="twofa-form" class="twofa-form" hidden autocomplete="off">
         <label>Código de verificação
@@ -143,6 +159,7 @@
     <aside class="search-panel" id="search-panel" hidden aria-label="Resultados da busca"></aside>
   </div>
 
+  <div class="update-banner" id="update-banner" role="status" hidden></div>
   <div class="toast" id="toast" role="status"></div>
   <div class="incoming-calls" id="incoming-calls" aria-live="assertive"></div>
   <!-- O áudio de quem está na voz toca por aqui (invisível). -->

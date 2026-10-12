@@ -113,6 +113,16 @@ export function roleColor(userId) {
   return colored ? colored.color : null;
 }
 
+// Estilo do nome pela cor do cargo (com degradê se o cargo tiver duas cores).
+export function roleStyle(userId) {
+  const m = memberById(userId);
+  const r = memberRoles(m).find((x) => x.color);
+  if (!r) return null;
+  return r.color2
+    ? `background:linear-gradient(90deg,${r.color},${r.color2});-webkit-background-clip:text;background-clip:text;color:transparent`
+    : `color:${r.color}`;
+}
+
 // Todos os usuários que conhecemos (para mostrar menções com o nome certo).
 export function knownUsers() {
   const map = new Map();

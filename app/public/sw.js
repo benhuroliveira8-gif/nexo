@@ -1,13 +1,14 @@
 // Service worker do Nexo: deixa o app instalável, abre mais rápido e mostra
 // as notificações push mesmo com o Nexo fechado.
-const CACHE = 'nexo-v13';
+const CACHE = 'nexo-v14';
 const SHARE_CACHE = 'nexo-share'; // o que foi compartilhado da galeria espera aqui até o app abrir
 const SHELL = [
   '/', '/styles.css', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/badge-96.png',
   '/js/main.js', '/js/util.js', '/js/state.js', '/js/home.js', '/js/settings.js', '/js/emoji.js',
   '/js/voice.js', '/js/developer.js', '/js/markdown.js', '/js/theme.js', '/js/pwa.js', '/js/qr.js',
   '/js/sortable.js', '/js/account.js', '/js/extras.js', '/js/forum.js', '/js/commands.js', '/js/tts.js',
-  '/js/profile.js', '/js/callsounds.js', '/js/levelsui.js', '/js/share.js', '/socket.io/socket.io.js',
+  '/js/profile.js', '/js/callsounds.js', '/js/levelsui.js', '/js/share.js', '/js/admin.js', '/js/updates.js',
+  '/js/translate.js', '/js/economy.js', '/socket.io/socket.io.js',
 ];
 
 self.addEventListener('install', (event) => {
@@ -78,21 +79,44 @@ self.addEventListener('push', (event) => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch { data = { body: event.data && event.data.text() }; }
   const call = data.kind === 'call';
+  // Mensagem: botões "Responder" (com caixa de texto onde o aparelho deixa) e "Marcar como lida".
+  const actions = data.reply ? [
+    { action: 'reply', title: '↩️ Responder', type: 'text', placeholder: 'Escreva a resposta…' },
+    { action: 'read', title: '✔️ Marcar como lida' },
+  ] : call ? [{ action: 'open', title: '📞 Atender' }] : [];
   event.waitUntil(self.registration.showNotification(data.title || 'Nexo', {
     body: data.body || '',
     tag: data.tag || undefined,
     renotify: !!data.tag,
     icon: '/icons/icon-192.png',
     badge: '/icons/badge-96.png',
-    data: { url: data.url || '/' },
+    data: { url: data.url || '/', reply: data.reply || null },
+    actions,
     requireInteraction: call,
     vibrate: call ? [300, 150, 300, 150, 300] : [120, 60, 120],
   }));
 });
 
+const postJson = (path, body) => fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const url = (event.notification.data && event.notification.data.url) || '/';
+  const nd = event.notification.data || {};
+  // Respondeu direto na notificação (computador/Android com caixa de texto).
+  if (event.action === 'reply' && nd.reply && event.reply) {
+    event.waitUntil(postJson('/api/push/reply', { token: nd.reply, content: String(event.reply).slice(0, 4000) })
+      .then((res) => self.registration.showNotification(res.ok ? '✅ Resposta enviada' : '⚠️ Não deu para responder', {
+        body: res.ok ? event.reply : 'Abra o Nexo para responder.', tag: 'resposta', icon: '/icons/icon-192.png', badge: '/icons/badge-96.png', silent: true,
+      }))
+      .catch(() => {}));
+    return;
+  }
+  if (event.action === 'read' && nd.reply) {
+    event.waitUntil(postJson('/api/push/read', { token: nd.reply }).catch(() => {}));
+    return;
+  }
+  // "Responder" sem caixa de texto: abre o Nexo já pronto para escrever.
+  const url = event.action === 'reply' ? `${nd.url || '/'}${(nd.url || '/').includes('?') ? '&' : '?'}responder=1` : (nd.url || '/');
   event.waitUntil((async () => {
     const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     const win = wins.find((w) => new URL(w.url).origin === self.location.origin);

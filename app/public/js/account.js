@@ -11,6 +11,7 @@ import { devicesSection } from './devices.js';
 import { profileLookSection, dndScheduleSection, paintBanner } from './profile.js';
 import { previewRingtone, playJoin, playLeave } from './callsounds.js';
 import { ttsSettingsSection } from './tts.js';
+import { economySection } from './economy.js';
 import { downloadHelper } from './remote.js';
 import {
   pushStatus, enablePush, disablePush, canPromptInstall, promptInstall, isStandalone, isIos, onPwaChange,
@@ -198,6 +199,16 @@ function pageSecurity() {
           h('button', { class: 'btn', onclick: recoveryDialog }, 'Gerar novos códigos de recuperação'),
           h('button', { class: 'btn danger-ghost', onclick: disable2faDialog }, 'Desligar 2FA'))
         : h('button', { class: 'btn primary', onclick: enable2faDialog }, 'Ligar verificação em duas etapas')),
+    block('Chave de recuperação (esqueci a senha)',
+      h('p', { class: 'muted' }, me.hasRecoveryKey
+        ? '✅ Você tem uma chave guardada. Se esquecer a senha, clique em "Esqueci a senha" na tela de entrar e use a chave. Ela vale uma vez.'
+        : 'Crie uma chave e guarde num lugar seguro (papel, gerenciador de senhas). Se você esquecer a senha, ela permite criar uma nova sem depender de ninguém.'),
+      h('div', { class: 'row-actions' },
+        h('button', { class: me.hasRecoveryKey ? 'btn' : 'btn primary', onclick: recoveryKeyDialog }, me.hasRecoveryKey ? 'Gerar outra chave' : 'Criar chave de recuperação'),
+        me.hasRecoveryKey ? h('button', {
+          class: 'btn danger-ghost',
+          onclick: busy(async () => { await api('/me/recovery-key', { method: 'DELETE' }); hooks.applyMe((await api('/me')).user); toast('Chave apagada.'); }),
+        }, 'Apagar chave') : null)),
     block('Aparelhos conectados',
       h('p', { class: 'muted' }, 'Perdeu o celular ou entrou num computador que não é seu? Saia de todos os aparelhos de uma vez. Este aparelho continua conectado.'),
       h('button', {
@@ -213,6 +224,39 @@ function pageSecurity() {
           },
         }),
       }, 'Sair de todos os aparelhos')));
+}
+
+function recoveryKeyDialog() {
+  const pass = h('input', { type: 'password', autocomplete: 'current-password' });
+  const code = state.me.twoFactor ? codeField() : null;
+  openDialog({
+    title: '🔑 Chave de recuperação',
+    text: 'Confirme que é você. A chave nova aparece uma vez só (a antiga, se houver, para de valer).',
+    body: h('div', {}, h('label', { class: 'field' }, 'Sua senha', pass), code ? h('label', { class: 'field' }, 'Código de verificação', code) : null),
+    actions: [
+      { label: 'Cancelar' },
+      {
+        label: 'Criar chave', kind: 'primary', submit: true,
+        onClick: async () => {
+          const { key } = await api('/me/recovery-key', { method: 'POST', body: { password: pass.value, code: code ? code.value : undefined } });
+          hooks.applyMe((await api('/me')).user);
+          setTimeout(() => showRecoveryKey(key), 50);
+        },
+      },
+    ],
+  });
+}
+
+function showRecoveryKey(key) {
+  openDialog({
+    title: '🔑 Guarde a sua chave',
+    text: 'Anote num papel ou salve no gerenciador de senhas. Ela não aparece de novo. Se esquecer a senha: tela de entrar → "Esqueci a senha".',
+    body: h('div', { class: 'recovery-codes' }, h('code', { class: 'big-key' }, key)),
+    actions: [
+      { label: 'Copiar', onClick: async () => { await copyText(key); toast('Chave copiada.'); return false; } },
+      { label: 'Já guardei', kind: 'primary', submit: true },
+    ],
+  });
 }
 
 function showRecoveryCodes(codes) {
@@ -341,6 +385,7 @@ function pageAppearance() {
   return h('div', { class: 'settings-page' },
     h('h2', {}, 'Aparência'),
     h('p', { class: 'muted' }, 'Vale só para este aparelho.'),
+    block('Economia', economySection(render)),
     block('Tema',
       h('div', { class: 'theme-options' },
         option('dark', 'Escuro', 'Confortável à noite'),

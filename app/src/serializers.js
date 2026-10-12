@@ -22,6 +22,9 @@ const me = (row) => ({
   activity: row.activity || null,
   dndSchedule: row.dnd_schedule || null,
   twoFactor: !!row.totp_enabled,
+  isAdmin: !!row.is_admin,
+  hasRecoveryKey: !!row.recovery_key_hash,
+  lastfmUser: row.lastfm_user || null,
 });
 
 const server = (row) => ({
@@ -29,6 +32,7 @@ const server = (row) => ({
   name: row.name,
   ownerId: row.owner_id,
   iconUrl: avatarUrl(row.icon_id),
+  bannerUrl: avatarUrl(row.banner_id),
 });
 
 const channel = (row) => ({
@@ -40,6 +44,7 @@ const channel = (row) => ({
   categoryId: row.category_id || null,
   private: !!row.private,
   stage: !!row.stage,
+  ...(row.kind === 'text' ? { announce: !!row.announce } : {}),
   ...(row.kind === 'thread' ? { solved: !!row.solved, pinned: !!row.pinned } : {}),
   ...(row.kind === 'forum' ? { topic: row.topic || null } : {}),
   parentChannelId: row.parent_channel_id || null,
@@ -51,6 +56,7 @@ const role = (row) => ({
   id: row.id,
   name: row.name,
   color: row.color,
+  color2: row.color2 || null,
   permissions: Number(row.permissions),
   position: row.position,
   isDefault: row.is_default,
@@ -65,6 +71,7 @@ const attachment = (row) => ({
   contentType: row.content_type,
   size: row.size,
   url: `/files/${row.id}/${encodeURIComponent(row.filename)}`,
+  ...(row.purged_at ? { purged: true } : {}),
   kind: IMAGE_TYPES.has(row.content_type) ? 'image'
     : row.content_type.startsWith('video/') && MEDIA_TYPES.has(row.content_type) ? 'video'
     : row.content_type.startsWith('audio/') && MEDIA_TYPES.has(row.content_type) ? 'audio'

@@ -29,7 +29,7 @@ app.get('/health', async (req, res) => {
       db.query('SELECT 1'),
       new Promise((_, reject) => setTimeout(() => reject(new Error('tempo esgotado')), 3000)),
     ]);
-    res.json({ ok: true, db: 'ok', uptime: Math.round(process.uptime()) });
+    res.json({ ok: true, db: 'ok', uptime: Math.round(process.uptime()), version: require('../package.json').version });
   } catch (err) {
     res.status(503).json({ ok: false, db: err.message });
   }
@@ -108,6 +108,9 @@ db.init()
     previews.startCleanup();
     require('./routes/events').startReminders();
     require('./routes/extras').startJobs();
+    require('./admin').startStorageJobs();
+    require('./admin').syncEnvAdmins().catch(() => {});
+    require('./lastfm').startLastfm();
     server.listen(PORT, () => console.log(`Nexo rodando na porta ${PORT}`));
   })
   .catch((err) => {
@@ -115,9 +118,23 @@ db.init()
     process.exit(1);
   });
 
+// Atualização sem susto: o Jenkins manda o sinal SIGUSR2 uns segundos antes de trocar o app.
+// Todo mundo vê "o Nexo vai atualizar em 20 s" e depois volta sozinho (inclusive na chamada).
+process.on('SIGUSR2', () => {
+  const seconds = Math.min(120, Math.max(5, Number(process.env.RESTART_NOTICE_S) || 20));
+  console.log(`Aviso de atualização enviado (${seconds} s).`);
+  events.announceRestart(seconds);
+});
+
 // Desliga com calma quando o Docker manda parar.
+let stopping = false;
 process.on('SIGTERM', () => {
-  io.close();
-  server.close(() => db.pool.end().then(() => process.exit(0)));
+  if (stopping) return;
+  stopping = true;
+  events.announceRestart(0);
+  setTimeout(() => {
+    io.close();
+    server.close(() => db.pool.end().then(() => process.exit(0)));
+  }, 600);
   setTimeout(() => process.exit(0), 5000).unref();
 });

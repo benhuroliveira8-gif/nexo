@@ -7,7 +7,7 @@ import {
 } from './util.js';
 import { openEmojiPicker, setCustomEmojiProvider, emojiNode } from './emoji.js';
 import {
-  state, P, can, isOwner, myTop, memberById, memberRoles, memberTop, roleColor, knownUsers,
+  state, P, can, isOwner, myTop, memberById, memberRoles, memberTop, roleColor, roleStyle, knownUsers,
   currentDm, currentChannel, dmName,
 } from './state.js';
 import { renderFriendsPage } from './home.js';
@@ -16,7 +16,7 @@ import {
 } from './settings.js';
 import {
   initVoice, voiceState, inVoice, joinVoice, leaveVoice, resyncAfterReconnect, renderVoicePanel, renderStage,
-  openVolumePopover, playSoundEvent, onStageRole, noticeVoiceStates,
+  openVolumePopover, playSoundEvent, onStageRole, noticeVoiceStates, quietVoiceSounds,
 } from './voice.js';
 import { startRingtone, stopRingtone, stopRingback, isRingingBack, playBusy } from './callsounds.js';
 import { quietNow, activityText, activityBlock, paintBanner, badgesRow, levelBlock } from './profile.js';
@@ -28,6 +28,9 @@ import { maybeSpeak, ttsHeaderButton, onTtsChange } from './tts.js';
 import { renderForumPage, onForumChanged, postHeaderActions } from './forum.js';
 import { rankingSidebarItem } from './levelsui.js';
 import { readPendingShare, openShareDialog } from './share.js';
+import { openAdmin } from './admin.js';
+import { translateMessage, translationOf, hideTranslation, langName } from './translate.js';
+import { initUpdates, onHello, onRestarting, onDisconnected, maybeReloadLater } from './updates.js';
 import { openDeveloper } from './developer.js';
 import { renderMarkdown, isJumbo, stripMarkdown } from './markdown.js';
 import { openGifPicker, buildGif, setGifUser } from './gifs.js';
@@ -60,6 +63,8 @@ let authMode = 'login';
 let registrationRequiresCode = false;
 api('/config').then((c) => {
   registrationRequiresCode = !!c.registrationRequiresCode;
+  state.config = c;
+  initUpdates({ version: c.version });
   if (authMode === 'register') $('#reg-code-field').hidden = !registrationRequiresCode;
 }).catch(() => {});
 
@@ -80,8 +85,50 @@ function showAuth(mode = 'login') {
   $('#auth-switch').textContent = register ? 'Entrar' : 'Cadastre-se';
   $('#auth-form [name=password]').autocomplete = register ? 'new-password' : 'current-password';
   $('#auth-error').textContent = '';
+  $('#forgot-link').hidden = register;
+  $('#recover-form').hidden = true;
+  $('#auth-form').hidden = false;
+  $('#auth-switch').parentElement.hidden = false;
   $('#auth-form [name=username]').focus();
 }
+
+// Esqueci a senha: chave de recuperação (que a pessoa guardou) ou código da administração.
+$('#forgot-link').addEventListener('click', () => {
+  $('#auth-form').hidden = true;
+  $('#auth-switch').parentElement.hidden = true;
+  $('#recover-form').hidden = false;
+  $('#auth-title').textContent = 'Criar uma senha nova';
+  $('#auth-subtitle').textContent = 'Use a sua chave de recuperação ou o código que a administração do Nexo te passou.';
+  $('#recover-error').textContent = '';
+  $('#recover-form [name=username]').value = $('#auth-form [name=username]').value;
+  $('#recover-form [name=username]').focus();
+});
+$('#recover-back').addEventListener('click', () => showAuth('login'));
+$('#recover-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.currentTarget;
+  const btn = $('#recover-submit');
+  btn.disabled = true;
+  $('#recover-error').textContent = '';
+  try {
+    const data = await api('/auth/recover', {
+      method: 'POST',
+      body: { username: form.username.value.trim().toLowerCase(), code: form.code.value, newPassword: form.newPassword.value },
+    });
+    form.reset();
+    if (data.token) {
+      beginSession(data.token, data.user);
+      setTimeout(() => toast('Senha nova criada! 🔑 Crie outra chave de recuperação em Configurações → Segurança.'), 800);
+    } else {
+      showAuth('login');
+      toast('Senha nova criada! Entre com ela (e o código do app autenticador).');
+    }
+  } catch (err) {
+    $('#recover-error').textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 $('#auth-switch').addEventListener('click', () => showAuth(authMode === 'login' ? 'register' : 'login'));
 
@@ -210,6 +257,7 @@ async function boot() {
     // Atalhos do ícone do app (segurar o ícone) e "Compartilhar → Nexo" da galeria.
     if (q.get('atalho')) sessionStorage.setItem('nexo.pendingShortcut', q.get('atalho'));
     if (q.get('compartilhar')) sessionStorage.setItem('nexo.pendingShare', q.get('compartilhar'));
+    if (q.get('admin')) sessionStorage.setItem('nexo.pendingAdmin', '1');
   }
   if (m || location.pathname !== '/' || location.search) history.replaceState(null, '', '/');
   registerServiceWorker((url) => openFromUrl(url));
@@ -260,6 +308,7 @@ async function start(user) {
     sessionStorage.removeItem('nexo.pendingOpen');
     openFromUrl(pendingOpen);
   }
+  if (sessionStorage.getItem('nexo.pendingAdmin')) { sessionStorage.removeItem('nexo.pendingAdmin'); if (user.isAdmin) openAdmin(); }
   const shortcut = sessionStorage.getItem('nexo.pendingShortcut');
   if (shortcut) { sessionStorage.removeItem('nexo.pendingShortcut'); runShortcut(shortcut); }
   const share = sessionStorage.getItem('nexo.pendingShare');
@@ -322,6 +371,8 @@ async function openFromUrl(url) {
     }
   }
   if (msgId && /^\d+$/.test(msgId)) jumpToMessage(channelId, msgId);
+  // "Responder" na notificação (sem caixa de texto no aparelho): abre já pronto para escrever.
+  if (q.get('responder')) setTimeout(() => { const m = msgId && (state.messages.get(channelId) || { items: [] }).items.find((x) => x.id === msgId); if (m && state.view !== 'home') setReply(m); input.focus(); }, 400);
 }
 
 // Notificações deste aparelho já chegam pelo push? Então não repetimos com o aviso do navegador.
@@ -452,12 +503,15 @@ function connectSocket() {
 
   socket.on('connect', () => {
     $('#conn-status').hidden = true;
+    if (connectedBefore) quietVoiceSounds(8000);
     socket.emit('client:visible', isVisible());
     if (connectedBefore) refreshAfterReconnect();
     connectedBefore = true;
   });
   socket.on('disconnect', (reason) => {
     $('#conn-status').hidden = false;
+    quietVoiceSounds(15000);
+    onDisconnected();
     // O servidor derrubou a conexão (ex.: senha trocada): tenta de novo com o token atual.
     // Se o token não valer mais, o "connect_error" leva para o login.
     if (reason === 'io server disconnect' && state.token) {
@@ -469,6 +523,9 @@ function connectSocket() {
     else $('#conn-status').hidden = false;
   });
 
+  socket.on('hello', onHello);
+  socket.on('server:restarting', onRestarting);
+  socket.on('admin:disk', (d) => toast(`⚠️ ${d.text} Abra Administração do Nexo para limpar.`));
   socket.on('message:new', onMessageNew);
   socket.on('message:updated', (msg) => {
     updateMessage(msg.channelId, msg.id, msg);
@@ -887,6 +944,8 @@ function renderSidebar() {
 
   if (state.view === 'home') {
     header.replaceChildren(h('span', { class: 'truncate' }, 'Mensagens diretas'));
+    header.classList.remove('with-banner');
+    header.style.backgroundImage = '';
     header.onclick = null;
     header.classList.remove('clickable');
     const pending = state.friends.incoming.length;
@@ -924,6 +983,10 @@ function renderSidebar() {
     h('span', { class: 'truncate' }, state.detail.server.name),
     h('span', { class: 'chevron', 'aria-hidden': 'true' }, '▾'),
   );
+  // Capa do servidor no topo da lista de canais.
+  const banner = state.detail.server.bannerUrl;
+  header.classList.toggle('with-banner', !!banner);
+  header.style.backgroundImage = banner ? `linear-gradient(to bottom, transparent 40%, rgba(0,0,0,.65)), url("${banner}")` : '';
   header.classList.add('clickable');
   header.onclick = () => openServerMenu(header);
 
@@ -995,7 +1058,7 @@ function renderSidebar() {
       h('button', {
         class: `side-item channel${c.id === state.channelId ? ' active' : ''}${c.unread ? ' unread' : ''}`,
         onclick: () => selectChannel(c.id),
-      }, h('span', { class: 'hash' }, '#'), h('span', { class: 'truncate' }, c.name), c.private ? lockIcon() : null, badge(c.mentions)),
+      }, h('span', { class: 'hash', title: c.announce ? 'Canal de anúncios' : null }, c.announce ? '📢' : '#'), h('span', { class: 'truncate' }, c.name), c.private ? lockIcon() : null, badge(c.mentions)),
       gear(c)), ...threadsOf(c.id).map(threadRow)];
   };
 
@@ -1087,6 +1150,7 @@ function openVoiceChannel(channel) {
 
 function onVoiceChange() {
   renderVoicePanel($('#voice-panel'));
+  if (!inVoice()) maybeReloadLater();
   const vs = voiceState();
   if (vs.channelId) stopRinging(vs.channelId);
   if (state.view === 'home') {
@@ -1141,7 +1205,7 @@ function renderHeader() {
   } else if (channel && channel.kind === 'forum') {
     title.replaceChildren(...[h('span', { class: 'hash' }, '💬'), h('span', { class: 'truncate' }, channel.name), channel.private ? lockIcon() : null].filter(Boolean));
   } else {
-    title.replaceChildren(...[h('span', { class: 'hash' }, channel && channel.kind === 'voice' ? (channel.stage ? '🎙️' : '🔊') : '#'), h('span', { class: 'truncate' }, channel ? channel.name : ''),
+    title.replaceChildren(...[h('span', { class: 'hash' }, channel && channel.kind === 'voice' ? (channel.stage ? '🎙️' : '🔊') : channel && channel.announce ? '📢' : '#'), h('span', { class: 'truncate' }, channel ? channel.name : ''),
       channel && channel.private ? lockIcon() : null].filter(Boolean));
   }
   if (dm) {
@@ -1262,12 +1326,11 @@ function renderMembers() {
     : h('div', { class: 'member-group' },
       h('div', { class: 'section-title' }, `${title} — ${members.length}`),
       members.map((m) => {
-        const color = roleColor(m.id);
         return h('button', { class: `member${isOnline ? '' : ' off'}`, title: `@${m.username}`, onclick: (e) => openProfile(e.currentTarget, m) },
           avatar(m, { size: 'sm', online: isOnline ? presenceOf(m) : 'offline' }),
           h('span', { class: 'member-info' },
             h('span', { class: 'member-name' },
-              h('span', { class: 'name truncate', style: color ? `color:${color}` : null }, m.displayName),
+              h('span', { class: 'name truncate', style: roleStyle(m.id) }, m.displayName),
               m.isBot ? botTag() : null,
               m.timeoutUntil ? h('span', { class: 'timeout-mark', title: 'De castigo' }, '⏳') : null,
               m.id === ownerId ? h('span', { class: 'owner-badge', title: 'Dono do servidor' }, '👑') : null),
@@ -1364,7 +1427,7 @@ function renderMessages({ stick = 'if-near' } = {}) {
   } else {
     const dm = currentDm();
     const channel = currentChannel();
-    nodes.push(cached('top', `start|${dm ? dmName(dm) : channel && channel.name}|${dm && dm.user && dm.user.avatarUrl}`, () => {
+    nodes.push(cached('top', `start|${dm ? dmName(dm) : channel && channel.name}|${channel && channel.announce}|${dm && dm.user && dm.user.avatarUrl}`, () => {
       if (dm && dm.isGroup) {
         return h('div', { class: 'channel-start' }, dmAvatar(dm, 'lg'), h('h2', {}, dmName(dm)),
           h('p', { class: 'muted' }, 'Este é o começo do grupo. ', h('button', { class: 'link', onclick: () => addToGroupDialog(dm) }, 'Chamar mais amigos')));
@@ -1387,9 +1450,11 @@ function renderMessages({ stick = 'if-near' } = {}) {
               ? h('button', { class: 'link', onclick: () => jumpToMessage(parent.id, channel.parentMessageId) }, 'Ver mensagem original')
               : null));
       }
-      return h('div', { class: 'channel-start' }, h('div', { class: 'start-hash' }, '#'),
+      return h('div', { class: 'channel-start' }, h('div', { class: 'start-hash' }, channel && channel.announce ? '📢' : '#'),
         h('h2', {}, `Bem-vindo a #${channel ? channel.name : ''}!`),
-        h('p', { class: 'muted' }, 'Este é o começo do canal.'));
+        h('p', { class: 'muted' }, channel && channel.announce
+          ? 'Canal de anúncios: a moderação posta aqui. Reaja ou comente numa thread 🧵.'
+          : 'Este é o começo do canal.'));
     }));
   }
 
@@ -1512,7 +1577,7 @@ function buildMessage(m, grouped) {
   if (!grouped) {
     const color = roleColor(m.author.id) || (effectiveTheme() === 'light' ? `hsl(${hueFor(m.author.id)} 60% 36%)` : `hsl(${hueFor(m.author.id)} 75% 72%)`);
     body.append(h('div', { class: 'msg-head' },
-      h('button', { class: 'msg-author', style: `color:${color}`, onclick: (e) => openProfile(e.currentTarget, authorUser) }, m.author.displayName),
+      h('button', { class: 'msg-author', style: roleStyle(m.author.id) || `color:${color}`, onclick: (e) => openProfile(e.currentTarget, authorUser) }, m.author.displayName),
       m.author.isBot ? botTag() : null,
       h('span', { class: 'msg-time', title: fullTime(date) }, fullTime(date)),
       m.pinnedAt ? h('span', { class: 'pin-mark', title: 'Mensagem fixada' }, '📌') : null));
@@ -1529,6 +1594,16 @@ function buildMessage(m, grouped) {
     body.append(h('div', { class: `msg-text${m.pending ? ' pending' : ''}${m.failed ? ' failed' : ''}${isJumbo(m.content) ? ' jumbo' : ''}` },
       renderContent(m.content),
       m.editedAt ? h('span', { class: 'edited', title: fullTime(new Date(m.editedAt)) }, ' (editado)') : null));
+  }
+
+  const tr = !editing && translationOf(m.id);
+  if (tr) {
+    body.append(h('div', { class: 'translation' },
+      tr.loading ? h('span', { class: 'muted small' }, '🌐 Traduzindo…')
+        : tr.same ? h('span', { class: 'muted small' }, '🌐 Já está no seu idioma.')
+          : [h('div', { class: 'tr-head muted small' }, `🌐 Traduzido do ${langName(tr.from)} • `,
+            h('button', { class: 'link', onclick: () => { hideTranslation(m.id); m._v = (m._v || 0) + 1; renderMessages(); } }, 'ver só o original')),
+          h('div', { class: 'tr-text' }, renderContent(tr.text))]));
   }
 
   if (m.poll) {
@@ -1564,9 +1639,15 @@ function buildMessage(m, grouped) {
     const tools = [];
     const channel = currentChannel();
     if (can(P.ADD_REACTIONS)) tools.push(h('button', { class: 'tool', title: 'Reagir', onclick: (e) => openEmojiPicker(e.currentTarget, (emoji) => toggleReaction(m, emoji, true)) }, '😀'));
-    if (can(P.SEND_MESSAGES)) tools.push(h('button', { class: 'tool', title: 'Responder', onclick: () => setReply(m) }, '↩️'));
+    if (can(P.SEND_MESSAGES) && !(channel && channel.announce && !can(P.MANAGE_MESSAGES))) tools.push(h('button', { class: 'tool', title: 'Responder', onclick: () => setReply(m) }, '↩️'));
     tools.push(h('button', { class: `tool${isSaved(m.id) ? ' on' : ''}`, title: isSaved(m.id) ? 'Tirar das salvas' : 'Salvar mensagem (só você vê)', onclick: () => toggleSaved(m) }, '🔖'));
     tools.push(h('button', { class: 'tool', title: 'Lembrar de mim depois', onclick: (e) => openReminderMenu(e.currentTarget, m) }, '⏰'));
+    if (m.content && !mine) {
+      tools.push(h('button', {
+        class: 'tool', title: 'Traduzir',
+        onclick: () => translateMessage(m, () => { m._v = (m._v || 0) + 1; if (m.channelId === state.channelId) renderMessages(); }),
+      }, '🌐'));
+    }
     if (channel && channel.kind === 'text' && can(P.SEND_MESSAGES)) {
       tools.push(h('button', { class: 'tool', title: m.thread ? 'Abrir thread' : 'Criar thread', onclick: () => (m.thread ? selectChannel(m.thread.id) : createThreadDialog(m)) }, '🧵'));
     }
@@ -1597,6 +1678,10 @@ function buildAttachment(a, pending) {
   if (pending || a.local) {
     if (a.isVoice) return h('div', { class: 'voice-msg pending' }, h('span', { class: 'vm-play' }, '🎤'), h('span', { class: 'muted' }, `Mensagem de voz · ${fmtDuration(a.duration)}`));
     return h('div', { class: 'att-file' }, h('span', { class: 'att-icon' }, '📎'), h('span', { class: 'truncate' }, a.filename));
+  }
+  if (a.purged) {
+    return h('div', { class: 'att-file purged', title: 'A limpeza automática do Nexo apagou este arquivo antigo.' },
+      h('span', { class: 'att-icon' }, '🗑️'), h('span', { class: 'truncate' }, a.filename), h('span', { class: 'muted small' }, 'arquivo antigo removido'));
   }
   if (a.isVoice && a.kind === 'audio') return buildVoicePlayer(a);
   if (a.kind === 'image') {
@@ -1728,7 +1813,8 @@ function renderComposerState() {
   const show = !!state.channelId && !(ch && (ch.kind === 'voice' || ch.kind === 'forum'));
   $('#composer-area').hidden = !show;
   if (!show) return;
-  const allowed = can(P.SEND_MESSAGES);
+  const announceOnly = !!(ch && ch.kind === 'text' && ch.announce && !can(P.MANAGE_MESSAGES));
+  const allowed = can(P.SEND_MESSAGES) && !announceOnly;
   input.disabled = !allowed;
   $('#composer').classList.toggle('disabled', !allowed);
   $('#btn-attach').hidden = !allowed;
@@ -1737,7 +1823,9 @@ function renderComposerState() {
   const timeout = state.view !== 'home' && state.detail && state.detail.me.timeoutUntil;
   input.placeholder = timeout
     ? `Você está de castigo até ${fullTime(new Date(timeout)).replace(/^Hoje às /, '')} e só pode ler.`
-    : !allowed
+    : announceOnly
+      ? '📢 Canal de anúncios: só a moderação escreve. Reaja ou comente numa thread 🧵.'
+      : !allowed
       ? 'Você não tem permissão para enviar mensagens aqui.'
       : dm ? (dm.isGroup ? `Conversar em ${dmName(dm)}` : `Conversar com @${dm.user.username}`)
         : channel && channel.kind === 'thread' ? `Conversar em 🧵 ${channel.name}` : `Conversar em #${channel ? channel.name : ''}`;
@@ -2465,7 +2553,7 @@ export function openProfile(anchor, user) {
     if (inCallWithThem) actions.push(h('button', { class: 'btn', onclick: (e) => openVolumePopover(e.currentTarget, user) }, '🔊 Volume'));
   }
 
-  const color = member ? roleColor(member.id) : null;
+
   // "Sobre mim" e servidores em comum chegam um instante depois.
   const extra = h('div', { class: 'profile-extra' });
   const banner = h('div', { class: 'profile-banner', style: `--hue:${hueFor(user.id)}` });
@@ -2494,7 +2582,7 @@ export function openProfile(anchor, user) {
     banner,
     h('div', { class: 'profile-avatar' }, avatar(freshUser(user), { size: 'xl', online: online === undefined && !isMe ? undefined : (isMe ? status : (online ? status : 'offline')) })),
     h('div', { class: 'profile-body' },
-      h('h3', { style: color ? `color:${color}` : null }, freshUser(user).displayName, user.isBot ? botTag() : null),
+      h('h3', { style: member ? roleStyle(member.id) : null }, freshUser(user).displayName, user.isBot ? botTag() : null),
       h('div', { class: 'muted' }, `@${user.username}`),
       badgeSlot,
       statusText ? h('div', { class: 'profile-status' }, statusText) : null,
@@ -2558,8 +2646,11 @@ function createChannelDialog(kind = 'text', categoryId) {
   const name = h('input', { placeholder: 'novo-canal', maxlength: '100' });
   const topic = h('textarea', { class: 'textarea', rows: '2', maxlength: '500', placeholder: 'Ex.: Tire suas dúvidas aqui. Antes de postar, use a busca!' });
   const topicField = h('label', { class: 'field', hidden: chosen !== 'forum' }, 'Descrição / regras do fórum (opcional)', topic);
+  const announceBox = h('input', { type: 'checkbox', class: 'switch' });
+  const announceField = h('label', { class: 'switch-row', hidden: chosen !== 'text' },
+    h('span', { class: 'kind-text' }, h('strong', {}, '📢 Canal de anúncios'), h('span', { class: 'muted small' }, 'Só a moderação escreve; os outros reagem e comentam em threads.')), announceBox);
   const option = (value, icon, label, desc) => h('label', { class: 'kind-option' },
-    h('input', { type: 'radio', name: 'kind', value, checked: chosen === value, onchange: () => { chosen = value; topicField.hidden = value !== 'forum'; } }),
+    h('input', { type: 'radio', name: 'kind', value, checked: chosen === value, onchange: () => { chosen = value; topicField.hidden = value !== 'forum'; announceField.hidden = value !== 'text'; } }),
     h('span', { class: 'kind-icon' }, icon),
     h('span', { class: 'kind-text' }, h('strong', {}, label), h('span', { class: 'muted small' }, desc)));
   const fallbackCat = categoryId !== undefined ? categoryId
@@ -2574,6 +2665,7 @@ function createChannelDialog(kind = 'text', categoryId) {
         option('forum', '💬', 'Fórum', 'Cada post vira um tópico com respostas (dúvidas, sugestões, guias)')),
       h('label', { class: 'field' }, 'Nome do canal', name),
       topicField,
+      announceField,
       opts.el),
     actions: [
       { label: 'Cancelar' },
@@ -2581,7 +2673,7 @@ function createChannelDialog(kind = 'text', categoryId) {
         label: 'Criar canal', kind: 'primary', submit: true,
         onClick: async () => {
           if (!name.value.trim()) throw new Error('Dê um nome ao canal.');
-          const { channel } = await api(`/servers/${state.view}/channels`, { method: 'POST', body: { name: name.value.trim(), kind: chosen, ...(chosen === 'forum' ? { topic: topic.value } : {}), ...opts.values() } });
+          const { channel } = await api(`/servers/${state.view}/channels`, { method: 'POST', body: { name: name.value.trim(), kind: chosen, ...(chosen === 'forum' ? { topic: topic.value } : {}), ...(chosen === 'text' ? { announce: announceBox.checked } : {}), ...opts.values() } });
           await refreshDetail();
           await selectChannel(channel.id);
         },
@@ -2637,11 +2729,14 @@ function editChannelDialog(channel) {
   const opts = !thread && can(P.MANAGE_CHANNELS) ? channelOptionsFields(channel) : null;
   const stageBox = channel.kind === 'voice' && can(P.MANAGE_CHANNELS) ? h('input', { type: 'checkbox', class: 'switch', checked: !!channel.stage }) : null;
   const topicBox = channel.kind === 'forum' && can(P.MANAGE_CHANNELS) ? h('textarea', { class: 'textarea', rows: '2', maxlength: '500' }) : null;
+  const announceBox = channel.kind === 'text' && can(P.MANAGE_CHANNELS) ? h('input', { type: 'checkbox', class: 'switch', checked: !!channel.announce }) : null;
   if (topicBox) topicBox.value = channel.topic || '';
   openDialog({
     title: thread ? 'Editar thread' : 'Editar canal',
     body: h('div', {}, h('label', { class: 'field' }, thread ? 'Nome da thread' : 'Nome do canal', input2),
       topicBox ? h('label', { class: 'field' }, 'Descrição / regras do fórum', topicBox) : null,
+      announceBox ? h('label', { class: 'switch-row' },
+        h('span', { class: 'kind-text' }, h('strong', {}, '📢 Canal de anúncios'), h('span', { class: 'muted small' }, 'Só a moderação escreve; os outros reagem e comentam em threads.')), announceBox) : null,
       opts ? opts.el : null,
       stageBox ? h('label', { class: 'switch-row' },
         h('span', { class: 'kind-text' }, h('strong', {}, '🎙️ Modo palco'),
@@ -2666,7 +2761,7 @@ function editChannelDialog(channel) {
         onClick: async () => {
           const name = input2.value.trim();
           if (!name) throw new Error('Dê um nome ao canal.');
-          await api(`/channels/${channel.id}`, { method: 'PATCH', body: { name, ...(opts ? opts.values() : {}), ...(stageBox ? { stage: stageBox.checked } : {}), ...(topicBox ? { topic: topicBox.value } : {}) } });
+          await api(`/channels/${channel.id}`, { method: 'PATCH', body: { name, ...(opts ? opts.values() : {}), ...(stageBox ? { stage: stageBox.checked } : {}), ...(topicBox ? { topic: topicBox.value } : {}), ...(announceBox ? { announce: announceBox.checked } : {}) } });
         },
       },
     ],
@@ -2956,6 +3051,7 @@ $('#me-info').addEventListener('click', (e) => openMenu(e.currentTarget, [
   { label: '🎨  Aparência (tema e cor)', onClick: () => openAccountSettings('appearance') },
   { label: '📲  Instalar o Nexo como app', hidden: !canPromptInstall(), onClick: () => promptInstall() },
   { label: '🤖  Desenvolvedor (bots)', onClick: () => openDeveloper() },
+  { label: '🛡️  Administração do Nexo', hidden: !state.me.isAdmin, onClick: () => openAdmin() },
   { separator: true },
   { label: '🚪  Sair da conta', danger: true, onClick: () => logout() },
 ]));
@@ -3329,3 +3425,9 @@ onThemeChange(() => { if (state.me && state.channelId) renderMessages(); });
 export { openDm, goHome, refreshDetail, loadFriends, renderAll, selectChannel, botTag };
 
 boot();
+
+// Versão nova do Nexo: recarrega sozinho só se a pessoa não estiver no meio de algo.
+initUpdates({
+  canReloadNow: () => !inVoice() && !input.value.trim() && !state.uploads.length
+    && !document.querySelector('dialog[open]') && !document.querySelector('.settings-overlay'),
+});

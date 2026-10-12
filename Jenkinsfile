@@ -37,6 +37,15 @@ pipeline {
 
     stage('Deploy') {
       steps {
+        // Avisa quem está usando ("o Nexo vai atualizar em 20 s") e espera um pouco antes de trocar.
+        // Se o app não estiver rodando, segue direto.
+        sh '''
+          # (só se a versão que está rodando já entende o aviso; as antigas fechariam com o sinal)
+          if docker compose ps --status running --services 2>/dev/null | grep -qx app \
+             && docker compose exec -T app grep -q SIGUSR2 src/server.js 2>/dev/null; then
+            docker compose kill -s SIGUSR2 app && sleep 20 || true
+          fi
+        '''
         sh 'docker compose up -d --remove-orphans'
       }
     }

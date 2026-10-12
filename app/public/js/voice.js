@@ -8,6 +8,7 @@ import {
   onParticipantGone, onScreenStopped, onRemoteScreenStopped, resetRemote,
 } from './remote.js';
 import { quickDevices } from './devices.js';
+import { isEconomy } from './economy.js';
 import { BUILTIN, builtinById, playSound } from './sounds.js';
 import { setSpeakerGetter, playJoin, playLeave, startRingback, stopRingback, isRingingBack } from './callsounds.js';
 
@@ -58,7 +59,8 @@ export const captureOptions = () => {
     ...pickDevice(st.micId),
   };
 };
-const cameraOptions = () => ({ ...pickDevice(voiceSettings().camId) });
+// Modo economia: a sua câmera envia em 360p / 15 fps.
+const cameraOptions = () => ({ ...pickDevice(voiceSettings().camId), ...(isEconomy() ? { resolution: { width: 640, height: 360, frameRate: 15 } } : {}) });
 
 // Saída de som escolhida (alto-falante/fone). Só Chrome/Edge/Firefox permitem escolher.
 export const canPickSpeaker = () => typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in HTMLMediaElement.prototype;
@@ -180,7 +182,10 @@ function announceJoin() {
 
 // ---------------------------------------------------------------- Sons de entrar/sair
 
-const callSoundsOn = () => voiceSettings().callSounds !== false && !vs.deafened;
+let quietUntil = 0;
+// Durante reconexões (atualização do Nexo, internet piscou) não toca "entrou/saiu" à toa.
+export const quietVoiceSounds = (ms = 6000) => { quietUntil = Math.max(quietUntil, Date.now() + ms); };
+const callSoundsOn = () => voiceSettings().callSounds !== false && !vs.deafened && Date.now() > quietUntil;
 let peopleHere = null; // Set de quem estava na chamada (para saber quem entrou/saiu)
 
 // O Nexo avisa quem está em cada canal de voz; aqui comparamos com a última lista.
@@ -203,7 +208,10 @@ export function joinVoice(opts) {
   return joinVoiceInner(opts);
 }
 
+let rejoinTries = 0;
+let rejoinTimer = null;
 async function joinVoiceInner({ channelId, channelName, serverId, serverName, isDm = false, video = false, ringback = false }) {
+  clearTimeout(rejoinTimer);
   if (!window.isSecureContext) return explainHttps();
   if (vs.connecting) return;
   if (vs.room && vs.channelId === channelId) return;
@@ -248,6 +256,7 @@ async function joinVoiceInner({ channelId, channelName, serverId, serverName, is
       try { await room.localParticipant.setCameraEnabled(true, cameraOptions()); vs.video = true; } catch { /* sem câmera */ }
     }
     announceJoin();
+    setTimeout(() => { if (vs.room) rejoinTries = 0; }, 30000);
     if (callSoundsOn()) playJoin();
     // Ligação em mensagem direta sem ninguém ainda: "tuuu… tuuu…" até atenderem.
     if (ringback && isDm) startRingback();
@@ -269,6 +278,7 @@ function micErrorMessage(err) {
 
 export async function leaveVoice({ silent = false } = {}) {
   const room = vs.room;
+  if (!silent) { clearTimeout(rejoinTimer); rejoinTries = 0; }
   stopRingback();
   if (room && !silent && callSoundsOn()) playLeave();
   peopleHere = null;
@@ -301,6 +311,10 @@ function wireRoom(room) {
   const changed = () => { if (vs.room === room) onChange(); };
 
   room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
+    // Modo economia: câmeras dos outros chegam em qualidade baixa.
+    if (isEconomy() && publication && publication.source === Track.Source.Camera && publication.setVideoQuality && LK().VideoQuality) {
+      try { publication.setVideoQuality(LK().VideoQuality.LOW); } catch { /* */ }
+    }
     if (track.kind === Track.Kind.Audio) {
       const el = track.attach();
       el.muted = vs.deafened;
@@ -350,8 +364,19 @@ function wireRoom(room) {
   });
   room.on(RoomEvent.Reconnecting, () => { vs.reconnecting = true; changed(); });
   room.on(RoomEvent.Reconnected, () => { vs.reconnecting = false; changed(); });
-  room.on(RoomEvent.Disconnected, () => {
+  room.on(RoomEvent.Disconnected, (reason) => {
     if (vs.room !== room) return;
+    // Caiu sem você pedir (internet piscou, servidor de voz reiniciou): tenta voltar sozinho.
+    // 1 = você saiu, 2 = entrou em outro aparelho, 4 = foi removido, 5 = sala apagada.
+    if (![1, 2, 4, 5].includes(Number(reason)) && rejoinTries < 3) {
+      rejoinTries++;
+      const target = { channelId: vs.channelId, channelName: vs.channelName, serverId: vs.serverId, serverName: vs.serverName, isDm: vs.isDm, video: vs.video };
+      toast('A chamada caiu. Reconectando…');
+      quietVoiceSounds(15000);
+      leaveVoice({ silent: true });
+      rejoinTimer = setTimeout(() => { if (!vs.room && !vs.connecting) joinVoice(target); }, 1500 * rejoinTries);
+      return;
+    }
     toast('Você foi desconectado da voz.');
     leaveVoice();
   });

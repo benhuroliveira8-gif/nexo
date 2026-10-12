@@ -9,9 +9,10 @@ const voice = require('../voice');
 const push = require('../push');
 const gifs = require('../gifs');
 const profile = require('../profile');
+const admin = require('../admin');
 const { wrap, fail, parseId } = require('./util');
 
-const USER_COLS = 'id, username, display_name, is_bot, avatar_id, status, status_text, status_expires_at, about, totp_enabled, token_version, banner_id, profile_color, activity, dnd_schedule';
+const USER_COLS = 'id, username, display_name, is_bot, avatar_id, status, status_text, status_expires_at, about, totp_enabled, token_version, banner_id, profile_color, activity, dnd_schedule, is_admin, recovery_key_hash, lastfm_user';
 
 // Código de convite para criar conta (opcional). Útil quando o Nexo fica
 // aberto na internet: sem o código, ninguém de fora consegue se cadastrar.
@@ -54,7 +55,11 @@ function cleanDisplayName(value, fallback) {
 
 // Rotas públicas (sem login).
 function publicRoutes(r) {
-  r.get('/config', (req, res) => res.json({ registrationRequiresCode: !!REGISTRATION_CODE }));
+  r.get('/config', (req, res) => res.json({
+    registrationRequiresCode: !!REGISTRATION_CODE,
+    version: require('../../package.json').version, // eslint-disable-line global-require
+    lastfm: require('../lastfm').enabled(), // eslint-disable-line global-require
+  }));
 
   r.post('/auth/register', wrap(async (req, res) => {
     if (REGISTRATION_CODE && String(req.body.inviteCode || '').trim() !== REGISTRATION_CODE) {
@@ -70,9 +75,10 @@ function publicRoutes(r) {
 
     try {
       const hash = await auth.hashPassword(password);
+      // A primeira pessoa a criar conta vira administradora do Nexo.
       const { rows } = await db.query(
-        `INSERT INTO users (username, display_name, password_hash)
-         VALUES ($1, $2, $3) RETURNING ${USER_COLS}`,
+        `INSERT INTO users (username, display_name, password_hash, is_admin)
+         VALUES ($1, $2, $3, NOT EXISTS (SELECT 1 FROM users WHERE is_admin)) RETURNING ${USER_COLS}`,
         [username, displayName, hash],
       );
       res.status(201).json({ token: auth.signToken(rows[0]), user: S.me(rows[0]) });
@@ -90,7 +96,7 @@ function publicRoutes(r) {
       fail(429, 'Muitas tentativas erradas. Espere 15 minutos e tente de novo.');
     }
     const { rows } = await db.query(
-      `SELECT ${USER_COLS}, password_hash FROM users WHERE username = $1 AND NOT is_bot`,
+      `SELECT ${USER_COLS}, password_hash, blocked_at, blocked_reason FROM users WHERE username = $1 AND NOT is_bot`,
       [username],
     );
     const user = rows[0];
@@ -99,9 +105,94 @@ function publicRoutes(r) {
       fail(401, 'Usuário ou senha incorretos.');
     }
     loginFails.delete(key);
+    if (user.blocked_at) fail(403, `Sua conta foi bloqueada pela administração do Nexo.${user.blocked_reason ? ` Motivo: ${user.blocked_reason}` : ''}`);
     // Com 2FA ligado, a senha certa só libera a segunda etapa (o código do app).
     if (user.totp_enabled) return res.json({ twoFactorRequired: true, ticket: auth.signTicket(user.id, '2fa-login') });
     res.json({ token: auth.signToken(user), user: S.me(user) });
+  }));
+
+  // Responder (ou marcar como lida) direto pela notificação do celular/computador.
+  // O service worker não tem o login, então usa o "vale-resposta" que veio na notificação.
+  async function replyAccess(req) {
+    const t = push.readReplyToken(req.body.token);
+    if (!t) fail(401, 'Notificação antiga. Abra o Nexo para responder.');
+    const { rows } = await db.query('SELECT 1 FROM users WHERE id = $1 AND blocked_at IS NULL AND NOT is_bot', [t.u]);
+    if (!rows[0]) fail(401, 'Conta indisponível.');
+    // eslint-disable-next-line global-require
+    const { channelAccess } = require('../permissions');
+    const access = await channelAccess(t.c, t.u);
+    if (!access) fail(404, 'Conversa não encontrada.');
+    return { t, access };
+  }
+  r.post('/push/reply', wrap(async (req, res) => {
+    const { t, access } = await replyAccess(req);
+    // eslint-disable-next-line global-require
+    const M = require('../messages');
+    try {
+      const message = await M.createMessage({
+        access, userId: t.u, content: req.body.content, replyToId: access.serverId ? t.m : undefined,
+      });
+      M.announceNew(access, message);
+      res.status(201).json({ ok: true, id: message.id });
+    } catch (err) {
+      if (err instanceof M.MessageError) {
+        if (/não existe mais/.test(err.message)) {
+          const message = await M.createMessage({ access, userId: t.u, content: req.body.content });
+          M.announceNew(access, message);
+          return res.status(201).json({ ok: true, id: message.id });
+        }
+        fail(400, err.message);
+      }
+      throw err;
+    }
+  }));
+  r.post('/push/read', wrap(async (req, res) => {
+    const { t } = await replyAccess(req);
+    await db.query(
+      `INSERT INTO channel_reads (user_id, channel_id, last_read_id) VALUES ($1, $2, $3)
+       ON CONFLICT (user_id, channel_id) DO UPDATE SET last_read_id = GREATEST(channel_reads.last_read_id, EXCLUDED.last_read_id)`,
+      [t.u, t.c, t.m],
+    );
+    events.emitTo([`user:${t.u}`], 'channel:read', { channelId: t.c, messageId: t.m });
+    res.json({ ok: true });
+  }));
+
+  // Esqueci a senha: usuário + chave de recuperação (que a pessoa guardou) ou o código
+  // que a administração do Nexo gerou. Cria a senha nova e sai de todos os aparelhos.
+  r.post('/auth/recover', wrap(async (req, res) => {
+    const username = String(req.body.username || '').trim().toLowerCase();
+    const key = `recover|${clientIp(req)}|${username}`;
+    if (recentFails(key).length >= 5) fail(429, 'Muitas tentativas erradas. Espere 15 minutos e tente de novo.');
+    const next = String(req.body.newPassword || '');
+    if (next.length < 6 || next.length > 128) fail(400, 'A nova senha precisa ter entre 6 e 128 caracteres.');
+    const given = admin.normCode(req.body.code);
+    const { rows } = await db.query(
+      'SELECT id, recovery_key_hash, reset_code_hash, reset_expires_at, blocked_at FROM users WHERE username = $1 AND NOT is_bot',
+      [username],
+    );
+    const u = rows[0];
+    const hash = given.length >= 8 ? admin.hashCode(given) : null;
+    const viaKey = u && hash && u.recovery_key_hash === hash;
+    const viaReset = u && hash && u.reset_code_hash === hash && u.reset_expires_at && new Date(u.reset_expires_at) > new Date();
+    if (!viaKey && !viaReset) {
+      loginFails.set(key, [...recentFails(key), Date.now()]);
+      fail(401, 'Usuário ou código incorretos (ou o código venceu).');
+    }
+    if (u.blocked_at) fail(403, 'Sua conta foi bloqueada pela administração do Nexo.');
+    loginFails.delete(key);
+    const pass = await auth.hashPassword(next);
+    // Cada código vale uma vez só.
+    const { rows: done } = await db.query(
+      `UPDATE users SET password_hash = $2, token_version = token_version + 1,
+         recovery_key_hash = CASE WHEN $3 THEN NULL ELSE recovery_key_hash END,
+         reset_code_hash = CASE WHEN $4 THEN NULL ELSE reset_code_hash END,
+         reset_expires_at = CASE WHEN $4 THEN NULL ELSE reset_expires_at END
+       WHERE id = $1 RETURNING ${USER_COLS}`,
+      [u.id, pass, !!viaKey, !!viaReset],
+    );
+    disconnectEverywhere(u.id);
+    if (done[0].totp_enabled) return res.json({ ok: true, twoFactorRequired: true });
+    res.json({ ok: true, token: auth.signToken(done[0]), user: S.me(done[0]) });
   }));
 
   // Segunda etapa do login: código de 6 dígitos do app (ou um código de recuperação).
@@ -211,11 +302,18 @@ function meRoutes(r) {
     if (b.activity !== undefined) activity = profile.cleanActivity(b.activity, u.activity, fail);
     let dnd = u.dnd_schedule;
     if (b.dndSchedule !== undefined) dnd = profile.cleanDndSchedule(b.dndSchedule, fail);
+    let lastfm = u.lastfm_user;
+    if (b.lastfmUser !== undefined) {
+      lastfm = String(b.lastfmUser || '').trim();
+      if (lastfm && !/^[A-Za-z][\w-]{1,14}$/.test(lastfm)) fail(400, 'Nome de usuário do Last.fm inválido.');
+      lastfm = lastfm || null;
+      if (!lastfm && activity && activity.auto) activity = null;
+    }
     const { rows } = await db.query(
       `UPDATE users SET display_name = $2, status = $3, status_text = $4, about = $5, status_expires_at = $6,
-         profile_color = $7, activity = $8, dnd_schedule = $9 WHERE id = $1 RETURNING ${USER_COLS}`,
+         profile_color = $7, activity = $8, dnd_schedule = $9, lastfm_user = $10 WHERE id = $1 RETURNING ${USER_COLS}`,
       [req.userId, displayName, status, statusText, about, expires, color,
-        activity ? JSON.stringify(activity) : null, dnd ? JSON.stringify(dnd) : null],
+        activity ? JSON.stringify(activity) : null, dnd ? JSON.stringify(dnd) : null, lastfm],
     );
     await profileChanged(req.userId);
     res.json({ user: S.me(rows[0]) });
@@ -278,6 +376,18 @@ function meRoutes(r) {
   }));
 
   // ---------- Segurança da conta (só pessoas)
+  r.use('/me/recovery-key', auth.humansOnly);
+  // Chave de recuperação: aparece só agora; serve para criar senha nova se esquecer.
+  r.post('/me/recovery-key', wrap(async (req, res) => {
+    await confirmIdentity(req.userId, { password: req.body.password, code: req.body.code });
+    const key = admin.newRecoveryKey();
+    await db.query('UPDATE users SET recovery_key_hash = $2 WHERE id = $1', [req.userId, admin.hashCode(key)]);
+    res.json({ key });
+  }));
+  r.delete('/me/recovery-key', wrap(async (req, res) => {
+    await db.query('UPDATE users SET recovery_key_hash = NULL WHERE id = $1', [req.userId]);
+    res.json({ ok: true });
+  }));
   r.use('/me/password', auth.humansOnly);
   r.use('/me/2fa', auth.humansOnly);
   r.use('/me/sessions', auth.humansOnly);

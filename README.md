@@ -83,6 +83,16 @@ Chat em tempo real no estilo de servidores e canais. Projeto pessoal, construíd
 - **"Não perturbe" agendado** 🌙 (⚙️ → *Notificações e app*): ex. das 23h às 7h, sem push, sem som de mensagem e sem toque de ligação
 - **Leitura em voz alta** 🔈 (botão no topo do canal): o Nexo lê as mensagens novas, bom para jogar sem olhar a tela. Voz e velocidade em ⚙️ → *Voz e vídeo*
 - **Sons da chamada** 🔔: som ao entrar e ao sair, **toque de celular** (marimba) quando te ligam e **"chamando…"** para quem liga (tu-tu-tu se recusar)
+- **Administração do Nexo** 🛡️ (a primeira conta é a administradora; menu do seu nome → *Administração do Nexo*): todas as contas, **bloquear/desbloquear**, **código para senha nova**, tornar admin, **uso do disco** (anexos, fotos, banco), **limpeza automática** de anexos antigos e **aviso** quando o disco passar de X%. Guia: [docs/administracao.md](docs/administracao.md)
+- **Esqueci a senha** 🔑: na tela de entrar, com a **chave de recuperação** (crie em ⚙️ → *Segurança*) ou com o **código** que a administração gera (vale 24 h)
+- **Atualização sem susto** 🔄: o Jenkins avisa todo mundo 20 s antes ("o Nexo vai atualizar"), a chamada volta sozinha e o navegador recarrega na versão nova quando você não está no meio de algo
+- **Responder pela notificação** ↩️ (botões *Responder* e *Marcar como lida*; onde o aparelho deixa, dá para escrever direto nela)
+- **"Ouvindo" automático** 🎧 pelo Last.fm (Spotify, YouTube Music… conectados ao Last.fm). Precisa de `LASTFM_API_KEY` no `.env` (grátis)
+- **Traduzir mensagem** 🌐 (tradutor do próprio Chrome no computador; nos outros abre o Google Tradutor)
+- **Modo economia** 🔋 (⚙️ → *Aparência*): GIFs só ao tocar, câmeras em qualidade baixa, sua câmera em 360p
+- **Personalização do servidor**: **capa** (aparece no topo dos canais e no convite), **ícone e foto de perfil animados** (GIF) e **cargos com degradê** 🌈
+- **Canal de anúncios** 📢: só a moderação escreve; os outros reagem e comentam em threads
+- **Convite com cargo**: quem entra pelo link já ganha o cargo (ex.: "convite de staff")
 - **App instalável melhorado** 📲: segure o ícone do Nexo para os **atalhos** (Mensagens, Amigos, Salvas, Último servidor) e, na galeria do celular, **Compartilhar → Nexo** para mandar fotos direto para uma conversa
 
 ## Como rodar (no servidor Ubuntu com Docker)

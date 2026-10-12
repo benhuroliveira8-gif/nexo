@@ -54,7 +54,7 @@ async function authenticate(value) {
     const token = raw.slice(4).trim();
     if (!/^nexo\.\d+\.[\w-]{20,}$/.test(token)) return null;
     const { rows } = await db.query(
-      'SELECT id FROM users WHERE bot_token_hash = $1 AND is_bot',
+      'SELECT id FROM users WHERE bot_token_hash = $1 AND is_bot AND blocked_at IS NULL',
       [hashBotToken(token)],
     );
     return rows[0] ? { userId: rows[0].id, isBot: true } : null;
@@ -62,7 +62,7 @@ async function authenticate(value) {
   const token = raw.startsWith('Bearer ') ? raw.slice(7) : raw;
   const t = token && verifyToken(token);
   if (!t) return null;
-  const { rows } = await db.query('SELECT token_version FROM users WHERE id = $1 AND NOT is_bot', [t.userId]);
+  const { rows } = await db.query('SELECT token_version FROM users WHERE id = $1 AND NOT is_bot AND blocked_at IS NULL', [t.userId]);
   if (!rows[0] || Number(rows[0].token_version) !== t.ver) return null;
   return { userId: t.userId, isBot: false };
 }

@@ -1553,3 +1553,51 @@ kbd { font: 600 12px ui-monospace, Consolas, monospace; padding: 1px 5px; border
 .share-thumb { width: 84px; height: 84px; object-fit: cover; border-radius: 8px; }
 .share-file { display: grid; padding: 8px 10px; border-radius: 8px; background: var(--bg-3); font-size: 13px; }
 .share-dialog select, .share-dialog textarea { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg-0); }
+
+/* ================================================================ Fase 10: administração e extras */
+
+/* Aviso de atualização */
+.update-banner { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); z-index: 3000; display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-radius: 12px; background: var(--bg-4); border: 1px solid var(--accent-line); box-shadow: 0 8px 30px var(--shadow); font-size: 14px; max-width: calc(100vw - 24px); }
+.update-banner.info { background: color-mix(in srgb, var(--accent) 18%, var(--bg-3)); }
+
+/* Login: esqueci a senha */
+.forgot-link { margin-top: 8px; align-self: center; font-size: 13px; }
+
+/* Administração do Nexo */
+.admin-alert { padding: 10px 12px; border-radius: 10px; background: rgba(255, 92, 108, .12); border: 1px solid rgba(255, 92, 108, .4); margin-bottom: 12px; }
+.disk { display: grid; gap: 6px; margin-bottom: 12px; }
+.disk-bar { height: 14px; border-radius: 999px; background: var(--bg-0); overflow: hidden; border: 1px solid var(--line); }
+.disk-bar i { display: block; height: 100%; background: var(--online); border-radius: 999px; }
+.disk-bar.warn i { background: var(--danger); }
+.admin-kinds { display: flex; gap: 12px; flex-wrap: wrap; margin: 8px 0; }
+.admin-top { margin: 6px 0 0; padding-left: 20px; font-size: 14px; }
+.admin-search { width: 100%; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg-0); margin: 8px 0 12px; }
+.admin-users { display: grid; gap: 6px; }
+.admin-user { display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 10px; background: var(--bg-0); border: 1px solid var(--line); flex-wrap: wrap; }
+.admin-user.blocked { opacity: .75; border-color: rgba(255, 92, 108, .4); }
+.admin-user-info { flex: 1; min-width: 200px; display: grid; gap: 2px; }
+.admin-user-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.tag { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--bg-3); margin-left: 2px; }
+.tag.admin { background: var(--accent-soft); color: var(--accent); }
+.tag.blocked { background: rgba(255, 92, 108, .15); color: var(--danger); }
+.big-key { font-size: 22px; letter-spacing: 2px; padding: 10px 14px; display: inline-block; }
+
+/* Anexo antigo removido, tradução e GIF no modo economia */
+.att-file.purged { opacity: .7; gap: 8px; }
+.translation { margin-top: 4px; padding: 6px 10px; border-left: 3px solid var(--link); background: var(--hover-soft); border-radius: 0 8px 8px 0; }
+.tr-head { margin-bottom: 2px; }
+.gif-lazy { display: grid; place-items: center; align-content: center; gap: 4px; border: 1px dashed var(--line); border-radius: 10px; background: var(--bg-1); color: var(--text-2); padding: 8px; text-align: center; }
+.gif-lazy-play { font-size: 26px; }
+.gif-lazy-text { font-size: 12px; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.economy .embed-img-link { display: none; }
+
+/* Capa do servidor */
+.sidebar-header.with-banner { height: 112px; align-items: flex-end; padding-bottom: 10px; background-size: cover; background-position: center; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.7); }
+.sidebar-header.with-banner .chevron { color: #fff; }
+.banner-editor { display: flex; gap: 14px; align-items: center; margin: 14px 0; flex-wrap: wrap; }
+.server-banner-preview { width: 220px; height: 88px; border-radius: 10px; background: var(--bg-0); border: 1px dashed var(--line); display: grid; place-items: center; background-size: cover; background-position: center; flex: none; }
+.server-banner-preview.has-image { border-style: solid; }
+
+/* Degradê no cargo */
+.gradient-pick { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+.gradient-preview { font-weight: 700; font-size: 16px; }

@@ -140,6 +140,11 @@ export function avatar(user, { size, online } = {}) {
 // Foto de perfil / ícone do servidor: recorta no centro (quadrado), reduz para 256x256 e envia.
 export async function uploadAvatar(file, path = '/api/me/avatar') {
   if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) throw new Error('Escolha uma imagem PNG, JPG, GIF ou WEBP.');
+  // GIF animado vai do jeito que está (para continuar animado). Até 2 MB.
+  if (file.type === 'image/gif') {
+    if (file.size > 2 * 1024 * 1024) throw new Error('GIF animado pode ter no máximo 2 MB.');
+    return sendRawImage(path, file);
+  }
   const bitmap = await createImageBitmap(file).catch(() => { throw new Error('Não deu para abrir essa imagem.'); });
   const side = Math.min(bitmap.width, bitmap.height);
   const canvas = document.createElement('canvas');
@@ -152,6 +157,10 @@ export async function uploadAvatar(file, path = '/api/me/avatar') {
   const toBlob = (type, q) => new Promise((r) => canvas.toBlob(r, type, q));
   let blob = await toBlob('image/webp', 0.9);
   if (!blob || blob.type !== 'image/webp') blob = await toBlob('image/png');
+  return sendRawImage(path, blob);
+}
+
+export async function sendRawImage(path, blob) {
   const res = await fetch(path, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream' },

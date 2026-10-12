@@ -1,12 +1,13 @@
 // Configurações do servidor: visão geral (nome e ícone), cargos, membros (moderação),
 // convites, banimentos e registro de auditoria.
 import {
-  h, api, avatar, toast, openDialog, confirmDialog, openMenu, presenceOf, uploadAvatar, fullTime, copyText, getToken,
+  h, api, avatar, toast, openDialog, confirmDialog, openMenu, presenceOf, uploadAvatar, fullTime, copyText, getToken, sendRawImage,
 } from './util.js';
 import { state, P, PERMISSION_INFO, can, isOwner, myTop, memberRoles, memberTop } from './state.js';
 import { sortable } from './sortable.js';
 import { renderAssets, renderWelcome, renderAutomod, renderStats, canSeeStats } from './serverx.js';
 import { renderLevels } from './levelsui.js';
+import { bannerBlob } from './profile.js';
 
 const PRESET_COLORS = ['#ff7a45', '#f5c542', '#3ecf8e', '#2ec4b6', '#4d9fff', '#7c6cff', '#c86bfa', '#ff5c8a', '#ff5c6c', '#a7adbb'];
 
@@ -119,6 +120,29 @@ function renderOverview() {
             class: 'btn small danger-ghost',
             onclick: async () => { try { await api(`/servers/${d.server.id}/icon`, { method: 'DELETE' }); } catch (err) { toast(err.message); } },
           }, 'Remover') : null) : null)),
+    manage || d.server.bannerUrl ? h('div', { class: 'banner-editor' },
+      h('div', { class: `server-banner-preview${d.server.bannerUrl ? ' has-image' : ''}`, style: d.server.bannerUrl ? `background-image:url("${d.server.bannerUrl}")` : null },
+        d.server.bannerUrl ? null : h('span', { class: 'muted small' }, 'Sem capa')),
+      h('div', { class: 'icon-text' },
+        h('strong', {}, 'Capa do servidor'),
+        h('span', { class: 'muted small' }, 'Aparece no topo da lista de canais e no convite. Imagem deitada (5:2); GIF animado vale (até 2 MB).'),
+        manage ? h('div', { class: 'row-actions' },
+          h('button', {
+            class: 'btn small',
+            onclick: () => {
+              const picker = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp' });
+              picker.addEventListener('change', async () => {
+                const file = picker.files[0];
+                if (!file) return;
+                try { toast('Enviando capa…'); await sendRawImage(`/api/servers/${d.server.id}/banner`, await bannerBlob(file)); toast('Capa atualizada!'); } catch (err) { toast(err.message); }
+              });
+              picker.click();
+            },
+          }, d.server.bannerUrl ? 'Trocar capa' : 'Enviar capa'),
+          d.server.bannerUrl ? h('button', {
+            class: 'btn small danger-ghost',
+            onclick: async () => { try { await api(`/servers/${d.server.id}/banner`, { method: 'DELETE' }); } catch (err) { toast(err.message); } },
+          }, 'Remover') : null) : null)) : null,
     h('label', { class: 'field' }, 'Nome do servidor', name),
   ];
   if (manage) {
@@ -167,7 +191,7 @@ function deleteServerDialog() {
 
 function selectRole(role) {
   ui.roleId = role.id;
-  ui.draft = { name: role.name, color: role.color, permissions: role.permissions };
+  ui.draft = { name: role.name, color: role.color, color2: role.color2 || null, permissions: role.permissions };
   ui.dirty = false;
 }
 
@@ -264,6 +288,22 @@ function roleEditor(role) {
       type: 'color', class: 'swatch-custom', title: 'Outra cor', value: draft.color || '#ff7a45', disabled: !editable || role.isDefault,
       onchange: (e) => { draft.color = e.target.value; mark(); render(); },
     }));
+  // Segunda cor: o nome do cargo aparece em degradê.
+  const gradient = role.isDefault ? null : h('div', { class: 'gradient-pick' },
+    h('label', { class: 'switch-line' },
+      h('input', {
+        type: 'checkbox', class: 'switch', checked: !!draft.color2, disabled: !editable || !draft.color,
+        onchange: (e) => { draft.color2 = e.target.checked ? (draft.color2 || '#7c6cff') : null; mark(); render(); },
+      }),
+      h('span', {}, h('strong', {}, '🌈 Degradê'), h('span', { class: 'muted small block' }, draft.color ? 'O nome fica com duas cores.' : 'Escolha a primeira cor antes.'))),
+    draft.color2 ? h('input', {
+      type: 'color', class: 'swatch-custom', title: 'Segunda cor', value: draft.color2, disabled: !editable,
+      onchange: (e) => { draft.color2 = e.target.value; mark(); render(); },
+    }) : null,
+    draft.color ? h('span', {
+      class: 'gradient-preview',
+      style: draft.color2 ? `background:linear-gradient(90deg,${draft.color},${draft.color2});-webkit-background-clip:text;background-clip:text;color:transparent` : `color:${draft.color}`,
+    }, draft.name || 'Cargo') : null);
 
   const perms = h('div', { class: 'perm-list' }, PERMISSION_INFO.map(([flag, label, desc]) => {
     const on = (draft.permissions & flag) === flag;
@@ -281,7 +321,7 @@ function roleEditor(role) {
     onclick: async (e) => {
       e.currentTarget.disabled = true;
       const body = { permissions: draft.permissions };
-      if (!role.isDefault) { body.name = draft.name.trim(); body.color = draft.color; }
+      if (!role.isDefault) { body.name = draft.name.trim(); body.color = draft.color; body.color2 = draft.color ? draft.color2 : null; }
       try {
         await api(`/servers/${d.server.id}/roles/${role.id}`, { method: 'PATCH', body });
         ui.dirty = false;
@@ -298,7 +338,7 @@ function roleEditor(role) {
     !editable ? h('div', { class: 'notice' }, 'Este cargo está acima (ou no mesmo nível) do seu cargo mais alto, então você não pode editá-lo.') : null,
     role.isDefault ? h('div', { class: 'notice soft' }, 'O @everyone vale para todo mundo do servidor. Aqui você define o que qualquer membro pode fazer.') : null,
     h('label', { class: 'field' }, 'Nome do cargo', name),
-    h('div', { class: 'field' }, h('span', {}, 'Cor do nome'), swatches),
+    h('div', { class: 'field' }, h('span', {}, 'Cor do nome'), swatches, gradient),
     h('div', { class: 'field' }, h('span', {}, 'Permissões'), perms),
     h('div', { class: 'role-actions' },
       !role.isDefault && editable ? [
@@ -542,6 +582,8 @@ export function inviteSummary(inv) {
   const parts = [];
   parts.push(inv.expiresAt ? `expira ${fullTime(new Date(inv.expiresAt)).replace(/^Hoje às /, 'hoje às ').replace(/^Ontem/, 'ontem')}` : 'nunca expira');
   parts.push(inv.maxUses ? `${inv.uses}/${inv.maxUses} usos` : `${inv.uses} ${inv.uses === 1 ? 'uso' : 'usos'}`);
+  const role = inv.roleId && state.detail && state.detail.roles.find((r) => r.id === inv.roleId);
+  if (role) parts.push(`🏷️ dá o cargo ${role.name}`);
   return parts.join(' · ');
 }
 
@@ -556,14 +598,19 @@ export async function inviteDialog() {
   const info = h('p', { class: 'muted small' }, inviteSummary(inv));
   const age = h('select', { class: 'select' }, AGES.map(([v, l]) => h('option', { value: String(v), selected: v === 7 * 86400 }, l)));
   const uses = h('select', { class: 'select' }, USES.map(([v, l]) => h('option', { value: String(v) }, l)));
+  // Convite com cargo (ex.: "convite de staff"): quem entra já ganha o cargo.
+  const assignable = can(P.MANAGE_ROLES) ? d.roles.filter((r) => !r.isDefault && (isOwner() || r.position < myTop())) : [];
+  const role = assignable.length ? h('select', { class: 'select invite-role' }, h('option', { value: '' }, 'Nenhum'),
+    assignable.sort((a, b) => b.position - a.position).map((r) => h('option', { value: String(r.id) }, r.name))) : null;
   const options = h('div', { class: 'invite-options', hidden: true },
     h('label', { class: 'field' }, 'Expira depois de', age),
     h('label', { class: 'field' }, 'Número máximo de usos', uses),
+    role ? h('label', { class: 'field' }, 'Quem entrar já ganha o cargo', role) : null,
     h('button', {
       type: 'button', class: 'btn small primary',
       onclick: async () => {
         try {
-          const { invite } = await api(`/servers/${d.server.id}/invites`, { method: 'POST', body: { maxAgeSeconds: Number(age.value), maxUses: Number(uses.value) } });
+          const { invite } = await api(`/servers/${d.server.id}/invites`, { method: 'POST', body: { maxAgeSeconds: Number(age.value), maxUses: Number(uses.value), ...(role && role.value ? { roleId: Number(role.value) } : {}) } });
           field.value = `${location.origin}/convite/${invite.code}`;
           info.textContent = inviteSummary(invite);
           options.hidden = true;
@@ -575,7 +622,7 @@ export async function inviteDialog() {
     title: `Convide amigos para ${d.server.name}`,
     text: 'Quem abrir o link (ou colar no botão ↪) entra no servidor.',
     body: h('div', {}, field, info,
-      h('button', { type: 'button', class: 'link small', onclick: () => { options.hidden = !options.hidden; } }, '⚙️ Mudar validade e limite de usos'),
+      h('button', { type: 'button', class: 'link small', onclick: () => { options.hidden = !options.hidden; } }, role ? '⚙️ Mudar validade, limite de usos e cargo' : '⚙️ Mudar validade e limite de usos'),
       options),
     actions: [
       { label: 'Fechar' },
@@ -681,6 +728,7 @@ function describe(e) {
     case 'category_delete': return [`apagou a categoria ${t}`];
     case 'server_update': return ['renomeou o servidor', x.from ? `${x.from} → ${x.to}` : ''];
     case 'server_icon': return ['mudou o ícone do servidor'];
+    case 'server_banner': return ['mudou a capa do servidor'];
     case 'invite_create': return ['criou um convite', [x.code, x.maxUses ? `${x.maxUses} usos` : '', x.maxAgeSeconds ? `vale ${mins(Math.round(x.maxAgeSeconds / 60))}` : 'sem validade'].filter(Boolean).join(' · ')];
     case 'invite_delete': return ['apagou um convite', x.code || ''];
     case 'message_delete': return [`apagou uma mensagem de ${who}`, [x.channel ? `#${x.channel}` : '', x.preview ? `"${x.preview}"` : ''].filter(Boolean).join(' · ')];
@@ -705,7 +753,7 @@ function describe(e) {
 const AUDIT_ICONS = {
   member_kick: '👢', member_ban: '🔨', member_unban: '🕊️', member_timeout: '⏳', member_timeout_remove: '✅', member_roles: '🏷️',
   role_create: '🏷️', role_update: '🏷️', role_delete: '🏷️', role_reorder: '↕️', channel_create: '#️⃣', channel_update: '#️⃣',
-  channel_delete: '#️⃣', category_create: '📁', category_update: '📁', category_delete: '📁', server_update: '⚙️', server_icon: '🖼️',
+  channel_delete: '#️⃣', category_create: '📁', category_update: '📁', category_delete: '📁', server_update: '⚙️', server_icon: '🖼️', server_banner: '🖼️',
   invite_create: '✉️', invite_delete: '✉️', message_delete: '🗑️', bot_add: '🤖',
   emoji_create: '😺', emoji_update: '😺', emoji_delete: '😺',
   sticker_create: '🏷️', sticker_delete: '🏷️', sound_create: '🎵', sound_delete: '🎵',

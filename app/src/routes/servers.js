@@ -184,6 +184,7 @@ const inviteJson = (row) => ({
   expiresAt: row.expires_at,
   createdAt: row.created_at,
   createdBy: row.created_by ? { id: row.created_by, displayName: row.creator_name || null } : null,
+  roleId: row.role_id || null,
 });
 
 const VALID_INVITE = '(i.expires_at IS NULL OR i.expires_at > now()) AND (i.max_uses IS NULL OR i.uses < i.max_uses)';
@@ -313,6 +314,18 @@ module.exports = function serverRoutes(r) {
     res.json({ ok: true });
   }));
 
+  r.delete('/servers/:id/banner', wrap(async (req, res) => {
+    const ctx = await requireMember(req, P.MANAGE_SERVER);
+    const { rows } = await db.query(
+      'UPDATE servers s SET banner_id = NULL FROM servers old WHERE s.id = $1 AND old.id = s.id RETURNING old.banner_id AS previous',
+      [ctx.serverId],
+    );
+    if (rows[0] && rows[0].previous) files.removeAvatar(rows[0].previous);
+    audit(ctx.serverId, req.userId, 'server_banner');
+    events.serverChanged(ctx.serverId);
+    res.json({ ok: true });
+  }));
+
   r.delete('/servers/:id', wrap(async (req, res) => {
     const ctx = await requireMember(req);
     if (!ctx.isOwner) fail(403, 'Só o dono pode apagar o servidor.');
@@ -326,11 +339,12 @@ module.exports = function serverRoutes(r) {
     const emojiFiles = await db.query('SELECT file FROM nexo_emojis WHERE server_id = $1', [ctx.serverId]);
     const stickerFiles = await db.query('SELECT file FROM nexo_stickers WHERE server_id = $1', [ctx.serverId]);
     const soundFiles = await db.query('SELECT file FROM nexo_sounds WHERE server_id = $1', [ctx.serverId]);
-    const { rows } = await db.query('DELETE FROM servers WHERE id = $1 RETURNING icon_id', [ctx.serverId]);
+    const { rows } = await db.query('DELETE FROM servers WHERE id = $1 RETURNING icon_id, banner_id', [ctx.serverId]);
     emojiFiles.rows.forEach((e) => emojis.removeFile(e.file));
     stickerFiles.rows.forEach((e) => assets.removeFile('sticker', e.file));
     soundFiles.rows.forEach((e) => assets.removeFile('sound', e.file));
     if (rows[0] && rows[0].icon_id) files.removeAvatar(rows[0].icon_id);
+    if (rows[0] && rows[0].banner_id) files.removeAvatar(rows[0].banner_id);
     att.rows.forEach((a) => files.removeFile(a.id));
     events.emitTo([`server:${ctx.serverId}`], 'server:removed', { serverId: ctx.serverId, reason: 'deleted' });
     events.getIo().in(`server:${ctx.serverId}`).socketsLeave(`server:${ctx.serverId}`);
@@ -392,10 +406,19 @@ module.exports = function serverRoutes(r) {
     const maxUses = Number(req.body.maxUses ?? 0);
     if (!Number.isInteger(maxAge) || maxAge < 0 || maxAge > 30 * 24 * 3600) fail(400, 'Validade inválida.');
     if (!Number.isInteger(maxUses) || maxUses < 0 || maxUses > 1000) fail(400, 'Limite de usos inválido.');
-    if (req.body.reuse) {
+    // Convite que já dá um cargo (ex.: "convite de staff"): precisa poder gerenciar cargos.
+    let roleId = null;
+    if (req.body.roleId) {
+      roleId = parseId(req.body.roleId);
+      if (!ctx.can(P.MANAGE_ROLES)) fail(403, 'Só quem gerencia cargos pode criar convite com cargo.');
+      const { rows: rr } = roleId ? await db.query('SELECT position, is_default FROM roles WHERE id = $1 AND server_id = $2', [roleId, ctx.serverId]) : { rows: [] };
+      if (!rr[0] || rr[0].is_default) fail(400, 'Cargo inválido.');
+      if (!ctx.isOwner && rr[0].position >= ctx.top) fail(403, 'Você só pode escolher cargos abaixo do seu.');
+    }
+    if (req.body.reuse && !roleId) {
       const { rows } = await db.query(
         `SELECT i.* FROM invites i WHERE i.server_id = $1 AND i.created_by = $2 AND ${VALID_INVITE}
-           AND i.max_uses IS NOT DISTINCT FROM $3 AND (($4 = 0 AND i.expires_at IS NULL)
+           AND i.role_id IS NULL AND i.max_uses IS NOT DISTINCT FROM $3 AND (($4 = 0 AND i.expires_at IS NULL)
              OR ($4 > 0 AND i.expires_at > now() + make_interval(secs => $4 * 0.5)))
          ORDER BY i.created_at DESC LIMIT 1`,
         [ctx.serverId, req.userId, maxUses || null, maxAge],
@@ -405,11 +428,11 @@ module.exports = function serverRoutes(r) {
     const { rows: n } = await db.query(`SELECT count(*)::int AS n FROM invites i WHERE server_id = $1 AND ${VALID_INVITE}`, [ctx.serverId]);
     if (n[0].n >= 100) fail(400, 'O servidor já tem convites demais. Apague alguns antigos.');
     const { rows } = await db.query(
-      `INSERT INTO invites (code, server_id, created_by, max_uses, expires_at)
-       VALUES ($1, $2, $3, $4, CASE WHEN $5::int > 0 THEN now() + make_interval(secs => $5::int) END) RETURNING *`,
-      [newInviteCode(), ctx.serverId, req.userId, maxUses || null, maxAge],
+      `INSERT INTO invites (code, server_id, created_by, max_uses, expires_at, role_id)
+       VALUES ($1, $2, $3, $4, CASE WHEN $5::int > 0 THEN now() + make_interval(secs => $5::int) END, $6) RETURNING *`,
+      [newInviteCode(), ctx.serverId, req.userId, maxUses || null, maxAge, roleId],
     );
-    audit(ctx.serverId, req.userId, 'invite_create', { details: { code: rows[0].code, maxUses: maxUses || null, maxAgeSeconds: maxAge || null } });
+    audit(ctx.serverId, req.userId, 'invite_create', { details: { code: rows[0].code, maxUses: maxUses || null, maxAgeSeconds: maxAge || null, roleId } });
     res.status(201).json({ invite: inviteJson(rows[0]) });
   }));
 
@@ -428,7 +451,7 @@ module.exports = function serverRoutes(r) {
 
   r.get('/invites/:code', humansOnly, wrap(async (req, res) => {
     const { rows } = await db.query(
-      `SELECT s.id, s.name, s.icon_id, ${VALID_INVITE} AS valid,
+      `SELECT s.id, s.name, s.icon_id, s.banner_id, ${VALID_INVITE} AS valid,
          (SELECT count(*)::int FROM server_members WHERE server_id = s.id) AS member_count,
          EXISTS (SELECT 1 FROM server_members WHERE server_id = s.id AND user_id = $2) AS is_member
        FROM invites i JOIN servers s ON s.id = i.server_id WHERE i.code = $1`,
@@ -437,7 +460,7 @@ module.exports = function serverRoutes(r) {
     const row = rows[0];
     if (!row || (!row.valid && !row.is_member)) fail(404, 'Convite inválido ou expirado.');
     res.json({
-      server: { id: row.id, name: row.name, iconUrl: S.avatarUrl(row.icon_id) },
+      server: { id: row.id, name: row.name, iconUrl: S.avatarUrl(row.icon_id), bannerUrl: S.avatarUrl(row.banner_id) },
       memberCount: row.member_count,
       isMember: row.is_member,
     });
@@ -460,7 +483,7 @@ module.exports = function serverRoutes(r) {
     const joined = member.rowCount === 0 && await db.transaction(async (c) => {
       // Conta um uso do convite (e confere validade/limite no mesmo passo).
       const used = await c.query(
-        `UPDATE invites i SET uses = uses + 1 WHERE code = $1 AND ${VALID_INVITE} RETURNING code`,
+        `UPDATE invites i SET uses = uses + 1 WHERE code = $1 AND ${VALID_INVITE} RETURNING code, role_id`,
         [code],
       );
       if (!used.rowCount) fail(404, 'Convite inválido ou expirado.');
@@ -469,6 +492,14 @@ module.exports = function serverRoutes(r) {
         [server.id, req.userId],
       );
       if (ins.rowCount === 0) fail(409, 'Você já está nesse servidor.');
+      // Convite com cargo: já entra com ele.
+      if (used.rows[0].role_id) {
+        await c.query(
+          `INSERT INTO member_roles (server_id, user_id, role_id)
+           SELECT $1, $2, r.id FROM roles r WHERE r.id = $3 AND r.server_id = $1 AND NOT r.is_default ON CONFLICT DO NOTHING`,
+          [server.id, req.userId, used.rows[0].role_id],
+        );
+      }
       await markServerRead(c, server.id, req.userId);
       return true;
     }).catch((err) => {
@@ -498,9 +529,9 @@ module.exports = function serverRoutes(r) {
     const channel = await db.transaction(async (c) => {
       const position = await nextPosition(c, ctx.serverId, categoryId, kind === 'category');
       const { rows } = await c.query(
-        `INSERT INTO channels (server_id, name, kind, position, category_id, private, topic)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-        [ctx.serverId, name, kind, position, categoryId, isPrivate, kind === 'forum' ? cleanTopic(req.body.topic) : null],
+        `INSERT INTO channels (server_id, name, kind, position, category_id, private, topic, announce)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+        [ctx.serverId, name, kind, position, categoryId, isPrivate, kind === 'forum' ? cleanTopic(req.body.topic) : null, kind === 'text' && !!req.body.announce],
       );
       for (const roleId of roleIds) await c.query('INSERT INTO channel_roles (channel_id, role_id) VALUES ($1, $2)', [rows[0].id, roleId]);
       return rows[0];
@@ -551,6 +582,10 @@ module.exports = function serverRoutes(r) {
       if (!!b.private !== channel.private) changes.private = !!b.private;
     }
     if (canStructure && b.roleIds !== undefined) roleIds = await cleanRoleIds(channel.server_id, b.roleIds);
+    if (ctx.can(P.MANAGE_CHANNELS) && channel.kind === 'text' && b.announce !== undefined) {
+      vals.push(!!b.announce); sets.push(`announce = $${vals.length}`);
+      if (!!b.announce !== channel.announce) changes.announce = !!b.announce;
+    }
     if (ctx.can(P.MANAGE_CHANNELS) && channel.kind === 'forum' && b.topic !== undefined) {
       vals.push(cleanTopic(b.topic)); sets.push(`topic = $${vals.length}`);
     }
@@ -706,6 +741,12 @@ module.exports = function serverRoutes(r) {
       const color = req.body.color && COLOR_RE.test(req.body.color) ? req.body.color.toLowerCase() : null;
       if (color !== role.color) changes.color = color;
       vals.push(color); sets.push(`color = $${vals.length}`);
+    }
+    // Segunda cor: o nome aparece em degradê.
+    if (req.body.color2 !== undefined && !role.is_default) {
+      const color2 = req.body.color2 && COLOR_RE.test(req.body.color2) ? req.body.color2.toLowerCase() : null;
+      if (color2 !== role.color2) changes.color2 = color2;
+      vals.push(color2); sets.push(`color2 = $${vals.length}`);
     }
     if (req.body.permissions !== undefined) {
       const perms = parsePerms(req.body.permissions);

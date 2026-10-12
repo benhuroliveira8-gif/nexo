@@ -33,6 +33,15 @@ let presenceBroadcaster = async () => {};
 const setPresenceBroadcaster = (fn) => { presenceBroadcaster = fn; };
 const presenceChanged = (userId) => presenceBroadcaster(userId).catch(() => {});
 
+// Aviso de atualização ("o Nexo vai reiniciar em 20 s"), para quem conectar nesse meio tempo.
+let restartAt = null;
+function announceRestart(seconds) {
+  restartAt = Date.now() + seconds * 1000;
+  if (io) io.emit('server:restarting', { in: seconds });
+}
+const restartNotice = () => (restartAt && restartAt > Date.now() - 60000 ? { in: Math.max(0, Math.round((restartAt - Date.now()) / 1000)) } : null);
+
 module.exports = {
+  announceRestart, restartNotice,
   setIo, getIo, emitTo, serverChanged, friendIdsOf, friendsChanged, setPresenceBroadcaster, presenceChanged,
 };

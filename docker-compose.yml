@@ -42,6 +42,12 @@ services:
       GIF_RATING: ${GIF_RATING:-pg-13}
       # Endereço interno do LiveKit (para o modo palco liberar/tirar a fala na hora).
       LIVEKIT_INTERNAL_URL: ${LIVEKIT_INTERNAL_URL:-http://livekit:7880}
+      # "Ouvindo" automático (opcional): chave grátis do Last.fm.
+      LASTFM_API_KEY: ${LASTFM_API_KEY:-}
+      # Quem vira administrador do Nexo além da primeira conta (nomes de usuário separados por vírgula).
+      NEXO_ADMINS: ${NEXO_ADMINS:-}
+    # Dá tempo de avisar todo mundo antes de desligar numa atualização.
+    stop_grace_period: 15s
     volumes:
       - nexo_uploads:/data/uploads
     ports:

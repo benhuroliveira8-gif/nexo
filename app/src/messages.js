@@ -227,6 +227,10 @@ async function createMessage({ access, userId, content, attachmentIds, replyToId
   if (!access.can(P.SEND_MESSAGES)) {
     throw new MessageError(access.timeoutUntil ? 'Você está de castigo e não pode enviar mensagens agora.' : 'Você não tem permissão para enviar mensagens aqui.');
   }
+  // Canal de anúncios: só a moderação escreve (os outros reagem e comentam em threads).
+  if (access.kind === 'text' && access.channel.announce && !access.isAdmin && !access.can(P.MANAGE_MESSAGES)) {
+    throw new MessageError('Este é um canal de anúncios: só a moderação escreve aqui. Você pode reagir ou comentar numa thread 🧵.');
+  }
   content = String(content || '').trim();
   const ids = [...new Set((Array.isArray(attachmentIds) ? attachmentIds : []).map(String))];
   if (ids.length > MAX_ATTACHMENTS) throw new MessageError(`No máximo ${MAX_ATTACHMENTS} anexos por mensagem.`);
@@ -435,6 +439,7 @@ async function notifyPush(access, message) {
     body: previewText(message),
     url: `/?${access.serverId ? `servidor=${access.serverId}&` : ''}canal=${message.channelId}&msg=${message.id}`,
     tag: `canal-${message.channelId}`,
+    reply: { c: message.channelId, m: message.id },
   });
 }
 

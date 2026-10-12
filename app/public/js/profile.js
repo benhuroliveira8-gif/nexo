@@ -1,6 +1,7 @@
 // Perfil mais rico (capa, cor, "jogando agora", insígnias, nível) e o
 // "não perturbe" agendado (ex.: silenciar das 23h às 7h).
 import { h, api, toast, getToken } from './util.js';
+import { state } from './state.js';
 
 // ---------------------------------------------------------------- "Não perturbe" agendado
 
@@ -124,7 +125,20 @@ export function levelBlock(level) {
 // ---------------------------------------------------------------- Editar (Minha conta)
 
 async function uploadBanner(file) {
+  const blob = await bannerBlob(file);
+  const res = await fetch('/api/me/banner', { method: 'POST', headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/octet-stream' }, body: blob });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Erro ${res.status}`);
+  return data.user;
+}
+
+// Capa (do perfil ou do servidor): recorta em 5:2 e reduz. GIF animado vai como está.
+export async function bannerBlob(file) {
   if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) throw new Error('Escolha uma imagem PNG, JPG, GIF ou WEBP.');
+  if (file.type === 'image/gif') {
+    if (file.size > 2 * 1024 * 1024) throw new Error('GIF animado pode ter no máximo 2 MB.');
+    return file;
+  }
   const bitmap = await createImageBitmap(file).catch(() => { throw new Error('Não deu para abrir essa imagem.'); });
   const W = 960; const H = 384; // proporção 5:2
   const scale = Math.max(W / bitmap.width, H / bitmap.height);
@@ -138,10 +152,7 @@ async function uploadBanner(file) {
   const toBlob = (type, q) => new Promise((r) => canvas.toBlob(r, type, q));
   let blob = await toBlob('image/webp', 0.85);
   if (!blob || blob.type !== 'image/webp') blob = await toBlob('image/jpeg', 0.85);
-  const res = await fetch('/api/me/banner', { method: 'POST', headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/octet-stream' }, body: blob });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Erro ${res.status}`);
-  return data.user;
+  return blob;
 }
 
 const COLORS = ['#5865f2', '#3ba55d', '#faa61a', '#ed4245', '#eb459e', '#9b59b6', '#1abc9c', '#e67e22', '#34495e', '#c0a062'];
@@ -196,5 +207,21 @@ export function profileLookSection(me, { applyMe, rerender }) {
           onclick: () => save({ activity: name.value.trim() ? { type: type.value, name: name.value.trim() } : null })
             .then(() => toast(name.value.trim() ? 'Atividade salva!' : 'Atividade removida.')).catch((err) => toast(err.message)),
         }, 'Salvar'),
-        me.activity ? h('button', { class: 'btn small', onclick: () => save({ activity: null }).catch((err) => toast(err.message)) }, 'Limpar') : null)));
+        me.activity ? h('button', { class: 'btn small', onclick: () => save({ activity: null }).catch((err) => toast(err.message)) }, 'Limpar') : null)),
+    state.config && state.config.lastfm ? lastfmField(me, save) : null);
+}
+
+// "Ouvindo" automático pelo Last.fm (Spotify, YouTube Music, Deezer… conectados ao Last.fm).
+function lastfmField(me, save) {
+  const input = h('input', { value: me.lastfmUser || '', maxlength: '15', placeholder: 'seu usuário no Last.fm' });
+  return h('div', { class: 'field' },
+    h('span', {}, '🎧 "Ouvindo" automático'),
+    h('p', { class: 'muted small' }, 'Crie uma conta grátis em last.fm e conecte o seu Spotify (ou outro app de música) nela. Aí o Nexo mostra "Ouvindo Artista — Música" sozinho enquanto toca. Se você escrever um "Jogando agora" à mão, ele tem prioridade.'),
+    h('div', { class: 'row-actions activity-edit' }, input,
+      h('button', {
+        class: 'btn primary small',
+        onclick: () => save({ lastfmUser: input.value.trim() })
+          .then(() => toast(input.value.trim() ? 'Pronto! Toque uma música para aparecer em até 1 minuto. 🎧' : 'Last.fm desligado.'))
+          .catch((err) => toast(err.message)),
+      }, input.value ? 'Salvar' : 'Ligar')));
 }

@@ -1,5 +1,6 @@
 // GIFs: pesquisa no KLIPY (feita direto pelo navegador, como o KLIPY exige)
 // e exibição dos GIFs nas mensagens.
+import { isEconomy } from './economy.js';
 import { h, api, openPopover, closePopover, storage, toast } from './util.js';
 
 const API = 'https://api.klipy.com/api/v1';
@@ -270,6 +271,18 @@ export function buildGif(gif, { onLoad, pending } = {}) {
   const scale = Math.min(1, MAX_W / gif.width, MAX_H / gif.height);
   const w = Math.max(40, Math.round(gif.width * scale));
   const ht = Math.max(40, Math.round(gif.height * scale));
+  // Modo economia: o GIF só baixa quando a pessoa toca.
+  if (isEconomy() && !pending) {
+    const box = h('button', {
+      class: 'gif-msg gif-lazy', style: `width:${w}px;height:${ht}px;max-width:100%`, title: 'Modo economia: toque para ver o GIF',
+      onclick: () => box.replaceWith(buildGifNow(gif, { onLoad, pending, w, ht })),
+    }, h('span', { class: 'gif-lazy-play' }, '▶'), h('span', { class: 'gif-lazy-text' }, gif.title ? `GIF: ${gif.title}` : 'GIF — toque para ver'));
+    return box;
+  }
+  return buildGifNow(gif, { onLoad, pending, w, ht });
+}
+
+function buildGifNow(gif, { onLoad, pending, w, ht }) {
   const img = h('img', {
     src: gif.url, alt: gif.title || 'GIF', loading: 'lazy', draggable: 'false',
     referrerpolicy: 'no-referrer', width: String(w), height: String(ht),
