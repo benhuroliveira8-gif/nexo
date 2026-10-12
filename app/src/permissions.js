@@ -23,6 +23,7 @@ const P = {
   MANAGE_EMOJIS:    1 << 17, // enviar, renomear e apagar emojis do servidor
   CREATE_EVENTS:    1 << 18, // criar eventos (e editar os próprios)
   MANAGE_EVENTS:    1 << 19, // editar e apagar eventos dos outros
+  MANAGE_STAGE:     1 << 20, // moderar o palco: chamar para falar e mandar de volta à plateia
 };
 
 const ALL = Object.values(P).reduce((a, b) => a | b, 0);
@@ -122,7 +123,7 @@ async function roomsForChannel(channel) {
   return { rooms: viewerIds.map((id) => `user:${id}`), viewerIds };
 }
 
-const CHANNEL_COLS = 'id, server_id, kind, name, dm_key, private, category_id, parent_channel_id, parent_message_id, created_by';
+const CHANNEL_COLS = 'id, server_id, kind, name, dm_key, private, stage, category_id, parent_channel_id, parent_message_id, created_by';
 
 // Acesso a um canal (de servidor ou DM). null = sem acesso.
 async function channelAccess(channelId, userId) {

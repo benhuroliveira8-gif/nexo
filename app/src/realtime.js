@@ -28,6 +28,8 @@ async function broadcastPresence(userId) {
   events.emitTo(rooms, 'presence', { userId, ...presence.publicPresence(row) });
 }
 
+const BUILTIN_SOUNDS = new Set(['buzina', 'aplausos', 'badumtss', 'trombeta', 'sino', 'risada', 'tambor', 'grilos']);
+
 module.exports = function setupRealtime(io) {
   events.setPresenceBroadcaster(broadcastPresence);
   // Só aceita conexões com token válido.
@@ -77,6 +79,7 @@ module.exports = function setupRealtime(io) {
           replyToId: payload.replyToId,
           poll: payload.poll,
           gif: payload.gif,
+          stickerId: payload.stickerId,
         });
         // "nonce" é um id temporário criado pelo navegador para casar a mensagem
         // "enviando..." com a confirmada.
@@ -132,8 +135,10 @@ module.exports = function setupRealtime(io) {
         const access = await channelAccess(channelId, user.id);
         if (!access || (access.kind !== 'voice' && access.kind !== 'dm')) return reply({ ok: false, error: 'Canal de voz não encontrado.' });
         if (!access.can(P.CONNECT)) return reply({ ok: false, error: 'Você não pode entrar neste canal de voz.' });
+        const stage = access.kind === 'voice' && !!access.channel.stage;
+        if (stage && access.can(P.MANAGE_STAGE)) voice.setStageSpeaker(channelId, user.id, true);
         const { firstHere } = voice.join({
-          userId: user.id, serverId: access.serverId, channelId, socketId: socket.id, flags: payload || {}, rooms: access.rooms,
+          userId: user.id, serverId: access.serverId, channelId, socketId: socket.id, flags: { ...(payload || {}), stage }, rooms: access.rooms,
         });
         reply({ ok: true });
         // Chamada em mensagem direta: quem começou "liga" para os outros.
@@ -162,6 +167,59 @@ module.exports = function setupRealtime(io) {
     });
 
     socket.on('voice:leave', () => voice.disconnect(user.id, socket.id));
+
+    // ---------- Soundboard: um som curto para todo mundo da chamada.
+    const lastSound = { t: 0 };
+    socket.on('voice:sound', async (payload) => {
+      try {
+        const st = voice.stateOf(user.id);
+        if (!st || st.socketId !== socket.id) return;
+        if (Date.now() - lastSound.t < 1500) return; // anti-spam
+        const raw = String((payload && payload.sound) || '');
+        let sound = null;
+        if (/^b:[a-z]{2,20}$/.test(raw) && BUILTIN_SOUNDS.has(raw.slice(2))) sound = { id: raw };
+        else if (/^\d{1,9}$/.test(raw) && st.serverId) {
+          const { rows } = await db.query('SELECT id, name, emoji FROM nexo_sounds WHERE id = $1 AND server_id = $2', [Number(raw), st.serverId]);
+          if (rows[0]) sound = { id: String(rows[0].id), name: rows[0].name, emoji: rows[0].emoji };
+        }
+        if (!sound) return;
+        const access = await channelAccess(st.channelId, user.id);
+        if (!access || !access.can(P.SPEAK)) return;
+        if (access.kind === 'voice' && access.channel.stage && !st.speaker) return; // plateia não toca som
+        lastSound.t = Date.now();
+        const people = voice.peopleIn(st.channelId);
+        events.emitTo(people.map((id) => `user:${id}`), 'voice:sound', { channelId: st.channelId, userId: user.id, sound });
+      } catch (err) {
+        console.error('Erro no soundboard:', err.message);
+      }
+    });
+
+    // ---------- Modo palco
+    socket.on('stage:hand', (payload) => {
+      const st = voice.stateOf(user.id);
+      if (!st || st.socketId !== socket.id || st.speaker) return;
+      voice.update(user.id, socket.id, { hand: !!(payload && payload.up) });
+    });
+    const stageRole = async (payload, on) => {
+      const targetId = Number(payload && payload.userId);
+      const st = voice.stateOf(user.id);
+      if (!st || !validId(targetId)) return;
+      const access = await channelAccess(st.channelId, user.id);
+      if (!access || access.kind !== 'voice' || !access.channel.stage) return;
+      const self = targetId === user.id;
+      // Moderador chama/manda de volta qualquer um; qualquer um pode sair do palco sozinho.
+      if (!access.can(P.MANAGE_STAGE) && !(self && !on)) return;
+      const target = voice.stateOf(targetId);
+      if (!target || target.channelId !== st.channelId) return;
+      voice.setStageSpeaker(st.channelId, targetId, on);
+      const targetAccess = await channelAccess(st.channelId, targetId);
+      const canSpeak = on && !!targetAccess && targetAccess.can(P.SPEAK);
+      const canVideo = on && !!targetAccess && targetAccess.can(P.VIDEO);
+      const applied = await voice.updateLivekitPermission(st.channelId, targetId, { canSpeak, canVideo });
+      events.emitTo([`user:${targetId}`], 'stage:role', { channelId: st.channelId, speaker: on, applied, by: user.id });
+    };
+    socket.on('stage:invite', (payload) => { stageRole(payload, true).catch((err) => console.error('Erro no palco:', err.message)); });
+    socket.on('stage:remove', (payload) => { stageRole(payload, false).catch((err) => console.error('Erro no palco:', err.message)); });
 
     // Recusar uma chamada: avisa quem está na chamada (e as suas outras abas, para parar de tocar).
     socket.on('call:decline', async (payload) => {

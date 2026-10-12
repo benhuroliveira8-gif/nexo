@@ -20,13 +20,19 @@ module.exports = function voiceRoutes(r) {
 
     const { rows } = await db.query('SELECT id, username, display_name, is_bot, avatar_id, status, status_text FROM users WHERE id = $1', [req.userId]);
     const user = S.user(rows[0]);
-    const canSpeak = access.can(P.SPEAK);
-    const canVideo = access.can(P.VIDEO);
+    // Modo palco: só fala quem modera ou quem foi chamado para o palco.
+    const stage = access.kind === 'voice' && !!access.channel.stage;
+    const moderator = stage && access.can(P.MANAGE_STAGE);
+    const onStage = !stage || moderator || voice.isStageSpeaker(channelId, req.userId);
+    const canSpeak = access.can(P.SPEAK) && onStage;
+    const canVideo = access.can(P.VIDEO) && onStage;
     res.json({
       token: voice.livekitToken({ user, channelId, canSpeak, canVideo }),
       room: voice.roomName(channelId),
       canSpeak,
       canVideo,
+      stage,
+      moderator,
     });
   }));
 };

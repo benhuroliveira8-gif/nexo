@@ -2,12 +2,13 @@
 //
 // O áudio/vídeo vai direto do navegador para o servidor LiveKit (pelo Caddy, em HTTPS).
 // O Nexo só autoriza a entrada (token) e mostra para todos quem está em cada canal.
-import { h, api, avatar, toast, openDialog, hueFor, storage, openPopover, closePopover } from './util.js';
+import { h, api, avatar, toast, openDialog, confirmDialog, hueFor, storage, openPopover, closePopover } from './util.js';
 import {
   initRemote, onData, remoteState, requestControl, stopViewing, endHosting, attachControl,
   onParticipantGone, onScreenStopped, onRemoteScreenStopped, resetRemote,
 } from './remote.js';
 import { quickDevices } from './devices.js';
+import { BUILTIN, builtinById, playSound } from './sounds.js';
 
 const vs = {
   room: null,
@@ -25,6 +26,9 @@ const vs = {
   video: false,
   screen: false,
   needsAudioClick: false,
+  recording: false,
+  stage: false,      // canal em modo palco?
+  moderator: false,  // pode moderar o palco?
 };
 
 // ---------------------------------------------------------------- Preferências de voz (deste aparelho)
@@ -32,6 +36,7 @@ const DEFAULT_SETTINGS = {
   mode: 'voice', pttKey: 'ControlLeft', noiseSuppression: true, echoCancellation: true, autoGainControl: true,
   screenQuality: '1080p30', screenContent: 'motion', screenAudio: true,
   micId: '', speakerId: '', camId: '', // '' = padrão do sistema
+  soundboardVolume: 0.6, // 0 = não tocar os sons dos outros
 };
 export function voiceSettings() {
   try { return { ...DEFAULT_SETTINGS, ...JSON.parse(storage('nexo.voice') || '{}') }; } catch { return { ...DEFAULT_SETTINGS }; }
@@ -96,9 +101,11 @@ let getSocket = () => null;
 let onChange = () => {};
 const trackEls = new Map(); // track.sid -> elemento <video>/<audio>
 
+let getSounds = () => [];
 export function initVoice(opts) {
   getSocket = opts.getSocket;
   onChange = opts.onChange;
+  if (opts.getSounds) getSounds = opts.getSounds;
   initRemote({
     room: () => vs.room,
     Track: () => LK().Track,
@@ -152,7 +159,7 @@ function explainHttps() {
 function emitState() {
   const socket = getSocket();
   if (socket && vs.room) {
-    socket.emit('voice:state', { muted: vs.muted, deafened: vs.deafened, video: vs.video, screen: vs.screen });
+    socket.emit('voice:state', { muted: vs.muted, deafened: vs.deafened, video: vs.video, screen: vs.screen, recording: vs.recording });
   }
 }
 
@@ -160,7 +167,7 @@ function announceJoin() {
   const socket = getSocket();
   if (!socket || !vs.room) return;
   socket.emit('voice:join', {
-    channelId: vs.channelId, muted: vs.muted, deafened: vs.deafened, video: vs.video, screen: vs.screen,
+    channelId: vs.channelId, muted: vs.muted, deafened: vs.deafened, video: vs.video, screen: vs.screen, recording: vs.recording,
   }, (res) => {
     if (res && !res.ok) toast(res.error);
   });
@@ -174,7 +181,7 @@ export async function joinVoice({ channelId, channelName, serverId, serverName, 
   vs.connecting = true;
   onChange();
   try {
-    const [{ token, canSpeak, canVideo }] = await Promise.all([
+    const [{ token, canSpeak, canVideo, stage, moderator }] = await Promise.all([
       api(`/voice/${channelId}/token`, { method: 'POST' }),
       loadLivekit(),
     ]);
@@ -186,7 +193,10 @@ export async function joinVoice({ channelId, channelName, serverId, serverName, 
     Object.assign(vs, {
       room, channelId, serverId, channelName, serverName, canSpeak, canVideo, isDm,
       muted: !canSpeak, deafened: false, video: false, screen: false, pttDown: false,
+      stage: !!stage, moderator: !!moderator, recording: false,
     });
+    // No palco, quem é chamado para falar entra mutado (liga quando quiser).
+    const startMuted = !!stage && !moderator;
 
     await room.connect(`wss://${location.host}`, token);
     try { await room.startAudio(); } catch { /* navegador pode exigir um clique */ }
@@ -195,7 +205,7 @@ export async function joinVoice({ channelId, channelName, serverId, serverName, 
     if (canSpeak) {
       try {
         // No modo "aperte para falar" o microfone começa desligado.
-        const ptt = voiceSettings().mode === 'ptt';
+        const ptt = voiceSettings().mode === 'ptt' || startMuted;
         await room.localParticipant.setMicrophoneEnabled(true, captureOptions());
         if (ptt) await room.localParticipant.setMicrophoneEnabled(false);
         vs.muted = ptt;
@@ -228,6 +238,7 @@ export async function leaveVoice({ silent = false } = {}) {
   const room = vs.room;
   resetRemote();
   unwatched.clear();
+  if (rec) stopRecording();
   vs.room = null;
   if (room) {
     try { await room.disconnect(); } catch { /* já caiu */ }
@@ -236,7 +247,7 @@ export async function leaveVoice({ silent = false } = {}) {
   trackEls.clear();
   const socket = getSocket();
   if (socket && vs.channelId && !silent) socket.emit('voice:leave');
-  Object.assign(vs, { channelId: null, serverId: null, isDm: false, video: false, screen: false, deafened: false, needsAudioClick: false, pttDown: false });
+  Object.assign(vs, { channelId: null, serverId: null, isDm: false, video: false, screen: false, deafened: false, needsAudioClick: false, pttDown: false, recording: false, stage: false, moderator: false });
   onChange();
 }
 
@@ -621,6 +632,182 @@ export async function enableAudio() {
   onChange();
 }
 
+// ---------------------------------------------------------------- Soundboard
+
+export function openSoundboard(anchor) {
+  if (!vs.room) return;
+  const custom = (getSounds(vs.serverId) || []);
+  const st = voiceSettings();
+  const vol = h('input', { type: 'range', min: '0', max: '100', step: '5', value: String(Math.round((st.soundboardVolume ?? 0.6) * 100)), class: 'vol-range' });
+  const volLabel = h('span', { class: 'vol-value' }, `${vol.value}%`);
+  vol.addEventListener('input', () => { volLabel.textContent = `${vol.value}%`; saveVoiceSettings({ soundboardVolume: Number(vol.value) / 100 }); });
+  const blocked = !vs.canSpeak;
+  const btn = (snd) => h('button', {
+    type: 'button', class: 'sb-btn', disabled: blocked, title: blocked ? 'Só quem pode falar toca sons' : `Tocar "${snd.name}" para todos`,
+    onclick: () => { const sock = getSocket(); if (sock) sock.emit('voice:sound', { sound: String(snd.id) }); },
+  }, h('span', { class: 'sb-emoji' }, snd.emoji || '🔊'), h('span', { class: 'sb-name truncate' }, snd.name));
+  openPopover(anchor, h('div', { class: 'soundboard' },
+    h('div', { class: 'emoji-cat' }, 'Sons do Nexo'),
+    h('div', { class: 'sb-grid' }, BUILTIN.map(btn)),
+    custom.length ? h('div', { class: 'emoji-cat' }, 'Deste servidor') : null,
+    custom.length ? h('div', { class: 'sb-grid' }, custom.map(btn)) : null,
+    h('div', { class: 'vol-row sb-vol' }, h('span', { title: 'Volume dos sons (para você)' }, '🔈'), vol, volLabel),
+    h('p', { class: 'muted small' }, blocked ? 'No palco, só quem está falando toca sons.' : 'Toca para todo mundo da chamada. O volume acima é só para você (0% = não ouvir os sons).')),
+  { align: 'end', className: 'popover-soundboard' });
+}
+
+// Alguém tocou um som (chega pelo servidor).
+export function playSoundEvent({ channelId, sound }, user) {
+  if (!vs.room || channelId !== vs.channelId || vs.deafened) return;
+  const vol = voiceSettings().soundboardVolume ?? 0.6;
+  if (vol <= 0) return;
+  playSound(sound, vol).catch(() => {});
+  const b = builtinById(sound.id);
+  const label = b ? `${b.emoji} ${b.name}` : `${sound.emoji || '🔊'} ${sound.name || 'som'}`;
+  soundChip(`${user && user.displayName ? user.displayName : 'Alguém'}: ${label}`);
+}
+
+let chipTimer = null;
+function soundChip(text) {
+  let el = document.getElementById('sound-chip');
+  if (!el) { el = h('div', { id: 'sound-chip', class: 'sound-chip', role: 'status' }); document.body.append(el); }
+  el.textContent = `🔊 ${text}`;
+  el.classList.add('show');
+  clearTimeout(chipTimer);
+  chipTimer = setTimeout(() => el.classList.remove('show'), 2200);
+}
+
+// ---------------------------------------------------------------- Gravar a chamada (só áudio)
+
+let rec = null; // { ctx, dest, recorder, chunks, sources: Map, scan, limit, startedAt }
+const REC_MAX_MIN = 30;
+
+export function toggleRecording() {
+  if (rec) return stopRecording();
+  confirmDialog({
+    title: '⏺️ Gravar a chamada?',
+    text: `Grava só o áudio (até ${REC_MAX_MIN} minutos) e salva o arquivo no seu aparelho. Todo mundo na chamada vai ver um aviso 🔴 de que você está gravando.`,
+    okLabel: 'Começar a gravar', danger: false,
+    onConfirm: () => startRecording(),
+  });
+}
+
+function startRecording() {
+  if (!vs.room || rec) return;
+  if (!window.MediaRecorder) return toast('Este navegador não consegue gravar.');
+  const { Track } = LK();
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+  const dest = ctx.createMediaStreamDestination();
+  // Um "silêncio" constante garante que o arquivo tenha áudio mesmo sem ninguém falando.
+  const silence = ctx.createConstantSource ? ctx.createConstantSource() : null;
+  if (silence) { const g = ctx.createGain(); g.gain.value = 0; silence.connect(g).connect(dest); silence.start(); }
+  const sources = new Map();
+  const add = (mst) => {
+    if (!mst || sources.has(mst.id) || mst.readyState === 'ended') return;
+    try {
+      const node = ctx.createMediaStreamSource(new MediaStream([mst]));
+      node.connect(dest);
+      sources.set(mst.id, node);
+    } catch { /* faixa sem áudio */ }
+  };
+  const scan = () => {
+    if (!vs.room) return;
+    const people = [vs.room.localParticipant, ...vs.room.remoteParticipants.values()];
+    for (const p of people) {
+      for (const src of [Track.Source.Microphone, Track.Source.ScreenShareAudio]) {
+        const pub = src && p.getTrackPublication(src);
+        if (pub && pub.track && pub.track.mediaStreamTrack) add(pub.track.mediaStreamTrack);
+      }
+    }
+  };
+  scan();
+  const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'].find((t) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) || '';
+  const recorder = new MediaRecorder(dest.stream, type ? { mimeType: type } : undefined);
+  const chunks = [];
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+  recorder.onstop = () => {
+    const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+    if (!blob.size) toast('Nada foi gravado.');
+    else {
+      const d = new Date();
+      const p2 = (n) => String(n).padStart(2, '0');
+      const ext = /mp4/.test(blob.type) ? 'm4a' : /ogg/.test(blob.type) ? 'ogg' : 'webm';
+      const a = h('a', { href: URL.createObjectURL(blob), download: `nexo-chamada-${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}.${ext}` });
+      document.body.append(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+      toast('⏺️ Gravação salva.');
+    }
+    ctx.close().catch(() => {});
+  };
+  recorder.start(1000);
+  rec = { ctx, recorder, scan: setInterval(scan, 2000), limit: setTimeout(() => { toast(`Gravação parou sozinha (${REC_MAX_MIN} min).`); stopRecording(); }, REC_MAX_MIN * 60000), startedAt: Date.now() };
+  vs.recording = true;
+  emitState();
+  onChange();
+  toast('🔴 Gravando a chamada.');
+}
+
+export function stopRecording() {
+  if (!rec) return;
+  const r = rec;
+  rec = null;
+  clearInterval(r.scan);
+  clearTimeout(r.limit);
+  try { if (r.recorder.state !== 'inactive') r.recorder.stop(); } catch { /* */ }
+  vs.recording = false;
+  emitState();
+  onChange();
+}
+
+// Avisa (com um "bip") quando alguém começa a gravar.
+const knownRecorders = new Map(); // channelId -> Set(userId)
+function noticeRecorders(channelId, states, members) {
+  const now = new Set(states.filter((x) => x.recording).map((x) => x.userId));
+  const before = knownRecorders.get(channelId) || new Set();
+  for (const id of now) {
+    if (!before.has(id) && id !== myUserId()) {
+      const m = members.find((x) => x.id === id);
+      toast(`🔴 ${m ? m.displayName : 'Alguém'} começou a gravar a chamada.`);
+      playSound({ id: 'b:sino' }, 0.25).catch(() => {});
+    }
+  }
+  knownRecorders.set(channelId, now);
+  return [...now];
+}
+const myUserId = () => (vs.room ? participantUserId(vs.room.localParticipant) : null);
+
+// ---------------------------------------------------------------- Palco
+
+// O servidor mudou meu papel no palco.
+export async function onStageRole({ channelId, speaker, applied }) {
+  if (!vs.room || channelId !== vs.channelId) return;
+  if (!applied) {
+    // O LiveKit não respondeu: entra de novo para pegar as permissões novas.
+    const again = { channelId: vs.channelId, channelName: vs.channelName, serverId: vs.serverId, serverName: vs.serverName };
+    await leaveVoice({ silent: true });
+    await joinVoice(again);
+  } else if (speaker) {
+    vs.canSpeak = true;
+    vs.muted = true;
+  } else {
+    try { await vs.room.localParticipant.setMicrophoneEnabled(false); } catch { /* */ }
+    if (vs.video) { try { await vs.room.localParticipant.setCameraEnabled(false); } catch { /* */ } }
+    if (vs.screen) { try { await vs.room.localParticipant.setScreenShareEnabled(false); } catch { /* */ } }
+    Object.assign(vs, { canSpeak: false, canVideo: false, muted: true, video: false, screen: false });
+    emitState();
+  }
+  toast(speaker ? '🎙️ Você foi chamado para o palco! Ligue o microfone quando quiser falar.' : 'Você voltou para a plateia.');
+  if (vs.room && applied && speaker) {
+    // Câmera/tela também passam a valer no palco.
+    vs.canVideo = true;
+  }
+  onChange();
+}
+
+const stageEmit = (ev, payload) => { const sock = getSocket(); if (sock) sock.emit(ev, payload); };
+
 // ---------------------------------------------------------------- Telas
 
 const icon = (on, offIcon, onIcon) => (on ? onIcon : offIcon);
@@ -671,6 +858,10 @@ export function renderVoicePanel(el) {
         class: `vp-btn${vs.screen ? ' on' : ''}`, disabled: vs.connecting,
         title: vs.screen ? 'Compartilhando a tela' : 'Compartilhar a tela', onclick: screenButton,
       }, '🖥️') : null,
+      h('button', {
+        class: 'vp-btn', disabled: vs.connecting, title: 'Soundboard (sons para a chamada)',
+        onclick: (e) => openSoundboard(e.currentTarget),
+      }, '🎵'),
       h('button', {
         class: 'vp-btn', disabled: vs.connecting, title: 'Microfone, saída de som e câmera',
         onclick: (e) => openPopover(e.currentTarget, quickDevices({ canVideo: vs.canVideo }), { className: 'popover-devices' }),
@@ -895,6 +1086,15 @@ export function renderStage(el, { channel, serverId, serverName, others, members
   const { Track } = LK();
   const room = vs.room;
   const people = [room.localParticipant, ...room.remoteParticipants.values()];
+  const speakerIds = new Set(others.filter((x) => x.speaker).map((x) => x.userId));
+  const handIds = new Set(others.filter((x) => x.hand).map((x) => x.userId));
+  const meId = myUserId();
+  // A plateia vem da lista do servidor (quem está no canal e não está no palco).
+  const audience = channel.stage ? others.filter((x) => !x.speaker).map((x) => {
+    const m = members.find((mm) => mm.id === x.userId) || { id: x.userId, displayName: 'Alguém' };
+    return { user: m, isLocal: x.userId === meId, hand: !!x.hand };
+  }) : [];
+  const recorders = noticeRecorders(channel.id, others, members);
   const liveScreens = new Set();
   for (const p of people) {
     const pub = p.getTrackPublication(Track.Source.ScreenShare);
@@ -922,6 +1122,8 @@ export function renderStage(el, { channel, serverId, serverName, others, members
       const audioPub = Track.Source.ScreenShareAudio ? p.getTrackPublication(Track.Source.ScreenShareAudio) : null;
       tiles.push(screenTile(screenPub.track, user, { isLocal, hasAudio: !!(audioPub && !audioPub.isMuted), identity: p.identity, participant: p }));
     }
+    // Palco: quem está na plateia aparece embaixo, não num quadrado.
+    if (channel.stage && userId && !speakerIds.has(userId)) continue; // plateia: lista embaixo
     const camPub = p.getTrackPublication(Track.Source.Camera);
     const micPub = p.getTrackPublication(Track.Source.Microphone);
     const micOff = isLocal ? vs.muted : (!micPub || micPub.isMuted);
@@ -934,17 +1136,42 @@ export function renderStage(el, { channel, serverId, serverName, others, members
     },
     hasCam ? videoEl(camPub.track) : avatar(user, { size: compact ? 'lg' : 'xl' }),
     h('div', { class: 'tile-name' }, micOff ? '🔇 ' : '', vol === 0 ? '🔕 ' : '', user.displayName, isLocal ? ' (você)' : ''));
-    if (!isLocal && userId) tile.addEventListener('click', (e) => { if (!e.target.closest('video')) openVolumePopover(tile, user); });
+    if (!isLocal && userId) tile.addEventListener('click', (e) => { if (!e.target.closest('video, .stage-down')) openVolumePopover(tile, user); });
+    if (channel.stage && vs.moderator && !isLocal && userId) {
+      tile.append(h('button', { class: 'btn small stage-down', title: 'Mandar para a plateia', onclick: () => stageEmit('stage:remove', { userId }) }, '⬇️ Plateia'));
+    }
     tiles.push(tile);
   }
   const ptt = voiceSettings().mode === 'ptt' && vs.canSpeak;
+  const me = myUserId();
+  const amAudience = channel.stage && !vs.canSpeak;
+  const myHand = handIds.has(me);
+  const recNames = recorders.map((id) => (id === me ? 'Você' : ((members.find((x) => x.id === id) || {}).displayName || 'Alguém')));
+  const audienceBox = channel.stage ? h('div', { class: 'stage-audience' },
+    h('div', { class: 'aud-title' }, `🎧 Plateia (${audience.length})`, handIds.size ? h('span', { class: 'aud-hands' }, ` · ✋ ${[...handIds].filter((id) => !speakerIds.has(id)).length}`) : null),
+    h('div', { class: 'aud-list' }, audience
+      .sort((a, b) => Number(b.hand) - Number(a.hand))
+      .map((a) => h('div', { class: `aud-person${a.hand ? ' hand' : ''}` },
+        avatar(a.user, { size: 'sm' }),
+        h('span', { class: 'truncate' }, a.user.displayName, a.isLocal ? ' (você)' : ''),
+        a.hand ? h('span', { title: 'Levantou a mão' }, '✋') : null,
+        vs.moderator && !a.isLocal ? h('button', { class: 'btn small primary', onclick: () => stageEmit('stage:invite', { userId: a.user.id }) }, '🎙️ Chamar') : null)),
+    audience.length ? null : h('span', { class: 'muted small' }, 'Ninguém na plateia.'))) : null;
   el.replaceChildren(...[
     controlBanner(),
+    recNames.length ? h('div', { class: 'rec-banner', role: 'status' }, `🔴 ${recNames.join(', ')} ${recNames.length === 1 && recNames[0] !== 'Você' ? 'está' : recNames[0] === 'Você' && recNames.length === 1 ? 'está' : 'estão'} gravando esta chamada`) : null,
+    channel.stage ? h('div', { class: 'stage-label' }, '🎙️ Palco', h('span', { class: 'muted small' }, vs.moderator ? ' · você modera: chame quem levantou a mão' : amAudience ? ' · você está na plateia' : ' · você está falando no palco')) : null,
     h('div', { class: `stage-grid n${Math.min(tiles.length, 9)}${tiles.some((t) => t.classList.contains('screen')) ? ' has-screen' : ''}` },
       // Telas compartilhadas primeiro (em destaque), depois as pessoas.
       [...tiles.filter((t) => t.classList.contains('screen')), ...tiles.filter((t) => !t.classList.contains('screen'))]),
+    audienceBox,
     h('div', { class: 'stage-bar' },
-      ptt ? pttButton('Segure para falar') : h('button', { class: `round-btn big${vs.muted ? ' off' : ''}`, title: vs.muted ? 'Ligar microfone' : 'Mutar', disabled: !vs.canSpeak, onclick: toggleMute }, vs.muted ? '🔇' : '🎤'),
+      amAudience
+        ? h('button', { class: `round-btn big${myHand ? ' on' : ''}`, title: myHand ? 'Baixar a mão' : 'Levantar a mão (pedir para falar)', onclick: () => stageEmit('stage:hand', { up: !myHand }) }, '✋')
+        : ptt ? pttButton('Segure para falar') : h('button', { class: `round-btn big${vs.muted ? ' off' : ''}`, title: vs.muted ? 'Ligar microfone' : 'Mutar', disabled: !vs.canSpeak, onclick: toggleMute }, vs.muted ? '🔇' : '🎤'),
+      channel.stage && !amAudience && !vs.moderator ? h('button', { class: 'round-btn big', title: 'Sair do palco (voltar para a plateia)', onclick: () => stageEmit('stage:remove', { userId: me }) }, '⬇️') : null,
+      h('button', { class: 'round-btn big', title: 'Soundboard', onclick: (e) => openSoundboard(e.currentTarget) }, '🎵'),
+      h('button', { class: `round-btn big${vs.recording ? ' rec-on' : ''}`, title: vs.recording ? 'Parar e salvar a gravação' : 'Gravar a chamada (só áudio)', onclick: toggleRecording }, vs.recording ? '⏹️' : '⏺️'),
       vs.canVideo ? h('button', { class: `round-btn big${vs.video ? ' on' : ''}`, title: 'Câmera', onclick: toggleCamera }, '📹') : null,
       vs.canVideo ? h('button', { class: `round-btn big${vs.screen ? ' on' : ''}`, title: vs.screen ? 'Compartilhando a tela' : 'Compartilhar tela', onclick: screenButton }, '🖥️') : null,
       h('button', { class: 'round-btn big danger', title: 'Sair da voz', onclick: () => leaveVoice() }, '📞')),

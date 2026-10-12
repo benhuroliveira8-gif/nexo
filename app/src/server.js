@@ -41,6 +41,8 @@ app.get('/files/:id', files.serveFile);
 app.get('/files/:id/:name', files.serveFile);
 app.get('/avatars/:file', files.serveAvatar);
 app.get('/emoji/:id', emojis.serve);
+app.get('/sticker/:id', require('./assets').serve('sticker'));
+app.get('/sound/:id', require('./assets').serve('sound'));
 // Imagens das prévias de link (passam pelo Nexo; o endereço é assinado).
 app.get('/link-image/:sig/:data', previews.serveImage);
 
@@ -101,6 +103,7 @@ db.init()
     files.startCleanup();
     previews.startCleanup();
     require('./routes/events').startReminders();
+    require('./routes/extras').startJobs();
     server.listen(PORT, () => console.log(`Nexo rodando na porta ${PORT}`));
   })
   .catch((err) => {

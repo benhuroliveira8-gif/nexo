@@ -22,6 +22,7 @@ export const P = {
   MANAGE_EMOJIS: 1 << 17,
   CREATE_EVENTS: 1 << 18,
   MANAGE_EVENTS: 1 << 19,
+  MANAGE_STAGE: 1 << 20,
 };
 
 export const PERMISSION_INFO = [
@@ -33,7 +34,8 @@ export const PERMISSION_INFO = [
   [P.BAN_MEMBERS, 'Banir membros', 'Expulsar e impedir de voltar (mesmo com convite).'],
   [P.MODERATE_MEMBERS, 'Castigar membros', 'Deixar alguém só lendo por um tempo (sem escrever, reagir ou falar).'],
   [P.VIEW_AUDIT_LOG, 'Ver registro de auditoria', 'Ver quem fez o quê no servidor.'],
-  [P.MANAGE_EMOJIS, 'Gerenciar emojis', 'Enviar, renomear e apagar os emojis personalizados do servidor.'],
+  [P.MANAGE_EMOJIS, 'Gerenciar emojis, figurinhas e sons', 'Enviar, renomear e apagar emojis, figurinhas e sons do servidor.'],
+  [P.MANAGE_STAGE, 'Moderar palco', 'Nos canais em modo palco: chamar pessoas para falar e mandá-las de volta à plateia.'],
   [P.MANAGE_EVENTS, 'Gerenciar eventos', 'Editar e apagar eventos criados por outras pessoas.'],
   [P.CREATE_EVENTS, 'Criar eventos', 'Marcar eventos no servidor (ex.: "Jogatina sexta às 21h").'],
   [P.MANAGE_MESSAGES, 'Gerenciar mensagens', 'Apagar e fixar mensagens de outras pessoas.'],

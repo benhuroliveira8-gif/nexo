@@ -77,6 +77,7 @@ module.exports = function messageRoutes(r) {
         replyToId: req.body.replyToId,
         poll: req.body.poll,
         gif: req.body.gif,
+        stickerId: req.body.stickerId,
       });
       M.announceNew(access, message);
       res.status(201).json({ message });

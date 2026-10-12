@@ -71,6 +71,11 @@ Chat em tempo real no estilo de servidores e canais. Projeto pessoal, construíd
 - **Eventos do servidor** 📅: "Jogatina sexta às 21h" com Vou/Talvez, lembrete 15 min antes (e na hora), arquivo para a agenda (.ics). Novas permissões: *Criar eventos* (todos, por padrão) e *Gerenciar eventos*
 - **Busca com filtros** 🔎: de quem, tem (arquivo, imagem, vídeo, link, GIF, áudio, enquete), a partir de / até (data). Atalhos: `de:ana tem:link depois:2026-10-01 antes:2026-10-31`
 - **GIFs favoritos** ⭐ (no seletor e direto na mensagem), **parar de assistir** uma tela compartilhada (🙈, economiza internet) e **⚙️ na chamada** para trocar microfone, saída de som e câmera
+- **Status com emoji e prazo** ("🎮 Jogando" que some às 22h), **mensagens agendadas**, **lembretes** (⏰ numa mensagem) e **mensagens salvas** (🔖, só você vê) — tudo no painel 🔖 do topo
+- **Figurinhas** 🏷️ (até 30 por servidor) e **soundboard** 🎵 (8 sons prontos + até 24 do servidor, até 7 s)
+- **Gravar a chamada** ⏺️ (só áudio, até 30 min, salva no seu aparelho; todos veem o aviso 🔴)
+- **Modo palco** 🎙️ num canal de voz: só fala quem modera ou quem for chamado; a plateia levanta a mão ✋. Nova permissão *Moderar palco*
+- Para o dono: **boas-vindas** (cargo automático + mensagem), **moderação automática** (palavras bloqueadas e anti-spam com castigo), **estatísticas** e **exportar conversa** (📥 HTML, TXT ou JSON)
 
 ## Como rodar (no servidor Ubuntu com Docker)
 

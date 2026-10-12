@@ -15,6 +15,7 @@ const me = (row) => ({
   ...user(row),
   status: row.status || 'online',
   statusText: row.status_text || null,
+  statusExpiresAt: row.status_expires_at || null,
   about: row.about || null,
   twoFactor: !!row.totp_enabled,
 });
@@ -34,6 +35,7 @@ const channel = (row) => ({
   kind: row.kind || 'text',
   categoryId: row.category_id || null,
   private: !!row.private,
+  stage: !!row.stage,
   parentChannelId: row.parent_channel_id || null,
   parentMessageId: row.parent_message_id ? String(row.parent_message_id) : null,
   createdBy: row.created_by || null,
@@ -79,6 +81,7 @@ const message = (row, extras = {}) => ({
   embeds: extras.embeds || [],
   poll: extras.poll || null,
   gif: row.gif || null,
+  sticker: row.sticker ? { ...row.sticker, url: `/sticker/${row.sticker.id}` } : null,
   replyTo: extras.replyTo || null,
   thread: extras.thread || null,
   mentions: extras.mentions || [],

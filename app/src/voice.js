@@ -8,6 +8,7 @@ const events = require('./events');
 const { P } = require('./permissions');
 
 const LIVEKIT_KEY = process.env.LIVEKIT_API_KEY || '';
+const LIVEKIT_INTERNAL_URL = (process.env.LIVEKIT_INTERNAL_URL || 'http://livekit:7880').replace(/\/$/, '');
 const LIVEKIT_SECRET = process.env.LIVEKIT_API_SECRET || '';
 const TOKEN_HOURS = 6;
 
@@ -74,7 +75,7 @@ function leave(userId) {
   userChannel.delete(userId);
   if (map) {
     map.delete(userId);
-    if (map.size === 0) channels.delete(channelId);
+    if (map.size === 0) { channels.delete(channelId); stageSpeakers.delete(channelId); }
   }
   if (state) broadcast(state.serverId, channelId);
 }
@@ -87,6 +88,8 @@ function join({ userId, serverId, channelId, socketId, flags, rooms }) {
   channels.get(channelId).set(userId, {
     userId, serverId, socketId,
     muted: !!flags.muted, deafened: !!flags.deafened, video: !!flags.video, screen: !!flags.screen,
+    recording: !!flags.recording, hand: false,
+    ...(flags.stage ? { speaker: isStageSpeaker(channelId, userId) } : {}),
   });
   userChannel.set(userId, channelId);
   broadcast(serverId, channelId);
@@ -97,7 +100,8 @@ function update(userId, socketId, flags) {
   const channelId = userChannel.get(userId);
   const state = channelId !== undefined && channels.get(channelId).get(userId);
   if (!state || state.socketId !== socketId) return false;
-  for (const k of ['muted', 'deafened', 'video', 'screen']) if (k in flags) state[k] = !!flags[k];
+  for (const k of ['muted', 'deafened', 'video', 'screen', 'recording', 'hand']) if (k in flags) state[k] = !!flags[k];
+  if (state.speaker) state.hand = false;
   broadcast(state.serverId, channelId);
   return true;
 }
@@ -122,9 +126,60 @@ function clearChannel(channelId) {
 }
 
 const currentChannelOf = (userId) => userChannel.get(userId);
+const stateOf = (userId) => {
+  const channelId = userChannel.get(userId);
+  const st = channelId !== undefined && channels.get(channelId) && channels.get(channelId).get(userId);
+  return st ? { ...st, channelId } : null;
+};
+
+// ---------- Modo palco: quem pode falar (além de quem modera)
+const stageSpeakers = new Map(); // channelId -> Set(userId)
+function isStageSpeaker(channelId, userId) {
+  return !!(stageSpeakers.get(channelId) && stageSpeakers.get(channelId).has(userId));
+}
+function setStageSpeaker(channelId, userId, on) {
+  if (!stageSpeakers.has(channelId)) stageSpeakers.set(channelId, new Set());
+  if (on) stageSpeakers.get(channelId).add(userId); else stageSpeakers.get(channelId).delete(userId);
+  const st = channels.get(channelId) && channels.get(channelId).get(userId);
+  if (st) {
+    st.speaker = !!on;
+    st.hand = false;
+    if (!on) { st.video = false; st.screen = false; }
+    broadcast(st.serverId, channelId);
+  }
+}
+
+// Muda na hora o que a pessoa pode publicar no LiveKit (API do servidor LiveKit).
+async function updateLivekitPermission(channelId, userId, { canSpeak, canVideo }) {
+  if (!configured()) return false;
+  const now = Math.floor(Date.now() / 1000);
+  const admin = jwt.sign({
+    iss: LIVEKIT_KEY, sub: 'nexo-servidor', nbf: now - 10, exp: now + 60,
+    video: { room: roomName(channelId), roomAdmin: true },
+  }, LIVEKIT_SECRET, { algorithm: 'HS256' });
+  const sources = [];
+  if (canSpeak) sources.push('MICROPHONE');
+  if (canVideo) sources.push('CAMERA', 'SCREEN_SHARE', 'SCREEN_SHARE_AUDIO');
+  try {
+    const res = await fetch(`${LIVEKIT_INTERNAL_URL}/twirp/livekit.RoomService/UpdateParticipant`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${admin}` },
+      body: JSON.stringify({
+        room: roomName(channelId),
+        identity: `u${userId}`,
+        permission: { can_subscribe: true, can_publish: sources.length > 0, can_publish_data: false, can_publish_sources: sources },
+      }),
+      signal: AbortSignal.timeout(4000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
 const peopleIn = (channelId) => statesOf(channelId).map((s) => s.userId);
 
 module.exports = {
   P, configured, livekitToken, roomName,
   statesForChannels, join, update, leave, disconnect, leaveServer, clearChannel, currentChannelOf, peopleIn,
+  stateOf, isStageSpeaker, setStageSpeaker, updateLivekitPermission,
 };

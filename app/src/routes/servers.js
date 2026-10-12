@@ -9,6 +9,8 @@ const voice = require('../voice');
 const { humansOnly } = require('../auth');
 const { audit } = require('../audit');
 const emojis = require('../emojis');
+const assets = require('../assets');
+const automod = require('../automod');
 const {
   P, ALL, DEFAULT_EVERYONE, memberContext, visibleChannelIds, VISIBLE_SQL,
 } = require('../permissions');
@@ -139,6 +141,9 @@ async function serverDetail(serverId, userId) {
     })),
     roles: roles.rows.map(S.role),
     emojis: await emojis.listForServer(serverId),
+    stickers: await assets.list('sticker', serverId),
+    sounds: await assets.list('sound', serverId),
+    ...(ctx.can(P.MANAGE_SERVER) ? { settings: { welcome: server.rows[0].welcome || null, automod: server.rows[0].automod || null } } : {}),
     voice: voice.statesForChannels(list.filter((c) => c.kind === 'voice').map((c) => c.id)),
     me: {
       permissions: ctx.perms,
@@ -314,8 +319,12 @@ module.exports = function serverRoutes(r) {
     const vc = await db.query("SELECT id FROM channels WHERE server_id = $1 AND kind = 'voice'", [ctx.serverId]);
     vc.rows.forEach((c) => voice.clearChannel(c.id));
     const emojiFiles = await db.query('SELECT file FROM nexo_emojis WHERE server_id = $1', [ctx.serverId]);
+    const stickerFiles = await db.query('SELECT file FROM nexo_stickers WHERE server_id = $1', [ctx.serverId]);
+    const soundFiles = await db.query('SELECT file FROM nexo_sounds WHERE server_id = $1', [ctx.serverId]);
     const { rows } = await db.query('DELETE FROM servers WHERE id = $1 RETURNING icon_id', [ctx.serverId]);
     emojiFiles.rows.forEach((e) => emojis.removeFile(e.file));
+    stickerFiles.rows.forEach((e) => assets.removeFile('sticker', e.file));
+    soundFiles.rows.forEach((e) => assets.removeFile('sound', e.file));
     if (rows[0] && rows[0].icon_id) files.removeAvatar(rows[0].icon_id);
     att.rows.forEach((a) => files.removeFile(a.id));
     events.emitTo([`server:${ctx.serverId}`], 'server:removed', { serverId: ctx.serverId, reason: 'deleted' });
@@ -463,6 +472,7 @@ module.exports = function serverRoutes(r) {
     });
 
     events.getIo().in(`user:${req.userId}`).socketsJoin(`server:${server.id}`);
+    if (joined) await automod.onMemberJoined(server.id, req.userId).catch((err) => console.error('Erro nas boas-vindas:', err.message));
     if (joined) events.serverChanged(server.id);
     res.json({ server: S.server(server) });
   }));
@@ -536,6 +546,10 @@ module.exports = function serverRoutes(r) {
       if (!!b.private !== channel.private) changes.private = !!b.private;
     }
     if (canStructure && b.roleIds !== undefined) roleIds = await cleanRoleIds(channel.server_id, b.roleIds);
+    if (ctx.can(P.MANAGE_CHANNELS) && channel.kind === 'voice' && b.stage !== undefined) {
+      vals.push(!!b.stage); sets.push(`stage = $${vals.length}`);
+      if (!!b.stage !== channel.stage) changes.stage = !!b.stage;
+    }
     if (canStructure && b.categoryId !== undefined) {
       const categoryId = await categoryOf(channel.server_id, b.categoryId);
       if (categoryId !== channel.category_id) {

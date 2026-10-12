@@ -10,7 +10,7 @@ const push = require('../push');
 const gifs = require('../gifs');
 const { wrap, fail, parseId } = require('./util');
 
-const USER_COLS = 'id, username, display_name, is_bot, avatar_id, status, status_text, about, totp_enabled, token_version';
+const USER_COLS = 'id, username, display_name, is_bot, avatar_id, status, status_text, status_expires_at, about, totp_enabled, token_version';
 
 // Código de convite para criar conta (opcional). Útil quando o Nexo fica
 // aberto na internet: sem o código, ninguém de fora consegue se cadastrar.
@@ -193,9 +193,19 @@ function meRoutes(r) {
       if (statusText.length > 80) fail(400, 'O texto do status pode ter no máximo 80 caracteres.');
       statusText = statusText || null;
     }
+    // Prazo do status personalizado ("até 22h"): some sozinho nesse horário.
+    let expires = u.status_expires_at;
+    if (b.statusText !== undefined) expires = null;
+    if (b.statusExpiresAt !== undefined && b.statusExpiresAt !== null && statusText) {
+      const d = new Date(String(b.statusExpiresAt));
+      if (Number.isNaN(d.getTime()) || d.getTime() < Date.now() + 30000) fail(400, 'Escolha um horário no futuro para o status sumir.');
+      if (d.getTime() > Date.now() + 31 * 86400000) fail(400, 'O prazo pode ser de no máximo 31 dias.');
+      expires = d.toISOString();
+    }
+    if (!statusText) expires = null;
     const { rows } = await db.query(
-      `UPDATE users SET display_name = $2, status = $3, status_text = $4, about = $5 WHERE id = $1 RETURNING ${USER_COLS}`,
-      [req.userId, displayName, status, statusText, about],
+      `UPDATE users SET display_name = $2, status = $3, status_text = $4, about = $5, status_expires_at = $6 WHERE id = $1 RETURNING ${USER_COLS}`,
+      [req.userId, displayName, status, statusText, about, expires],
     );
     await profileChanged(req.userId);
     res.json({ user: S.me(rows[0]) });
@@ -383,4 +393,4 @@ function meRoutes(r) {
   }));
 }
 
-module.exports = { publicRoutes, meRoutes, profileChanged };
+module.exports = { publicRoutes, meRoutes, profileChanged, USER_COLS };

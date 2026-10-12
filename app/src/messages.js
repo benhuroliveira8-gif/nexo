@@ -9,6 +9,8 @@ const presence = require('./presence');
 const previews = require('./linkpreview');
 const emojis = require('./emojis');
 const gifs = require('./gifs');
+const assets = require('./assets');
+const automod = require('./automod');
 const { P, roomsForChannel } = require('./permissions');
 
 const MAX_LENGTH = 4000;
@@ -49,7 +51,7 @@ async function hydrate(rows) {
     db.query('SELECT message_id, user_id FROM message_mentions WHERE message_id = ANY($1::bigint[])', [ids]),
     replyIds.length
       ? db.query(
-        `SELECT m.id, CASE WHEN m.content = '' AND m.gif IS NOT NULL THEN '🎞️ GIF' ELSE left(m.content, 120) END AS content, m.author_id, u.username, u.display_name, u.is_bot, u.avatar_id,
+        `SELECT m.id, CASE WHEN m.content = '' AND m.gif IS NOT NULL THEN '🎞️ GIF' WHEN m.content = '' AND m.sticker IS NOT NULL THEN '🏷️ ' || (m.sticker->>'name') ELSE left(m.content, 120) END AS content, m.author_id, u.username, u.display_name, u.is_bot, u.avatar_id,
                 EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id) AS has_attachments
          FROM messages m LEFT JOIN users u ON u.id = m.author_id WHERE m.id = ANY($1::bigint[])`,
         [replyIds],
@@ -219,7 +221,7 @@ function cleanPoll(poll) {
   return { question, options, multiple: !!poll.multiple, hours };
 }
 
-async function createMessage({ access, userId, content, attachmentIds, replyToId, poll, gif }) {
+async function createMessage({ access, userId, content, attachmentIds, replyToId, poll, gif, stickerId }) {
   if (!['text', 'thread', 'dm'].includes(access.kind)) throw new MessageError('Este canal não tem mensagens de texto.');
   if (!access.can(P.SEND_MESSAGES)) {
     throw new MessageError(access.timeoutUntil ? 'Você está de castigo e não pode enviar mensagens agora.' : 'Você não tem permissão para enviar mensagens aqui.');
@@ -233,7 +235,29 @@ async function createMessage({ access, userId, content, attachmentIds, replyToId
   if (pollData && ids.length) throw new MessageError('Enquetes não podem ter anexos.');
   const gifData = gif ? gifs.clean(gif, MessageError) : null;
   if (gifData && (ids.length || pollData)) throw new MessageError('O GIF vai sozinho (sem anexos ou enquete).');
-  validateContent(content, ids.length > 0 || !!pollData || !!gifData);
+  let stickerData = null;
+  if (stickerId !== undefined && stickerId !== null && stickerId !== '') {
+    if (ids.length || pollData || gifData) throw new MessageError('A figurinha vai sozinha.');
+    const st = /^\d{1,9}$/.test(String(stickerId)) ? await assets.get('sticker', Number(stickerId)) : null;
+    let ok = !!st;
+    if (st && access.serverId) ok = st.server_id === access.serverId;
+    else if (st) ok = (await db.query('SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2', [st.server_id, userId])).rowCount > 0;
+    if (!ok) throw new MessageError('Essa figurinha não está disponível aqui.');
+    stickerData = { id: st.id, name: st.name, serverId: st.server_id };
+    content = '';
+  }
+  validateContent(content, ids.length > 0 || !!pollData || !!gifData || !!stickerData);
+  // Moderação automática do servidor (palavras bloqueadas e anti-spam).
+  if (access.serverId) {
+    const mentionCount = (content.match(/(^|[^\w@])@[a-z0-9_.]{3,32}/gi) || []).length;
+    const verdict = await automod.check(access, userId, content, { mentions: mentionCount });
+    if (verdict) {
+      if (verdict.punished) {
+        createSystemMessage(access, userId, `🤖 ${verdict.punished} ficou de castigo por ${verdict.minutes} min (moderação automática${verdict.why ? `: ${verdict.why}` : ''}).`).catch(() => {});
+      }
+      throw new MessageError(verdict.error);
+    }
+  }
   let replyTo = null;
   if (replyToId !== undefined && replyToId !== null && replyToId !== '') {
     replyTo = /^\d{1,18}$/.test(String(replyToId)) ? String(replyToId) : null;
@@ -245,9 +269,9 @@ async function createMessage({ access, userId, content, attachmentIds, replyToId
   const id = await db.transaction(async (c) => {
     const mentions = await parseMentions(c, content, access);
     const { rows } = await c.query(
-      `INSERT INTO messages (channel_id, author_id, content, mention_everyone, reply_to_id, gif)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-      [access.channel.id, userId, content, mentions.everyone, replyTo, gifData ? JSON.stringify(gifData) : null],
+      `INSERT INTO messages (channel_id, author_id, content, mention_everyone, reply_to_id, gif, sticker)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [access.channel.id, userId, content, mentions.everyone, replyTo, gifData ? JSON.stringify(gifData) : null, stickerData ? JSON.stringify(stickerData) : null],
     );
     // Responder alguém já avisa essa pessoa (como uma menção), se ela vê o canal.
     if (replyTo) {
@@ -291,10 +315,14 @@ async function editMessage({ access, messageRow, content }) {
   const att = await db.query(
     `SELECT (SELECT count(*)::int FROM attachments WHERE message_id = $1)
           + (SELECT count(*)::int FROM polls WHERE message_id = $1)
-          + (SELECT count(*)::int FROM messages WHERE id = $1 AND gif IS NOT NULL) AS n`,
+          + (SELECT count(*)::int FROM messages WHERE id = $1 AND (gif IS NOT NULL OR sticker IS NOT NULL)) AS n`,
     [messageRow.id],
   );
   validateContent(content, att.rows[0].n > 0);
+  if (access.serverId) {
+    const verdict = await automod.check(access, messageRow.author_id, content, { editing: true });
+    if (verdict) throw new MessageError(verdict.error);
+  }
 
   await db.transaction(async (c) => {
     const mentions = await parseMentions(c, content, access);
@@ -363,6 +391,7 @@ function previewText(message) {
     .replace(/\s+/g, ' ')
     .trim();
   if (!text && message.gif) text = '🎞️ GIF';
+  if (!text && message.sticker) text = `🏷️ Figurinha: ${message.sticker.name}`;
   if (!text && message.poll) text = `📊 Enquete: ${message.poll.question}`;
   if (!text && message.attachments.some((a) => a.isVoice)) text = '🎤 Mensagem de voz';
   if (!text && message.attachments.length) text = '📎 Anexo';

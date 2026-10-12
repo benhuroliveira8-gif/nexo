@@ -40,6 +40,8 @@ services:
       # GIFs (opcional): chave do KLIPY e classificação máxima (g, pg, pg-13, r).
       KLIPY_API_KEY: ${KLIPY_API_KEY:-}
       GIF_RATING: ${GIF_RATING:-pg-13}
+      # Endereço interno do LiveKit (para o modo palco liberar/tirar a fala na hora).
+      LIVEKIT_INTERNAL_URL: ${LIVEKIT_INTERNAL_URL:-http://livekit:7880}
     volumes:
       - nexo_uploads:/data/uploads
     ports:

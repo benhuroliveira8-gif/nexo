@@ -5,6 +5,7 @@ import {
 } from './util.js';
 import { state, P, PERMISSION_INFO, can, isOwner, myTop, memberRoles, memberTop } from './state.js';
 import { sortable } from './sortable.js';
+import { renderAssets, renderWelcome, renderAutomod, renderStats, canSeeStats } from './serverx.js';
 
 const PRESET_COLORS = ['#ff7a45', '#f5c542', '#3ecf8e', '#2ec4b6', '#4d9fff', '#7c6cff', '#c86bfa', '#ff5c8a', '#ff5c6c', '#a7adbb'];
 
@@ -47,7 +48,9 @@ function tabsAvailable() {
   const tabs = [['overview', 'Visão geral']];
   if (can(P.MANAGE_ROLES)) tabs.push(['roles', 'Cargos']);
   if (can(P.MANAGE_ROLES) || can(P.KICK_MEMBERS) || can(P.BAN_MEMBERS) || can(P.MODERATE_MEMBERS)) tabs.push(['members', 'Membros']);
-  if (can(P.MANAGE_EMOJIS)) tabs.push(['emojis', 'Emojis']);
+  if (can(P.MANAGE_EMOJIS)) tabs.push(['emojis', 'Emojis'], ['stickers', 'Figurinhas'], ['sounds', 'Sons']);
+  if (can(P.MANAGE_SERVER)) tabs.push(['welcome', 'Boas-vindas'], ['automod', 'Moderação automática']);
+  if (canSeeStats()) tabs.push(['stats', 'Estatísticas']);
   if (can(P.CREATE_INVITE)) tabs.push(['invites', 'Convites']);
   if (can(P.BAN_MEMBERS)) tabs.push(['bans', 'Banimentos']);
   if (can(P.VIEW_AUDIT_LOG)) tabs.push(['audit', 'Registro de auditoria']);
@@ -66,7 +69,11 @@ function render() {
       onclick: () => { ui.tab = key; render(); },
     }, label)));
 
-  const pages = { emojis: renderEmojis, roles: renderRoles, members: renderMembersTab, invites: renderInvites, bans: renderBans, audit: renderAudit, overview: renderOverview };
+  const pages = {
+    emojis: renderEmojis, roles: renderRoles, members: renderMembersTab, invites: renderInvites, bans: renderBans, audit: renderAudit, overview: renderOverview,
+    stickers: () => renderAssets('sticker'), sounds: () => renderAssets('sound'), welcome: renderWelcome, automod: renderAutomod,
+    stats: () => renderStats({ cache: ui.cache, rerender: render }),
+  };
   const content = (pages[ui.tab] || renderOverview)();
 
   ui.root.replaceChildren(h('div', { class: 'settings' },
@@ -680,6 +687,14 @@ function describe(e) {
     case 'emoji_create': return [`adicionou o emoji :${e.targetName}:`];
     case 'emoji_update': return [`renomeou o emoji :${x.from}: para :${x.to}:`];
     case 'emoji_delete': return [`apagou o emoji :${e.targetName}:`];
+    case 'sticker_create': return [`adicionou a figurinha ${t}`];
+    case 'sticker_delete': return [`apagou a figurinha ${t}`];
+    case 'sound_create': return [`adicionou o som ${t}`];
+    case 'sound_delete': return [`apagou o som ${t}`];
+    case 'welcome_update': return ['mudou as boas-vindas', [x.enabled ? 'mensagem ligada' : 'mensagem desligada', x.roleId ? 'com cargo automático' : ''].filter(Boolean).join(' · ')];
+    case 'automod_update': return ['mudou a moderação automática', [`${x.words || 0} palavra(s) bloqueada(s)`, x.spam ? 'anti-spam ligado' : 'anti-spam desligado'].join(' · ')];
+    case 'automod_timeout': return [`castigou ${who} por ${mins(x.minutes)}`, x.reason ? `Motivo: ${x.reason}` : ''];
+    case 'event_create': return [`criou o evento ${t}`];
     default: return [e.action];
   }
 }
@@ -690,6 +705,8 @@ const AUDIT_ICONS = {
   channel_delete: '#️⃣', category_create: '📁', category_update: '📁', category_delete: '📁', server_update: '⚙️', server_icon: '🖼️',
   invite_create: '✉️', invite_delete: '✉️', message_delete: '🗑️', bot_add: '🤖',
   emoji_create: '😺', emoji_update: '😺', emoji_delete: '😺',
+  sticker_create: '🏷️', sticker_delete: '🏷️', sound_create: '🎵', sound_delete: '🎵',
+  welcome_update: '👋', automod_update: '🛡️', automod_timeout: '🤖',
 };
 
 function renderAudit() {
@@ -709,7 +726,7 @@ function renderAudit() {
           h('span', { class: 'audit-icon' }, AUDIT_ICONS[e.action] || '•'),
           e.actor ? avatar(e.actor, { size: 'sm' }) : null,
           h('div', { class: 'audit-text' },
-            h('div', {}, h('strong', {}, e.actor ? e.actor.displayName : 'Alguém'), ` ${main}`),
+            h('div', {}, h('strong', {}, e.actor ? e.actor.displayName : e.action.startsWith('automod') ? '🤖 Moderação automática' : 'Alguém'), ` ${main}`),
             sub ? h('div', { class: 'muted small' }, sub) : null,
             h('div', { class: 'muted small' }, fullTime(new Date(e.createdAt))))));
       });

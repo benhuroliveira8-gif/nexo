@@ -16,12 +16,16 @@ import {
 } from './settings.js';
 import {
   initVoice, voiceState, inVoice, joinVoice, leaveVoice, resyncAfterReconnect, renderVoicePanel, renderStage,
-  openVolumePopover,
+  openVolumePopover, playSoundEvent, onStageRole,
 } from './voice.js';
 import { openDeveloper } from './developer.js';
 import { renderMarkdown, isJumbo, stripMarkdown } from './markdown.js';
 import { openGifPicker, buildGif, setGifUser } from './gifs.js';
 import { initEvents, loadEvents, wireEventSocket, eventsSidebarItem, openEventsPanel } from './events.js';
+import {
+  initMore, wireMoreSocket, openStatusDialog, openScheduleDialog, openReminderMenu, isSaved, loadSavedIds, toggleSaved,
+  openListsPanel, closeListsPanel, forgetListsPanel, buildSticker, openStickerPicker, exportDialog,
+} from './more.js';
 import {
   createPollDialog, buildPoll, buildVoicePlayer, buildEmbeds, startRecording, canRecord, liveBars, fmtDuration,
 } from './extras.js';
@@ -216,6 +220,7 @@ async function boot() {
 async function start(user) {
   state.me = user;
   setGifUser(user.id);
+  loadSavedIds();
   $('#auth').hidden = true;
   $('#app').hidden = false;
   renderUserPanel();
@@ -451,6 +456,9 @@ function connectSocket() {
   });
 
   wireEventSocket(socket);
+  wireMoreSocket(socket);
+  socket.on('voice:sound', (data) => playSoundEvent(data, memberById(data.userId) || freshUser({ id: data.userId })));
+  socket.on('stage:role', (data) => onStageRole(data));
 
   socket.on('server:changed', ({ serverId }) => {
     if (serverId === state.view) refreshDetailSoon();
@@ -660,6 +668,20 @@ async function goHome(channelId = null) {
   renderAll();
 }
 
+initMore({
+  applyMe: (user) => applyMe(user),
+  resultCard: (m, opts) => resultCard(m, opts),
+  openResult: (m) => openSearchResult(m),
+  closeSearch: () => closeSearch(),
+  sendSticker: (st) => sendSticker(st),
+  rerenderMessages: () => { if (state.channelId) renderMessages(); },
+  jumpTo: async (r) => {
+    if (r.serverId && state.view !== r.serverId) await selectServer(r.serverId, r.channelId);
+    else if (!r.serverId && state.view !== 'home') await goHome(r.channelId);
+    jumpToMessage(r.channelId, r.messageId);
+  },
+});
+
 initEvents({
   onChange: (serverId) => { if (state.view === serverId && state.detail) renderSidebar(); },
   openChannel: (serverId, channelId) => (state.view === serverId ? selectChannel(channelId) : selectServer(serverId, channelId)),
@@ -867,7 +889,7 @@ function renderSidebar() {
           class: `side-item channel voice${c.id === state.channelId ? ' active' : ''}${connectedHere ? ' connected' : ''}`,
           title: connectedHere ? 'Você está aqui' : 'Clique para entrar',
           onclick: () => openVoiceChannel(c),
-        }, h('span', { class: 'hash' }, '🔊'), h('span', { class: 'truncate' }, c.name), c.private ? lockIcon() : null),
+        }, h('span', { class: 'hash' }, c.stage ? '🎙️' : '🔊'), h('span', { class: 'truncate' }, c.name), c.private ? lockIcon() : null),
         gear(c),
         people.length ? h('ul', { class: 'voice-people' }, people.map((p) => {
           const m = memberById(p.userId);
@@ -883,6 +905,9 @@ function renderSidebar() {
           h('span', { class: 'vp-icons' },
             p.screen ? h('span', { title: 'Compartilhando a tela', class: 'live' }, 'AO VIVO') : null,
             p.video ? h('span', { title: 'Câmera ligada' }, '📹') : null,
+            p.recording ? h('span', { title: 'Gravando a chamada', class: 'rec-dot' }, '🔴') : null,
+            p.hand ? h('span', { title: 'Levantou a mão' }, '✋') : null,
+            c.stage && p.speaker ? h('span', { title: 'No palco' }, '🎙️') : null,
             p.deafened ? h('span', { title: 'Ensurdecido' }, '🙉') : p.muted ? h('span', { title: 'Mutado' }, '🔇') : null));
         })) : null)];
     }
@@ -1024,7 +1049,7 @@ function renderHeader() {
       h('span', { class: 'hash thread-icon' }, '🧵'), h('span', { class: 'truncate' }, channel.name),
     ].filter(Boolean));
   } else {
-    title.replaceChildren(...[h('span', { class: 'hash' }, channel && channel.kind === 'voice' ? '🔊' : '#'), h('span', { class: 'truncate' }, channel ? channel.name : ''),
+    title.replaceChildren(...[h('span', { class: 'hash' }, channel && channel.kind === 'voice' ? (channel.stage ? '🎙️' : '🔊') : '#'), h('span', { class: 'truncate' }, channel ? channel.name : ''),
       channel && channel.private ? lockIcon() : null].filter(Boolean));
   }
   if (dm) {
@@ -1047,6 +1072,10 @@ function renderHeader() {
     }
   }
   const textual = !!state.channelId && !(channel && channel.kind === 'voice');
+  if (textual) {
+    const label = dm ? (dm.isGroup ? `o grupo ${dmName(dm)}` : `a conversa com ${dm.user.displayName}`) : `#${channel ? channel.name : ''}`;
+    actions.append(h('button', { class: 'icon-btn mobile-hide', title: 'Exportar conversa', onclick: () => exportDialog(state.channelId, label) }, '📥'));
+  }
   $('#btn-pins').hidden = !textual;
   $('#btn-toggle-members').hidden = !(state.view !== 'home' || (dm && dm.isGroup));
   $('#search-input').placeholder = state.view === 'home'
@@ -1267,7 +1296,7 @@ function renderMessages({ stick = 'if-near' } = {}) {
       prev.kind !== 'system' && m.kind !== 'system' &&
       date - new Date(prev.createdAt) < 7 * 60 * 1000;
     const replying = !!(state.replyTo && state.replyTo.message.id === m.id);
-    const sig = [m._v || 0, grouped, !!m.pending, !!m.failed, state.editingId === m.id, replying, view].join('|');
+    const sig = [m._v || 0, grouped, !!m.pending, !!m.failed, state.editingId === m.id, replying, view, isSaved(m.id)].join('|');
     nodes.push(cached(`m:${m.nonce && m.pending ? m.nonce : m.id}`, sig, () => buildMessage(m, grouped)));
     prev = m;
   }
@@ -1391,6 +1420,7 @@ function buildMessage(m, grouped) {
     }));
   }
   if (m.gif) body.append(buildGif(m.gif, { onLoad: keepBottom, pending: m.pending }));
+  if (m.sticker) body.append(buildSticker(m.sticker, { onLoad: keepBottom }));
   if (m.attachments.length) body.append(h('div', { class: 'attachments' }, m.attachments.map((a) => buildAttachment(a, m.pending))));
   if (m.embeds && m.embeds.length && !editing) body.append(buildEmbeds(m.embeds, { onImageLoad: keepBottom }));
   if (m.failed) body.append(h('div', { class: 'msg-failed' }, 'Não foi enviada.'));
@@ -1409,6 +1439,8 @@ function buildMessage(m, grouped) {
     const channel = currentChannel();
     if (can(P.ADD_REACTIONS)) tools.push(h('button', { class: 'tool', title: 'Reagir', onclick: (e) => openEmojiPicker(e.currentTarget, (emoji) => toggleReaction(m, emoji, true)) }, '😀'));
     if (can(P.SEND_MESSAGES)) tools.push(h('button', { class: 'tool', title: 'Responder', onclick: () => setReply(m) }, '↩️'));
+    tools.push(h('button', { class: `tool${isSaved(m.id) ? ' on' : ''}`, title: isSaved(m.id) ? 'Tirar das salvas' : 'Salvar mensagem (só você vê)', onclick: () => toggleSaved(m) }, '🔖'));
+    tools.push(h('button', { class: 'tool', title: 'Lembrar de mim depois', onclick: (e) => openReminderMenu(e.currentTarget, m) }, '⏰'));
     if (channel && channel.kind === 'text' && can(P.SEND_MESSAGES)) {
       tools.push(h('button', { class: 'tool', title: m.thread ? 'Abrir thread' : 'Criar thread', onclick: () => (m.thread ? selectChannel(m.thread.id) : createThreadDialog(m)) }, '🧵'));
     }
@@ -1701,6 +1733,28 @@ function sendMessage() {
   });
 }
 
+// ---------------------------------------------------------------- Figurinhas
+
+$('#btn-sticker').addEventListener('click', (e) => openStickerPicker(e.currentTarget));
+
+function sendSticker(st) {
+  if (!state.channelId || !state.socket || input.disabled) return;
+  const channelId = state.channelId;
+  const reply = state.replyTo && state.replyTo.channelId === channelId ? state.replyTo.message : null;
+  setReply(null, { render: false });
+  state.socket.timeout(15000).emit('message:send', { channelId, content: '', stickerId: st.id, ...(reply ? { replyToId: reply.id } : {}) }, (err, res) => {
+    if (err || !res || !res.ok) return toast((res && res.error) || 'Não foi possível enviar a figurinha.');
+    const bucket = state.messages.get(channelId);
+    if (bucket && !bucket.items.some((x) => x.id === res.message.id)) bucket.items.push(res.message);
+    if (channelId === state.channelId) renderMessages({ stick: 'always' });
+  });
+}
+
+$('#btn-saved').addEventListener('click', () => {
+  if (!$('#search-panel').hidden && document.querySelector('#search-panel .lists-tabs')) closeListsPanel();
+  else openListsPanel('saved');
+});
+
 // ---------------------------------------------------------------- GIFs
 
 $('#btn-gif').addEventListener('click', (e) => openGifPicker(e.currentTarget, sendGif, { userId: state.me.id }));
@@ -1746,6 +1800,8 @@ const MAX_ATTACHMENTS = 5;
 $('#btn-attach').addEventListener('click', (e) => openMenu(e.currentTarget, [
   { label: '📎  Enviar arquivo', hidden: !can(P.ATTACH_FILES), onClick: () => $('#file-input').click() },
   { label: '🎞️  Enviar GIF', onClick: () => openGifPicker($('#btn-attach'), sendGif, { userId: state.me.id }) },
+  { label: '🏷️  Enviar figurinha', onClick: () => openStickerPicker($('#btn-attach')) },
+  { label: '⏰  Agendar mensagem', onClick: () => openScheduleDialog(state.channelId, input.value.trim(), () => { input.value = ''; autoResize(); }) },
   { label: '📊  Criar enquete', onClick: () => openPollDialog() },
   { label: '🎤  Gravar mensagem de voz', hidden: !can(P.ATTACH_FILES) || !canRecord(), onClick: () => startVoiceMessage(true) },
 ], { className: 'popover-menu' }));
@@ -2276,7 +2332,8 @@ function openServerMenu(anchor) {
     { label: '⚙️  Configurações do servidor', hidden: !manageSomething, onClick: () => openServerSettings() },
     { label: '➕  Criar canal', hidden: !can(P.MANAGE_CHANNELS), onClick: () => createChannelDialog('text') },
     { label: '📁  Criar categoria', hidden: !can(P.MANAGE_CHANNELS), onClick: createCategoryDialog },
-    { label: '😺  Emojis do servidor', hidden: !can(P.MANAGE_EMOJIS), onClick: () => openServerSettings('emojis') },
+    { label: '😺  Emojis, figurinhas e sons', hidden: !can(P.MANAGE_EMOJIS), onClick: () => openServerSettings('emojis') },
+    { label: '📊  Estatísticas', hidden: !(can(P.MANAGE_SERVER) || can(P.VIEW_AUDIT_LOG)), onClick: () => openServerSettings('stats') },
     { label: '📜  Registro de auditoria', hidden: !can(P.VIEW_AUDIT_LOG), onClick: () => openServerSettings('audit') },
     { separator: true, hidden: isOwner() },
     { label: '🚪  Sair do servidor', danger: true, hidden: isOwner(), onClick: leaveServerDialog },
@@ -2388,9 +2445,14 @@ function editChannelDialog(channel) {
   const thread = channel.kind === 'thread';
   const input2 = h('input', { value: channel.name, maxlength: '100' });
   const opts = !thread && can(P.MANAGE_CHANNELS) ? channelOptionsFields(channel) : null;
+  const stageBox = channel.kind === 'voice' && can(P.MANAGE_CHANNELS) ? h('input', { type: 'checkbox', class: 'switch', checked: !!channel.stage }) : null;
   openDialog({
     title: thread ? 'Editar thread' : 'Editar canal',
-    body: h('div', {}, h('label', { class: 'field' }, thread ? 'Nome da thread' : 'Nome do canal', input2), opts ? opts.el : null),
+    body: h('div', {}, h('label', { class: 'field' }, thread ? 'Nome da thread' : 'Nome do canal', input2), opts ? opts.el : null,
+      stageBox ? h('label', { class: 'switch-row' },
+        h('span', { class: 'kind-text' }, h('strong', {}, '🎙️ Modo palco'),
+          h('span', { class: 'muted small' }, 'Só fala quem modera ou quem for chamado. Os outros ouvem e podem levantar a mão ✋.')),
+        stageBox) : null),
     actions: [
       {
         label: thread ? 'Apagar thread' : 'Apagar canal', kind: 'danger-ghost',
@@ -2410,7 +2472,7 @@ function editChannelDialog(channel) {
         onClick: async () => {
           const name = input2.value.trim();
           if (!name) throw new Error('Dê um nome ao canal.');
-          await api(`/channels/${channel.id}`, { method: 'PATCH', body: { name, ...(opts ? opts.values() : {}) } });
+          await api(`/channels/${channel.id}`, { method: 'PATCH', body: { name, ...(opts ? opts.values() : {}), ...(stageBox ? { stage: stageBox.checked } : {}) } });
         },
       },
     ],
@@ -2709,7 +2771,7 @@ $('#me-info').addEventListener('click', (e) => openMenu(e.currentTarget, [
     label: `${icon}  ${label}${state.me.status === value ? '  ✓' : ''}`,
     onClick: () => saveMe({ status: value }),
   })),
-  { label: state.me.statusText ? '💬  Editar status personalizado' : '💬  Definir status personalizado', onClick: editStatusText },
+  { label: state.me.statusText ? '💬  Editar status personalizado' : '💬  Definir status personalizado', onClick: openStatusDialog },
   { separator: true },
   { label: '⚙️  Configurações do usuário', onClick: () => openAccountSettings() },
   { label: '🎨  Aparência (tema e cor)', onClick: () => openAccountSettings('appearance') },
@@ -2737,19 +2799,6 @@ async function saveMe(changes) {
     toast(err.message);
   }
 }
-
-const editStatusText = () => ask({
-  title: 'Status personalizado',
-  text: 'Aparece embaixo do seu nome. Ex.: "Jogando Minecraft", "Estudando 📚". Deixe vazio para tirar.',
-  placeholder: 'O que você está fazendo?',
-  value: state.me.statusText || '',
-  maxLength: 80,
-  okLabel: 'Salvar',
-  onSubmit: async (statusText) => {
-    const { user } = await api('/me', { method: 'PATCH', body: { statusText } });
-    applyMe(user);
-  },
-});
 
 $('#home-btn').addEventListener('click', () => goHome());
 
@@ -2910,7 +2959,10 @@ function resultCard(m, { actions = [], channelLabel = null } = {}) {
           h('strong', { style: roleColor(m.author.id) ? `color:${roleColor(m.author.id)}` : null }, author.displayName),
           h('span', { class: 'msg-time' }, fullTime(date))),
         m.content ? h('div', { class: 'msg-text' }, renderContent(m.content)) : null,
-        m.attachments.length ? h('div', { class: 'muted small' }, `📎 ${m.attachments.length} anexo(s)`) : null),
+        m.attachments.length ? h('div', { class: 'muted small' }, `📎 ${m.attachments.length} anexo(s)`) : null,
+        m.gif ? h('div', { class: 'muted small' }, '🎞️ GIF') : null,
+        m.sticker ? h('div', { class: 'muted small' }, `🏷️ Figurinha: ${m.sticker.name}`) : null,
+        m.poll ? h('div', { class: 'muted small' }, `📊 ${m.poll.question}`) : null),
       actions.length ? h('div', { class: 'result-actions' }, actions) : null));
 }
 
@@ -3028,6 +3080,7 @@ function searchFilterBar() {
 }
 
 function renderSearch() {
+  forgetListsPanel();
   const panel = $('#search-panel');
   panel.hidden = false;
   $('#app').classList.add('searching');
@@ -3089,7 +3142,7 @@ $('#search-input').addEventListener('keydown', (e) => {
 });
 $('#search-input').addEventListener('search', (e) => { if (!e.currentTarget.value) closeSearch(); });
 
-initVoice({ getSocket: () => state.socket, onChange: onVoiceChange });
+initVoice({ getSocket: () => state.socket, onChange: onVoiceChange, getSounds: (serverId) => (state.detail && state.detail.server.id === serverId ? state.detail.sounds || [] : []) });
 onThemeChange(() => { if (state.me && state.channelId) renderMessages(); });
 
 // Funções usadas pelas outras telas (amigos, configurações).
