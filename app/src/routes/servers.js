@@ -1,6 +1,7 @@
 // Servidores, categorias, canais, cargos, membros, convites e moderação.
 const crypto = require('crypto');
 const db = require('../db');
+const notify = require('../notify');
 const S = require('../serializers');
 const presence = require('../presence');
 const events = require('../events');
@@ -95,6 +96,7 @@ async function onboardingPending(serverId, userId, o, ctx) {
 }
 
 // Emoji do cargo: 1 emoji (ou até 2 caracteres comuns). Nada = sem ícone.
+const SLOWMODE = [0, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 21600];
 const graphemes = new Intl.Segmenter('pt', { granularity: 'grapheme' });
 function cleanRoleIcon(v) {
   const t = String(v || '').trim();
@@ -264,7 +266,7 @@ module.exports = function serverRoutes(r) {
     );
     // Só conta como "não lido" o que a pessoa consegue ver (canais privados ficam de fora).
     const ch = await db.query(
-      `SELECT c.id, c.server_id FROM channels c
+      `SELECT c.id, c.server_id, c.parent_channel_id FROM channels c
        LEFT JOIN channels p ON p.id = c.parent_channel_id
        JOIN servers s ON s.id = c.server_id
        WHERE c.server_id = ANY($2::int[]) AND c.kind <> 'category'
@@ -274,11 +276,14 @@ module.exports = function serverRoutes(r) {
       [req.userId, rows.map((s) => s.id)],
     );
     const states = await channelStates(req.userId, ch.rows.map((c) => c.id));
+    // Silenciados não acendem o servidor; "Nada" também não conta menções.
+    const prefs = (await notify.loadFor([req.userId])).get(req.userId) || new Map();
     const agg = new Map();
     ch.rows.forEach((c) => {
       const st = states.get(c.id);
       const a = agg.get(c.server_id) || { unread: false, mentions: 0 };
-      if (st) { a.unread = a.unread || st.unread; a.mentions += st.mentions; }
+      const e = notify.effective(prefs, c.server_id, c.id, c.parent_channel_id);
+      if (st && !e.muted) { a.unread = a.unread || st.unread; if (e.level !== 'none') a.mentions += st.mentions; }
       agg.set(c.server_id, a);
     });
     res.json({
@@ -635,6 +640,13 @@ module.exports = function serverRoutes(r) {
     if (ctx.can(P.MANAGE_CHANNELS) && channel.kind === 'text' && b.isClips !== undefined) {
       vals.push(!!b.isClips); sets.push(`is_clips = $${vals.length}`);
       if (!!b.isClips !== channel.is_clips) changes.isClips = !!b.isClips;
+    }
+    // Modo lento: quem modera também pode ligar na hora (MANAGE_MESSAGES), não só quem cria canais.
+    if ((ctx.can(P.MANAGE_CHANNELS) || ctx.can(P.MANAGE_MESSAGES)) && channel.kind === 'text' && b.slowmode !== undefined) {
+      const secs = Number(b.slowmode);
+      if (!SLOWMODE.includes(secs)) fail(400, 'Tempo do modo lento inválido.');
+      vals.push(secs); sets.push(`slowmode_seconds = $${vals.length}`);
+      if (secs !== (channel.slowmode_seconds || 0)) changes.slowmode = secs;
     }
     if (ctx.can(P.MANAGE_CHANNELS) && channel.kind === 'voice' && b.waitingRoom !== undefined) {
       vals.push(!!b.waitingRoom); sets.push(`waiting_room = $${vals.length}`);

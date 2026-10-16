@@ -110,6 +110,14 @@ Chat em tempo real no estilo de servidores e canais. Projeto pessoal, construíd
 - **Calendário do servidor** 📅: em Eventos → *Mês*; e **🔗 Google Agenda** dá um link secreto (.ics) que mostra os eventos de todos os seus servidores na sua agenda: [docs/calendario.md](docs/calendario.md)
 - **Denúncias** 🚩: passe o mouse numa mensagem → 🚩; cai numa fila que só a moderação vê (barra do servidor → *Denúncias*)
 - **Cor do servidor** 🎨: cada servidor escolhe uma cor de destaque (⚙️ do servidor → *Visão geral*); dá para desligar em ⚙️ → *Aparência*
+- **Silenciar** 🔕: servidor (botão direito nele ou menu ▾ → *Notificações do servidor*) ou canal (⋯ no topo, ou botão direito no canal): *Todas*, *Só menções*, *Nada* ou silenciar por 15 min, 1 h, 8 h, 24 h ou até reativar
+- **Caixa de menções** 🔔: o sininho no topo junta todas as vezes que te marcaram ou responderam, de todos os servidores
+- **Ir para… (Ctrl+K)** 🔎: digita parte do nome e pula para canal, servidor ou pessoa (no celular: botão *Ir para…* no topo da lista)
+- **Modo lento** 🐢: a moderação escolhe quantos segundos cada pessoa espera entre mensagens (⋯ → *Modo lento*)
+- **Webhooks** 🔗: link secreto para outros sistemas postarem num canal (ex.: Jenkins avisando "deploy feito ✅"): [docs/webhooks.md](docs/webhooks.md)
+- **Galeria do canal** 🖼️: ⋯ → *Galeria* mostra todas as fotos, vídeos, clipes e arquivos do canal
+- **Vídeo flutuante** 🖥️: numa chamada, a tela compartilhada continua num quadradinho (dá para arrastar) enquanto você olha outros canais
+- **Confirmação de e-mail** 📧 (opcional): conta nova confirma o e-mail com um código, e o "Esqueci a senha" manda código por e-mail: [docs/email.md](docs/email.md)
 
 ## Como rodar (no servidor Ubuntu com Docker)
 

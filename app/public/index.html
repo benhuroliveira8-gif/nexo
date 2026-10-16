@@ -40,6 +40,10 @@
         <label id="display-name-field" hidden>Nome de exibição
           <input name="displayName" maxlength="32" autocomplete="nickname" />
         </label>
+        <label id="email-field" hidden>E-mail
+          <input name="email" type="email" maxlength="120" autocomplete="email" autocapitalize="none" spellcheck="false" placeholder="voce@exemplo.com" />
+          <span class="muted small">Vamos mandar um código para confirmar. Serve também para recuperar a senha.</span>
+        </label>
         <label id="reg-code-field" hidden>Código de cadastro
           <input name="inviteCode" maxlength="100" autocomplete="off" spellcheck="false" placeholder="Peça para quem administra o Nexo" />
         </label>
@@ -54,16 +58,31 @@
         <label>Usuário
           <input name="username" required minlength="3" maxlength="32" autocomplete="username" autocapitalize="none" spellcheck="false" />
         </label>
-        <label>Chave de recuperação ou código da administração
+        <label>Chave de recuperação, código da administração ou código do e-mail
           <input name="code" required maxlength="40" autocapitalize="characters" spellcheck="false" placeholder="ABCD-EFGH" />
         </label>
         <label>Nova senha
           <input name="newPassword" type="password" required minlength="6" maxlength="128" autocomplete="new-password" />
         </label>
+        <button class="btn small" type="button" id="recover-email-btn" hidden>📧 Mandar um código para o meu e-mail</button>
         <p class="muted small">Não tem a chave? Peça para a administração do Nexo um código para criar senha nova (vale 24 horas).</p>
         <p class="form-error" id="recover-error" role="alert"></p>
         <button class="btn primary" type="submit" id="recover-submit">Criar senha nova</button>
         <button class="link" type="button" id="recover-back">← Voltar</button>
+      </form>
+      <form id="email-gate" class="twofa-form" hidden autocomplete="off">
+        <p id="email-gate-text"></p>
+        <label>Código de 6 dígitos
+          <input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="123456" />
+        </label>
+        <p class="muted small">Não chegou? Olhe a caixa de spam ou peça de novo.</p>
+        <p class="form-error" id="email-gate-error" role="alert"></p>
+        <button class="btn primary" type="submit" id="email-gate-submit">Confirmar e-mail</button>
+        <div class="row-actions email-gate-actions">
+          <button class="link" type="button" id="email-gate-resend">Mandar de novo</button>
+          <button class="link" type="button" id="email-gate-change">Trocar o e-mail</button>
+          <button class="link" type="button" id="email-gate-logout">Sair</button>
+        </div>
       </form>
       <form id="twofa-form" class="twofa-form" hidden autocomplete="off">
         <label>Código de verificação
@@ -118,6 +137,7 @@
         <span class="header-actions" id="header-actions"></span>
         <button class="icon-btn" id="btn-pins" title="Mensagens fixadas" hidden>📌</button>
         <button class="icon-btn" id="btn-saved" title="Salvas, lembretes e agendadas (só você vê)">🔖</button>
+        <button class="icon-btn inbox-btn" id="btn-inbox" title="Menções e respostas">🔔<span class="badge-slot"></span></button>
         <div class="search-box">
           <input type="search" id="search-input" placeholder="Buscar" maxlength="200" autocomplete="off" aria-label="Buscar mensagens" />
         </div>

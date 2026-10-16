@@ -15,6 +15,7 @@ import { economySection } from './economy.js';
 import { autoAwaySection } from './idle.js';
 import { transcriptionSupported, transcriptionOn } from './extras.js';
 import { downloadHelper } from './remote.js';
+import { emailBlock } from './avisos.js';
 import {
   pushStatus, enablePush, disablePush, canPromptInstall, promptInstall, isStandalone, isIos, onPwaChange,
 } from './pwa.js';
@@ -190,6 +191,7 @@ function pageSecurity() {
 
   return h('div', { class: 'settings-page' },
     h('h2', {}, 'Segurança'),
+    emailBlock({ applyMe: hooks.applyMe, rerender: render }),
     block('Trocar senha',
       h('label', { class: 'field' }, 'Senha atual', cur),
       h('label', { class: 'field' }, 'Nova senha', next),

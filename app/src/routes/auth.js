@@ -10,9 +10,13 @@ const push = require('../push');
 const gifs = require('../gifs');
 const profile = require('../profile');
 const admin = require('../admin');
+const mailer = require('../mailer');
+const emailcodes = require('../emailcodes');
 const { wrap, fail, parseId } = require('./util');
 
-const USER_COLS = 'id, username, display_name, is_bot, avatar_id, status, status_text, status_expires_at, about, totp_enabled, token_version, banner_id, profile_color, activity, dnd_schedule, is_admin, recovery_key_hash, lastfm_user';
+const USER_COLS = 'id, username, display_name, is_bot, avatar_id, status, status_text, status_expires_at, about, totp_enabled, token_version, banner_id, profile_color, activity, dnd_schedule, is_admin, recovery_key_hash, lastfm_user, email, email_new, email_verified_at, email_required';
+
+const emailResetFails = new Map(); // userId -> códigos de e-mail errados seguidos
 
 // Código de convite para criar conta (opcional). Útil quando o Nexo fica
 // aberto na internet: sem o código, ninguém de fora consegue se cadastrar.
@@ -59,6 +63,7 @@ function publicRoutes(r) {
     registrationRequiresCode: !!REGISTRATION_CODE,
     version: require('../../package.json').version, // eslint-disable-line global-require
     lastfm: require('../lastfm').enabled(), // eslint-disable-line global-require
+    emailEnabled: mailer.enabled(),
   }));
 
   r.post('/auth/register', wrap(async (req, res) => {
@@ -72,15 +77,35 @@ function publicRoutes(r) {
     }
     const displayName = cleanDisplayName(req.body.displayName, username);
     if (password.length < 6 || password.length > 128) fail(400, 'A senha precisa ter entre 6 e 128 caracteres.');
+    // Com e-mail configurado no servidor, a conta nova precisa confirmar o e-mail.
+    const needEmail = mailer.enabled();
+    const email = needEmail ? emailcodes.cleanEmail(req.body.email) : null;
+    if (needEmail && !email) fail(400, 'Digite um e-mail válido (vamos mandar um código para confirmar).');
+    if (email && await emailcodes.emailTaken(email)) fail(409, 'Esse e-mail já está em outra conta. Use "Esqueci a senha" se for seu.');
+    if (email) {
+      const why = emailcodes.allowSend(`addr:${email}`);
+      if (why) fail(429, why);
+    }
 
     try {
       const hash = await auth.hashPassword(password);
       // A primeira pessoa a criar conta vira administradora do Nexo.
       const { rows } = await db.query(
-        `INSERT INTO users (username, display_name, password_hash, is_admin)
-         VALUES ($1, $2, $3, NOT EXISTS (SELECT 1 FROM users WHERE is_admin)) RETURNING ${USER_COLS}`,
-        [username, displayName, hash],
+        `INSERT INTO users (username, display_name, password_hash, is_admin, email_required)
+         VALUES ($1, $2, $3, NOT EXISTS (SELECT 1 FROM users WHERE is_admin), $4) RETURNING ${USER_COLS}`,
+        [username, displayName, hash, needEmail],
       );
+      if (email) {
+        emailcodes.allowSend(`user:${rows[0].id}`);
+        try {
+          await emailcodes.startVerify(rows[0], email);
+        } catch (err) {
+          console.error('Erro ao mandar e-mail de confirmação:', err.message);
+          await db.query('DELETE FROM users WHERE id = $1', [rows[0].id]);
+          fail(502, 'Não consegui mandar o e-mail de confirmação agora. Confira o endereço ou tente de novo mais tarde.');
+        }
+        rows[0].email_new = email;
+      }
       res.status(201).json({ token: auth.signToken(rows[0]), user: S.me(rows[0]) });
     } catch (err) {
       if (err.code === '23505') fail(409, 'Esse nome de usuário já existe.');
@@ -167,32 +192,53 @@ function publicRoutes(r) {
     if (next.length < 6 || next.length > 128) fail(400, 'A nova senha precisa ter entre 6 e 128 caracteres.');
     const given = admin.normCode(req.body.code);
     const { rows } = await db.query(
-      'SELECT id, recovery_key_hash, reset_code_hash, reset_expires_at, blocked_at FROM users WHERE username = $1 AND NOT is_bot',
+      `SELECT id, recovery_key_hash, reset_code_hash, reset_expires_at, blocked_at, email_reset_hash, email_reset_expires_at
+       FROM users WHERE (username = $1 OR lower(email) = $1) AND NOT is_bot`,
       [username],
     );
     const u = rows[0];
     const hash = given.length >= 8 ? admin.hashCode(given) : null;
     const viaKey = u && hash && u.recovery_key_hash === hash;
     const viaReset = u && hash && u.reset_code_hash === hash && u.reset_expires_at && new Date(u.reset_expires_at) > new Date();
-    if (!viaKey && !viaReset) {
+    const viaEmail = emailcodes.resetMatches(u, req.body.code);
+    if (!viaKey && !viaReset && !viaEmail) {
       loginFails.set(key, [...recentFails(key), Date.now()]);
+      // Código do e-mail: 5 erros e ele deixa de valer (é preciso pedir outro).
+      if (u && u.email_reset_hash) {
+        const n = (emailResetFails.get(u.id) || 0) + 1;
+        if (n >= 5) { emailResetFails.delete(u.id); await db.query('UPDATE users SET email_reset_hash = NULL, email_reset_expires_at = NULL WHERE id = $1', [u.id]); } else emailResetFails.set(u.id, n);
+      }
       fail(401, 'Usuário ou código incorretos (ou o código venceu).');
     }
     if (u.blocked_at) fail(403, 'Sua conta foi bloqueada pela administração do Nexo.');
     loginFails.delete(key);
+    if (u) emailResetFails.delete(u.id);
     const pass = await auth.hashPassword(next);
     // Cada código vale uma vez só.
     const { rows: done } = await db.query(
       `UPDATE users SET password_hash = $2, token_version = token_version + 1,
          recovery_key_hash = CASE WHEN $3 THEN NULL ELSE recovery_key_hash END,
          reset_code_hash = CASE WHEN $4 THEN NULL ELSE reset_code_hash END,
-         reset_expires_at = CASE WHEN $4 THEN NULL ELSE reset_expires_at END
+         reset_expires_at = CASE WHEN $4 THEN NULL ELSE reset_expires_at END,
+         email_reset_hash = NULL, email_reset_expires_at = NULL
        WHERE id = $1 RETURNING ${USER_COLS}`,
       [u.id, pass, !!viaKey, !!viaReset],
     );
     disconnectEverywhere(u.id);
     if (done[0].totp_enabled) return res.json({ ok: true, twoFactorRequired: true });
     res.json({ ok: true, token: auth.signToken(done[0]), user: S.me(done[0]) });
+  }));
+
+  // Esqueci a senha (por e-mail): manda um código para o e-mail confirmado da conta.
+  // Sempre responde igual, para não revelar quais contas existem.
+  r.post('/auth/recover/email', wrap(async (req, res) => {
+    if (!mailer.enabled()) fail(400, 'O envio de e-mail não está configurado neste Nexo.');
+    const login = String(req.body.login || '').trim().toLowerCase();
+    const key = `recmail|${clientIp(req)}`;
+    if (recentFails(key).length >= 10) fail(429, 'Muitos pedidos. Espere 15 minutos.');
+    loginFails.set(key, [...recentFails(key), Date.now()]);
+    emailcodes.startReset(login).catch((err) => console.error('Erro ao mandar e-mail de senha:', err.message));
+    res.json({ ok: true });
   }));
 
   // Segunda etapa do login: código de 6 dígitos do app (ou um código de recuperação).

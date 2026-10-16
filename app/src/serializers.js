@@ -25,6 +25,9 @@ const me = (row) => ({
   isAdmin: !!row.is_admin,
   hasRecoveryKey: !!row.recovery_key_hash,
   lastfmUser: row.lastfm_user || null,
+  email: row.email || null,
+  emailNew: row.email_new || null,
+  emailPending: !!row.email_required && !row.email_verified_at,
 });
 
 const server = (row) => ({
@@ -45,7 +48,7 @@ const channel = (row) => ({
   categoryId: row.category_id || null,
   private: !!row.private,
   stage: !!row.stage,
-  ...(row.kind === 'text' ? { announce: !!row.announce, isClips: !!row.is_clips } : {}),
+  ...(row.kind === 'text' ? { announce: !!row.announce, isClips: !!row.is_clips, slowmode: row.slowmode_seconds || 0 } : {}),
   ...(row.kind === 'voice' ? { waitingRoom: !!row.waiting_room } : {}),
   ...(row.kind === 'thread' ? { solved: !!row.solved, pinned: !!row.pinned } : {}),
   ...(row.kind === 'forum' ? { topic: row.topic || null } : {}),

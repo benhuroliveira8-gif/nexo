@@ -13,6 +13,7 @@ const assets = require('./assets');
 const automod = require('./automod');
 const levels = require('./levels');
 const transcribe = require('./transcribe');
+const notify = require('./notify');
 const { P, roomsForChannel } = require('./permissions');
 
 const MAX_LENGTH = 4000;
@@ -184,6 +185,23 @@ async function parseMentions(client, content, access) {
 
 class MessageError extends Error {}
 
+// Modo lento: cada pessoa espera X segundos entre mensagens no canal (a moderação não).
+const slowLast = new Map(); // `${canal}:${pessoa}` -> horário da última mensagem
+setInterval(() => { const now = Date.now(); for (const [k, t] of slowLast) if (now - t > 6 * 3600 * 1000) slowLast.delete(k); }, 10 * 60 * 1000).unref();
+function checkSlowmode(access, userId) {
+  const secs = access.channel.slowmode_seconds || 0;
+  if (!secs || access.kind === 'dm' || access.isAdmin || access.isOwner || access.can(P.MANAGE_MESSAGES) || access.can(P.MANAGE_CHANNELS)) return;
+  const key = `${access.channel.id}:${userId}`;
+  const last = slowLast.get(key) || 0;
+  const wait = Math.ceil((last + secs * 1000 - Date.now()) / 1000);
+  if (wait > 0) {
+    const err = new MessageError(`🐢 Modo lento: espere ${wait >= 60 ? `${Math.floor(wait / 60)} min ${wait % 60 ? `${wait % 60} s` : ''}`.trim() : `${wait} s`} para mandar outra mensagem aqui.`);
+    err.retryAfter = wait;
+    throw err;
+  }
+  slowLast.set(key, Date.now());
+}
+
 // Anti-spam: no máximo 5 mensagens a cada 5 segundos por usuário (pessoa ou bot).
 const RATE_WINDOW_MS = 5000;
 const RATE_MAX = 5;
@@ -283,6 +301,7 @@ async function createMessage({ access, userId, content, attachmentIds, replyToId
     if (!ok || ok.rowCount === 0) throw new MessageError('A mensagem que você está respondendo não existe mais.');
   }
   checkRate(userId);
+  checkSlowmode(access, userId);
 
   const id = await db.transaction(async (c) => {
     const mentions = await parseMentions(c, content, access);
@@ -426,16 +445,39 @@ function previewText(message) {
 async function notifyPush(access, message) {
   if (!message.author || !message.author.id) return;
   let targets;
+  const mentioned = new Set(message.mentions);
   if (access.kind === 'dm') {
     targets = access.memberIds;
   } else {
     targets = [...message.mentions];
+    let everyone = null;
+    const allMembers = async () => everyone || (everyone = access.viewerIds || (await db.query('SELECT user_id FROM server_members WHERE server_id = $1', [access.serverId])).rows.map((r) => r.user_id));
     if (message.mentionEveryone) {
-      const all = access.viewerIds || (await db.query('SELECT user_id FROM server_members WHERE server_id = $1', [access.serverId])).rows.map((r) => r.user_id);
+      const all = await allMembers();
+      all.forEach((id) => mentioned.add(id));
       targets.push(...all);
+    }
+    // Quem escolheu "Todas as mensagens" neste canal/servidor também recebe.
+    const parent = access.channel.parent_channel_id;
+    const { rows: wantAll } = await db.query(
+      `SELECT DISTINCT user_id FROM nexo_notify WHERE level = 'all' AND target = ANY($1::text[])`,
+      [[`s:${access.serverId}`, `c:${access.channel.id}`, ...(parent ? [`c:${parent}`] : [])]],
+    );
+    if (wantAll.length) {
+      const visible = new Set(await allMembers());
+      targets.push(...wantAll.map((r) => r.user_id).filter((id) => visible.has(id)));
     }
   }
   targets = [...new Set(targets)].filter((id) => id !== message.author.id && !presence.isActive(id));
+  if (!targets.length) return;
+  // Silenciado / "Nada" / "Só menções".
+  const prefs = await notify.loadFor(targets);
+  targets = targets.filter((id) => {
+    const e = notify.effective(prefs.get(id), access.serverId, access.channel.id, access.channel.parent_channel_id);
+    if (e.muted || e.level === 'none') return false;
+    if (e.level === 'mentions') return mentioned.has(id);
+    return true;
+  });
   if (!targets.length) return;
   const { rows } = await db.query(
     "SELECT id FROM users WHERE id = ANY($1::int[]) AND NOT is_bot AND status <> 'dnd'",

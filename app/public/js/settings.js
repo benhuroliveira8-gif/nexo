@@ -9,6 +9,7 @@ import { renderAssets, renderWelcome, renderAutomod, renderStats, canSeeStats } 
 import { renderLevels } from './levelsui.js';
 import { bannerBlob } from './profile.js';
 import { serverThemeBlock, renderOnboardingSettings } from './comunidade.js';
+import { renderWebhooks } from './avisos.js';
 
 const PRESET_COLORS = ['#ff7a45', '#f5c542', '#3ecf8e', '#2ec4b6', '#4d9fff', '#7c6cff', '#c86bfa', '#ff5c8a', '#ff5c6c', '#a7adbb'];
 
@@ -53,6 +54,7 @@ function tabsAvailable() {
   if (can(P.MANAGE_ROLES) || can(P.KICK_MEMBERS) || can(P.BAN_MEMBERS) || can(P.MODERATE_MEMBERS)) tabs.push(['members', 'Membros']);
   if (can(P.MANAGE_EMOJIS)) tabs.push(['emojis', 'Emojis'], ['stickers', 'Figurinhas'], ['sounds', 'Sons']);
   if (can(P.MANAGE_SERVER)) tabs.push(['welcome', 'Boas-vindas'], ['onboarding', 'Primeiros passos'], ['automod', 'Moderação automática'], ['levels', 'Níveis']);
+  if (can(P.MANAGE_CHANNELS)) tabs.push(['webhooks', 'Webhooks']);
   if (canSeeStats()) tabs.push(['stats', 'Estatísticas']);
   if (can(P.CREATE_INVITE)) tabs.push(['invites', 'Convites']);
   if (can(P.BAN_MEMBERS)) tabs.push(['bans', 'Banimentos']);
@@ -77,6 +79,7 @@ function render() {
     stickers: () => renderAssets('sticker'), sounds: () => renderAssets('sound'), welcome: renderWelcome, automod: renderAutomod, levels: renderLevels,
     stats: () => renderStats({ cache: ui.cache, rerender: render }),
     onboarding: () => renderOnboardingSettings(render),
+    webhooks: () => renderWebhooks(render),
   };
   const content = (pages[ui.tab] || renderOverview)();
 
@@ -761,7 +764,7 @@ function describe(e) {
     case 'role_delete': return [`apagou o cargo ${t}`];
     case 'role_reorder': return ['reordenou os cargos'];
     case 'channel_create': return [`criou o canal ${t}`, x.private ? 'privado' : ''];
-    case 'channel_update': return [`editou o canal ${t}`, [x.name ? `nome: ${x.name.from} → ${x.name.to}` : '', 'private' in x ? (x.private ? 'ficou privado' : 'ficou público') : '', 'roles' in x ? 'cargos com acesso mudaram' : ''].filter(Boolean).join(' · ')];
+    case 'channel_update': return [`editou o canal ${t}`, [x.name ? `nome: ${x.name.from} → ${x.name.to}` : '', 'private' in x ? (x.private ? 'ficou privado' : 'ficou público') : '', 'roles' in x ? 'cargos com acesso mudaram' : '', 'slowmode' in x ? (x.slowmode ? `modo lento: ${x.slowmode} s` : 'modo lento desligado') : ''].filter(Boolean).join(' · ')];
     case 'channel_delete': return [`apagou o canal ${t}`];
     case 'category_create': return [`criou a categoria ${t}`];
     case 'category_update': return [`editou a categoria ${t}`];
@@ -788,6 +791,8 @@ function describe(e) {
     case 'levels_reset': return ['zerou o XP de todo mundo', ''];
     case 'automod_timeout': return [`castigou ${who} por ${mins(x.minutes)}`, x.reason ? `Motivo: ${x.reason}` : ''];
     case 'event_create': return [`criou o evento ${t}`];
+    case 'webhook_create': return [`criou o webhook ${t}`, x.channel ? `posta em #${x.channel}` : ''];
+    case 'webhook_delete': return [`apagou o webhook ${t}`, x.channel ? `#${x.channel}` : ''];
     case 'server_theme': return ['mudou a cor do servidor', x.color ? x.color : 'sem cor (cada um usa a sua)'];
     case 'onboarding_update': return ['mudou os primeiros passos', [x.enabled ? 'tela de boas-vindas ligada' : 'tela de boas-vindas desligada', x.interests ? `${x.interests} interesse(s)` : ''].filter(Boolean).join(' · ')];
     case 'report_close': return [`${x.status === 'dismissed' ? 'descartou' : 'resolveu'} uma denúncia contra ${who}`, [x.reason ? `motivo: ${x.reason}` : '', x.deleted ? 'mensagem apagada' : ''].filter(Boolean).join(' · ')];
@@ -796,7 +801,7 @@ function describe(e) {
 }
 
 const AUDIT_ICONS = {
-  server_theme: '🎨', onboarding_update: '👋', report_close: '🚩',
+  webhook_create: '🔗', webhook_delete: '🔗', server_theme: '🎨', onboarding_update: '👋', report_close: '🚩',
   member_kick: '👢', member_ban: '🔨', member_unban: '🕊️', member_timeout: '⏳', member_timeout_remove: '✅', member_roles: '🏷️',
   role_create: '🏷️', role_update: '🏷️', role_delete: '🏷️', role_reorder: '↕️', channel_create: '#️⃣', channel_update: '#️⃣',
   channel_delete: '#️⃣', category_create: '📁', category_update: '📁', category_delete: '📁', server_update: '⚙️', server_icon: '🖼️', server_banner: '🖼️',

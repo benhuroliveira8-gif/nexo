@@ -17,6 +17,7 @@ import {
 import {
   initVoice, voiceState, inVoice, joinVoice, leaveVoice, resyncAfterReconnect, renderVoicePanel, renderStage,
   openVolumePopover, playSoundEvent, onStageRole, noticeVoiceStates, quietVoiceSounds, waitingState, onAdmitted, onDenied,
+  syncFloatingScreen,
 } from './voice.js';
 import { startRingtone, stopRingtone, stopRingback, isRingingBack, playBusy } from './callsounds.js';
 import { quietNow, activityText, activityBlock, paintBanner, badgesRow, levelBlock } from './profile.js';
@@ -50,10 +51,15 @@ import {
 } from './pwa.js';
 import { sortable } from './sortable.js';
 import {
-  initComunidade, applyServerTheme, maybeOnboarding, onboardingBlocked, openOnboarding, disappearButton, expiresMark,
+  initComunidade, applyServerTheme, maybeOnboarding, onboardingBlocked, openOnboarding, disappearButton, disappearMenu, expiresMark,
   loadFolders, setFolders, railNodes, canReport, reportDialog, loadReportCount, wireReportsSocket, reportsSidebarItem, openReportsPanel,
 } from './comunidade.js';
 import { initClips } from './clips.js';
+import {
+  initAvisos, loadNotify, onNotifyChanged, effectiveNotify, serverMuted, notifyDialog, notifyHeaderButton,
+  setInboxCount, loadInboxCount, inboxNoticeMessage, openInbox, openSwitcher, forgetSwitcher, openGallery,
+  renderSlowBar, slowHeaderButton, slowWaitLeft, noteSent, noteSlowError, slowMenu, slowExempt,
+} from './avisos.js';
 
 const isVisible = () => document.visibilityState === 'visible';
 let tempSeq = 0;
@@ -73,6 +79,8 @@ api('/config').then((c) => {
   state.config = c;
   initUpdates({ version: c.version });
   if (authMode === 'register') $('#reg-code-field').hidden = !registrationRequiresCode;
+  if (authMode === 'register') $('#email-field').hidden = !c.emailEnabled;
+  $('#recover-email-btn').hidden = !c.emailEnabled;
 }).catch(() => {});
 
 function showAuth(mode = 'login') {
@@ -87,6 +95,8 @@ function showAuth(mode = 'login') {
     : register ? 'Leva menos de um minuto.' : 'Entre para continuar a conversa.';
   $('#display-name-field').hidden = !register;
   $('#reg-code-field').hidden = !register || !registrationRequiresCode;
+  $('#email-field').hidden = !register || !(state.config && state.config.emailEnabled);
+  $('#email-gate').hidden = true;
   $('#auth-submit').textContent = register ? 'Cadastrar' : 'Entrar';
   $('#auth-switch-text').textContent = register ? 'Já tem conta?' : 'Não tem conta?';
   $('#auth-switch').textContent = register ? 'Entrar' : 'Cadastre-se';
@@ -111,6 +121,17 @@ $('#forgot-link').addEventListener('click', () => {
   $('#recover-form [name=username]').focus();
 });
 $('#recover-back').addEventListener('click', () => showAuth('login'));
+// Esqueci a senha → código por e-mail (se a conta tiver e-mail confirmado).
+$('#recover-email-btn').addEventListener('click', async () => {
+  const login = $('#recover-form [name=username]').value.trim();
+  if (!login) { $('#recover-error').textContent = 'Digite o seu usuário (ou e-mail) primeiro.'; return; }
+  try {
+    await api('/auth/recover/email', { method: 'POST', body: { login } });
+    $('#recover-error').textContent = '';
+    toast('Se essa conta tiver e-mail confirmado, mandamos um código (vale 15 min). Olhe também o spam.');
+    $('#recover-form [name=code]').focus();
+  } catch (err) { $('#recover-error').textContent = err.message; }
+});
 $('#recover-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.currentTarget;
@@ -147,6 +168,7 @@ $('#auth-form').addEventListener('submit', async (e) => {
   if (authMode === 'register') {
     body.displayName = form.displayName.value.trim();
     if (registrationRequiresCode) body.inviteCode = form.inviteCode.value.trim();
+    if (state.config && state.config.emailEnabled) body.email = form.email.value.trim();
   }
   btn.disabled = true;
   $('#auth-error').textContent = '';
@@ -170,8 +192,55 @@ function beginSession(token, user) {
   state.token = token;
   setToken(token);
   storage('nexo.token', token);
+  if (user.emailPending) return showEmailGate(user);
   start(user);
 }
+
+// Conta nova: precisa confirmar o e-mail antes de entrar.
+let gateUser = null;
+function showEmailGate(user) {
+  gateUser = user;
+  $('#app').hidden = true;
+  $('#auth').hidden = false;
+  $('#auth-form').hidden = true;
+  $('#recover-form').hidden = true;
+  $('#auth-switch').parentElement.hidden = true;
+  $('#email-gate').hidden = false;
+  $('#auth-title').textContent = 'Confirme o seu e-mail';
+  $('#auth-subtitle').textContent = 'Falta só isso para entrar no Nexo.';
+  $('#email-gate-text').textContent = `Mandamos um código de 6 dígitos para ${user.emailNew || 'o seu e-mail'}.`;
+  $('#email-gate-error').textContent = '';
+  $('#email-gate [name=code]').value = '';
+  $('#email-gate [name=code]').focus();
+}
+$('#email-gate').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = $('#email-gate-submit');
+  btn.disabled = true;
+  $('#email-gate-error').textContent = '';
+  try {
+    const { user } = await api('/me/email/verify', { method: 'POST', body: { code: $('#email-gate [name=code]').value } });
+    $('#email-gate').hidden = true;
+    gateUser = null;
+    toast('E-mail confirmado! Boas-vindas ao Nexo 🎉');
+    start(user);
+  } catch (err) { $('#email-gate-error').textContent = err.message; } finally { btn.disabled = false; }
+});
+$('#email-gate-resend').addEventListener('click', async () => {
+  try { await api('/me/email/resend', { method: 'POST' }); toast('Código enviado de novo. Olhe também a caixa de spam.'); } catch (err) { $('#email-gate-error').textContent = err.message; }
+});
+$('#email-gate-change').addEventListener('click', () => {
+  const email = h('input', { type: 'email', maxlength: '120', placeholder: 'voce@exemplo.com', value: gateUser && gateUser.emailNew ? gateUser.emailNew : '' });
+  openDialog({
+    title: 'Trocar o e-mail', text: 'Digitou errado? Coloque o e-mail certo e mandamos um código novo.', body: email,
+    actions: [{ label: 'Cancelar' }, { label: 'Mandar código', kind: 'primary', submit: true, onClick: async () => {
+      const res = await api('/me/email', { method: 'POST', body: { email: email.value } });
+      gateUser = { ...gateUser, emailNew: res.emailNew };
+      showEmailGate(gateUser);
+    } }],
+  });
+});
+$('#email-gate-logout').addEventListener('click', () => { $('#email-gate').hidden = true; logout(); });
 
 // Segunda etapa do login (2FA): código do app autenticador.
 let twoFactorTicket = null;
@@ -274,6 +343,7 @@ async function boot() {
   for (let attempt = 0; ; attempt++) {
     try {
       const { user } = await api('/me');
+      if (user.emailPending) return showEmailGate(user);
       return start(user);
     } catch (err) {
       // Só sai da conta se o servidor disse que o login não vale mais.
@@ -295,7 +365,8 @@ async function start(user) {
   if (storage('nexo.hideMembers') === '1') $('#app').classList.add('no-members');
 
   connectSocket();
-  await Promise.all([loadServers(), loadDms(), loadFriends(), loadMyEmojis(), loadFolders()]);
+  await Promise.all([loadServers(), loadDms(), loadFriends(), loadMyEmojis(), loadFolders(), loadNotify()]);
+  loadInboxCount();
 
   const savedView = storage('nexo.view');
   const savedServer = state.servers.find((s) => String(s.id) === savedView);
@@ -531,6 +602,7 @@ function connectSocket() {
   });
   socket.on('connect_error', (err) => {
     if (err.message === 'unauthorized') logout({ skipServer: true });
+    else if (err.message === 'email_unverified') { socket.disconnect(); api('/me').then(({ user }) => showEmailGate(user)).catch(() => {}); }
     else $('#conn-status').hidden = false;
   });
 
@@ -584,6 +656,8 @@ function connectSocket() {
   wireEventSocket(socket);
   wireMoreSocket(socket);
   wireReportsSocket(socket);
+  socket.on('notify:changed', onNotifyChanged);
+  socket.on('mentions:seen', () => setInboxCount(0));
   socket.on('folders:changed', ({ folders }) => setFolders(folders));
   socket.on('voice:sound', (data) => playSoundEvent(data, memberById(data.userId) || freshUser({ id: data.userId })));
   socket.on('stage:role', (data) => onStageRole(data));
@@ -591,6 +665,7 @@ function connectSocket() {
   socket.on('server:changed', ({ serverId }) => {
     if (serverId === state.view) refreshDetailSoon();
     forgetCommands(); // bots entram/saem: a lista de comandos muda
+    forgetSwitcher();
     loadServersSoon();
     loadMyEmojisSoon();
   });
@@ -706,8 +781,15 @@ function onMessageNew(msg) {
 
   const mine = msg.author.id === state.me.id;
   const isDm = msg.serverId === null;
-  const notify = !mine && msg.kind !== 'system' && (isDm || msg.mentionEveryone || msg.mentions.includes(state.me.id));
+  // Preferências: silenciado / nada / só menções / todas.
+  const parentId = !isDm && state.detail && state.detail.server.id === msg.serverId
+    ? ((state.detail.channels.find((c) => c.id === msg.channelId) || {}).parentChannelId || null) : null;
+  const pref = effectiveNotify(msg.serverId, msg.channelId, parentId);
+  const mentioned = isDm || msg.mentionEveryone || msg.mentions.includes(state.me.id);
+  const counts = !mine && msg.kind !== 'system' && mentioned && pref.level !== 'none';
+  const notify = !mine && msg.kind !== 'system' && !pref.muted && pref.level !== 'none' && (pref.level === 'all' || mentioned);
   const active = msg.channelId === state.channelId && isVisible();
+  inboxNoticeMessage(msg);
 
   if (isDm) {
     const dm = state.dms.find((d) => d.channelId === msg.channelId);
@@ -721,7 +803,7 @@ function onMessageNew(msg) {
   if (msg.channelId === state.channelId) renderMessages({ stick: mine ? 'always' : 'if-near' });
 
   if (active) scheduleMarkRead();
-  else if (!mine) bumpUnread(msg, notify);
+  else if (!mine && !pref.muted) bumpUnread(msg, counts);
 
   if (notify && !active) notifyUser(msg);
   renderBadges();
@@ -837,6 +919,30 @@ initMore({
   },
 });
 
+initAvisos({
+  rerender: () => { if (state.me) { renderRail(); renderSidebar(); renderHeader(); } },
+  renderRail: () => renderRail(),
+  renderComposer: () => renderComposerState(),
+  selectServer: (id, ch) => selectServer(id, ch),
+  selectChannel: (id) => selectChannel(id),
+  goHome: (ch) => goHome(ch),
+  openDm: (userId) => openDm(userId),
+  jumpTo: async (r) => {
+    if (r.serverId && state.view !== r.serverId) await selectServer(r.serverId, r.channelId);
+    else if (!r.serverId && state.view !== 'home') await goHome(r.channelId);
+    else if (state.channelId !== r.channelId) await selectChannel(r.channelId);
+    jumpToMessage(r.channelId, r.messageId);
+  },
+});
+
+// Ctrl+K (ou ⌘K): troca rápida.
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 'k' || e.key === 'K') && state.me && !$('#app').hidden) {
+    e.preventDefault();
+    openSwitcher();
+  }
+});
+
 initComunidade({
   refreshDetail: () => refreshDetail(),
   renderRail: () => renderRail(),
@@ -949,6 +1055,22 @@ function renderAll() {
   renderComposerState();
   renderTyping();
   updateTitle();
+  syncFloating();
+}
+
+// Vídeo flutuante: a tela compartilhada da chamada segue com você pelos outros canais.
+function syncFloating() {
+  const vs = voiceState();
+  const ch = currentChannel();
+  const stageVisible = !!vs.channelId && (
+    (state.view !== 'home' && ch && ch.kind === 'voice' && ch.id === vs.channelId)
+    || (state.view === 'home' && state.channelId === vs.channelId));
+  syncFloatingScreen({
+    stageVisible,
+    onOpen: () => {
+      if (vs.serverId) { if (state.view === vs.serverId) selectChannel(vs.channelId); else selectServer(vs.serverId, vs.channelId); } else goHome(vs.channelId);
+    },
+  });
 }
 
 function renderBadges() {
@@ -970,7 +1092,7 @@ function renderRail() {
   home.classList.toggle('active', state.view === 'home');
   home.querySelector('.badge-slot').replaceChildren(badge(homeCount) || '');
 
-  $('#server-list').replaceChildren(...railNodes({ servers: state.servers, view: state.view, badge, select: (id) => selectServer(id) }));
+  $('#server-list').replaceChildren(...railNodes({ servers: state.servers, view: state.view, badge, select: (id) => selectServer(id), muted: serverMuted }));
 }
 
 // ---------------------------------------------------------------- Barra lateral
@@ -1007,6 +1129,7 @@ function renderSidebar() {
     header.classList.remove('clickable');
     const pending = state.friends.incoming.length;
     body.replaceChildren(
+      switcherButton(),
       h('button', {
         class: `side-item${state.channelId === null ? ' active' : ''}`,
         onclick: () => goHome(),
@@ -1017,7 +1140,7 @@ function renderSidebar() {
         ? h('p', { class: 'muted side-empty' }, 'Nenhuma conversa ainda. Abra uma pelo perfil de alguém ou pela lista de amigos.')
         : h('ul', { class: 'side-list' }, state.dms.map((d) => h('li', {},
           h('button', {
-            class: `side-item dm${d.channelId === state.channelId ? ' active' : ''}${d.unread ? ' unread' : ''}`,
+            class: `side-item dm${d.channelId === state.channelId ? ' active' : ''}${d.unread && !effectiveNotify(null, d.channelId).muted ? ' unread' : ''}${effectiveNotify(null, d.channelId).muted ? ' muted-ch' : ''}`,
             onclick: () => selectChannel(d.channelId),
           },
           dmAvatar(d),
@@ -1026,7 +1149,8 @@ function renderSidebar() {
             d.isGroup ? h('span', { class: 'dm-sub muted truncate' }, `${d.users.length + 1} pessoas`) : null),
           d.voice && d.voice.length ? h('span', { class: 'call-dot', title: 'Chamada em andamento' }, '📞') : null,
           d.disappearingSeconds ? h('span', { class: 'disappear-dot', title: 'Mensagens temporárias ligadas' }, '⏳') : null,
-          badge(d.mentions))))),
+          effectiveNotify(null, d.channelId).muted ? h('span', { class: 'mute-dot', title: 'Silenciada' }, '🔕') : null,
+          effectiveNotify(null, d.channelId).level === 'none' ? null : badge(d.mentions))))),
     );
     return;
   }
@@ -1037,10 +1161,11 @@ function renderSidebar() {
     return;
   }
 
-  header.replaceChildren(
+  header.replaceChildren(...[
     h('span', { class: 'truncate' }, state.detail.server.name),
+    serverMuted(state.detail.server.id) ? h('span', { class: 'mute-dot', title: 'Servidor silenciado' }, '🔕') : null,
     h('span', { class: 'chevron', 'aria-hidden': 'true' }, '▾'),
-  );
+  ].filter(Boolean));
   // Capa do servidor no topo da lista de canais.
   const banner = state.detail.server.bannerUrl;
   header.classList.toggle('with-banner', !!banner);
@@ -1061,13 +1186,18 @@ function renderSidebar() {
     : null);
   const threadRow = (t) => h('li', { class: 'channel-row thread' },
     h('button', {
-      class: `side-item channel thread${t.id === state.channelId ? ' active' : ''}${t.unread ? ' unread' : ''}`,
+      class: `side-item channel thread${t.id === state.channelId ? ' active' : ''}${unreadOf(t) ? ' unread' : ''}${prefOf(t).muted ? ' muted-ch' : ''}`,
       title: t.name,
       onclick: () => selectChannel(t.id),
-    }, h('span', { class: 'thread-branch', 'aria-hidden': 'true' }), h('span', { class: 'truncate' }, t.name), badge(t.mentions)),
+    }, h('span', { class: 'thread-branch', 'aria-hidden': 'true' }), h('span', { class: 'truncate' }, t.name), badgeOf(t)),
     gear(t));
   const vs = voiceState();
 
+  const sid = state.detail.server.id;
+  const prefOf = (c) => effectiveNotify(sid, c.id, c.parentChannelId);
+  const unreadOf = (c) => !!c.unread && !prefOf(c).muted;
+  const badgeOf = (c, n = c.mentions) => (prefOf(c).level === 'none' ? null : badge(n));
+  const muteMark = (c) => (prefOf(c).muted && !serverMuted(sid) ? h('span', { class: 'mute-dot', title: 'Canal silenciado' }, '🔕') : null);
   const channelRow = (c) => {
     if (c.kind === 'voice') {
       const people = (state.detail.voice && state.detail.voice[c.id]) || [];
@@ -1105,24 +1235,25 @@ function renderSidebar() {
       // Os posts não aparecem na lista lateral: ficam dentro do fórum.
       const posts = all.filter((t) => t.kind === 'thread' && t.parentChannelId === c.id);
       const openPost = posts.some((t) => t.id === state.channelId);
-      const unread = posts.some((t) => t.unread);
+      const unread = posts.some((t) => unreadOf(t));
       const mentions = posts.reduce((n, t) => n + (t.mentions || 0), 0);
       return [h('li', { class: 'channel-row', dataset: { channelId: String(c.id), dragId: manage ? String(c.id) : '' } },
         h('button', {
-          class: `side-item channel forum-ch${c.id === state.channelId || openPost ? ' active' : ''}${unread ? ' unread' : ''}`,
+          class: `side-item channel forum-ch${c.id === state.channelId || openPost ? ' active' : ''}${unread ? ' unread' : ''}${prefOf(c).muted ? ' muted-ch' : ''}`,
           onclick: () => selectChannel(c.id),
-        }, h('span', { class: 'hash' }, '💬'), h('span', { class: 'truncate' }, c.name), c.private ? lockIcon() : null, badge(mentions)),
+        }, h('span', { class: 'hash' }, '💬'), h('span', { class: 'truncate' }, c.name), c.private ? lockIcon() : null, muteMark(c), badgeOf(c, mentions)),
         gear(c))];
     }
     return [h('li', { class: 'channel-row', dataset: { channelId: String(c.id), dragId: manage ? String(c.id) : '' } },
-      h('button', {
-        class: `side-item channel${c.id === state.channelId ? ' active' : ''}${c.unread ? ' unread' : ''}`,
+      channelContext(h('button', {
+        class: `side-item channel${c.id === state.channelId ? ' active' : ''}${unreadOf(c) ? ' unread' : ''}${prefOf(c).muted ? ' muted-ch' : ''}`,
         onclick: () => selectChannel(c.id),
-      }, h('span', { class: 'hash', title: c.announce ? 'Canal de anúncios' : c.isClips ? 'Canal de clipes' : null }, c.announce ? '📢' : c.isClips ? '🎬' : '#'), h('span', { class: 'truncate' }, c.name), c.private ? lockIcon() : null, badge(c.mentions)),
+      }, h('span', { class: 'hash', title: c.announce ? 'Canal de anúncios' : c.isClips ? 'Canal de clipes' : null }, c.announce ? '📢' : c.isClips ? '🎬' : '#'), h('span', { class: 'truncate' }, c.name), c.private ? lockIcon() : null,
+      c.slowmode ? h('span', { class: 'slow-dot', title: `Modo lento: ${c.slowmode} s` }, '🐢') : null, muteMark(c), badgeOf(c)), c),
       gear(c)), ...threadsOf(c.id).map(threadRow)];
   };
 
-  const blocks = [eventsSidebarItem(state.detail.server.id), rankingSidebarItem(state.detail.server.id), reportsSidebarItem(state.detail.server.id)].filter(Boolean);
+  const blocks = [switcherButton(), eventsSidebarItem(state.detail.server.id), rankingSidebarItem(state.detail.server.id), reportsSidebarItem(state.detail.server.id)].filter(Boolean);
   // Canais sem categoria ficam no topo.
   const loose = listed.filter((c) => !c.categoryId || !catIds.has(c.categoryId));
   blocks.push(h('ul', { class: 'side-list cat-body', dataset: { categoryId: '' } }, loose.flatMap(channelRow),
@@ -1148,6 +1279,21 @@ function renderSidebar() {
   if (!categories.length && !loose.length) blocks.push(h('p', { class: 'muted side-empty' }, 'Nenhum canal.'));
   body.replaceChildren(...blocks);
   if (manage) enableChannelDrag(body);
+}
+
+// Botão "Ir para…" no topo da lista (o mesmo do Ctrl+K; no celular é o jeito de abrir).
+function switcherButton() {
+  return h('button', { class: 'switcher-open', id: 'btn-switcher', title: 'Ir para um canal, servidor ou conversa (Ctrl+K)', onclick: () => openSwitcher() },
+    h('span', {}, '🔎 Ir para…'), h('kbd', { class: 'mobile-hide' }, 'Ctrl K'));
+}
+
+// Botão direito (ou toque longo) num canal: notificações dele.
+function channelContext(btn, c) {
+  btn.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    notifyDialog({ serverId: state.view, channelId: c.id, title: `🛎️ Notificações de ${c.kind === 'thread' ? c.name : `#${c.name}`}` });
+  });
+  return btn;
 }
 
 // Quem pode liberar a entrada na sala de espera.
@@ -1229,6 +1375,7 @@ function openVoiceChannel(channel) {
 
 function onVoiceChange() {
   renderVoicePanel($('#voice-panel'));
+  syncFloating();
   if (!inVoice()) maybeReloadLater();
   const vs = voiceState();
   if (vs.channelId) stopRinging(vs.channelId);
@@ -1296,23 +1443,37 @@ function renderHeader() {
         h('button', { class: 'icon-btn call-btn', title: 'Chamada de vídeo', onclick: () => startDmCall(dm, true) }, '📹'),
       );
     }
-    actions.append(disappearButton(dm));
-    actions.append(h('button', { class: 'icon-btn mobile-hide', title: 'Adicionar pessoas', onclick: () => addToGroupDialog(dm) }, '➕👤'));
-    if (dm.isGroup) {
-      actions.append(h('button', { class: 'icon-btn', title: 'Opções do grupo', onclick: (e) => groupMenu(e.currentTarget, dm) }, '⋯'));
-    } else {
-      actions.append(h('button', {
-        class: 'icon-btn mobile-only', title: 'Mais opções',
-        onclick: (e) => openMenu(e.currentTarget, [{ label: '➕  Criar grupo com mais amigos', onClick: () => addToGroupDialog(dm) }], { align: 'end', className: 'popover-menu' }),
-      }, '⋯'));
-    }
   }
   const textual = !!state.channelId && !(channel && (channel.kind === 'voice' || channel.kind === 'forum'));
-  if (textual) {
-    const label = dm ? (dm.isGroup ? `o grupo ${dmName(dm)}` : `a conversa com ${dm.user.displayName}`) : `#${channel ? channel.name : ''}`;
-    const speakBtn = ttsHeaderButton(state.channelId, dm ? (dm.isGroup ? dmName(dm) : dm.user.displayName) : (channel && channel.kind === 'thread' ? channel.name : `canal ${channel ? channel.name : ''}`));
-    if (speakBtn) actions.append(speakBtn);
-    actions.append(h('button', { class: 'icon-btn mobile-hide', title: 'Exportar conversa', onclick: () => exportDialog(state.channelId, label) }, '📥'));
+  // Ícones de estado (só quando ligados) e o resto no menu ⋯.
+  if (state.channelId && (dm || channel)) {
+    const label = dm ? dmName(dm) : channel.kind === 'thread' ? channel.name : `#${channel.name}`;
+    const notifyArgs = { serverId: dm ? null : state.view, channelId: state.channelId, parentId: channel ? channel.parentChannelId : null, label };
+    actions.append(...[
+      dm ? disappearButton(dm) : null,
+      channel ? slowHeaderButton(channel) : null,
+      notifyHeaderButton(notifyArgs),
+    ].filter(Boolean));
+    if (textual) {
+      const speakBtn = ttsHeaderButton(state.channelId, dm ? (dm.isGroup ? dmName(dm) : dm.user.displayName) : (channel && channel.kind === 'thread' ? channel.name : `canal ${channel ? channel.name : ''}`));
+      if (speakBtn) actions.append(speakBtn);
+    }
+    const exportLabel = dm ? (dm.isGroup ? `o grupo ${dmName(dm)}` : `a conversa com ${dm.user.displayName}`) : `#${channel ? channel.name : ''}`;
+    actions.append(h('button', {
+      class: 'icon-btn', id: 'btn-more-actions', title: 'Mais opções',
+      onclick: (e) => {
+        const anchor = e.currentTarget;
+        openMenu(anchor, [
+          { label: '➕  Adicionar pessoas', hidden: !dm, onClick: () => addToGroupDialog(dm) },
+          { label: '👥  Opções do grupo…', hidden: !(dm && dm.isGroup), onClick: () => groupMenu(anchor, dm) },
+          { label: '⏳  Mensagens temporárias…', hidden: !dm, onClick: () => disappearMenu(anchor, dm) },
+          { label: '🛎️  Notificações…', onClick: () => notifyDialog({ serverId: notifyArgs.serverId, channelId: state.channelId, title: `🛎️ Notificações de ${label}` }) },
+          { label: '🐢  Modo lento…', hidden: !(channel && channel.kind === 'text' && slowExempt()), onClick: () => slowMenu(anchor, channel) },
+          { label: '🖼️  Galeria (fotos, vídeos e arquivos)', hidden: !textual, onClick: () => openGallery(state.channelId, label) },
+          { label: '📥  Exportar conversa', hidden: !textual, onClick: () => exportDialog(state.channelId, exportLabel) },
+        ], { align: 'end', className: 'popover-menu' });
+      },
+    }, '⋯'));
   }
   $('#btn-pins').hidden = !textual;
   $('#btn-toggle-members').hidden = !(state.view !== 'home' || (dm && dm.isGroup));
@@ -1930,6 +2091,7 @@ function renderComposerState() {
       ? 'Você não tem permissão para enviar mensagens aqui.'
       : dm ? (dm.isGroup ? `Conversar em ${dmName(dm)}` : `Conversar com @${dm.user.username}`)
         : channel && channel.kind === 'thread' ? `Conversar em 🧵 ${channel.name}` : `Conversar em #${channel ? channel.name : ''}`;
+  renderSlowBar(ch && ch.kind === 'text' && allowed ? ch : null);
   renderUploads();
   renderReplyBar();
   updateMicButton();
@@ -2009,6 +2171,9 @@ function sendMessage() {
   if (ups.some((u) => !u.attachment && !u.error)) return toast('Espere os anexos terminarem de enviar.');
   if (ups.some((u) => u.error)) return toast('Remova os anexos que deram erro.');
   if (!content && ups.length === 0) return;
+  const slowCh = currentChannel();
+  const wait = slowWaitLeft(slowCh);
+  if (wait > 0) { renderSlowBar(slowCh); return toast(`🐢 Modo lento: espere ${wait} s.`); }
 
   // Comando de barra (/dado, /sortear...)? Vai pela rota de comandos.
   if (/^\/[a-z0-9_-]{1,32}(\s|$)/i.test(content) && !ups.length) {
@@ -2040,11 +2205,20 @@ function sendMessage() {
   renderMessages({ stick: 'always' });
 
   const payload = { channelId, content, attachmentIds, nonce, ...(reply ? { replyToId: reply.id } : {}) };
+  noteSent(slowCh);
+  if (slowCh && slowCh.slowmode) renderSlowBar(slowCh);
   state.socket.timeout(15000).emit('message:send', payload, (err, res) => {
     const bucket = state.messages.get(channelId);
     if (!bucket) return;
     const idx = bucket.items.indexOf(temp);
-    if (err || !res || !res.ok) {
+    if (!err && res && !res.ok && /Modo lento/.test(res.error || '')) {
+      // Modo lento: devolve o texto para a caixa (não fica como "não enviada").
+      if (idx !== -1) bucket.items.splice(idx, 1);
+      if (!input.value) { input.value = content; autoResize(); }
+      noteSlowError(slowCh, res.error);
+      renderSlowBar(slowCh);
+      toast(res.error);
+    } else if (err || !res || !res.ok) {
       if (idx !== -1) Object.assign(temp, { pending: false, failed: true, _v: 1 });
       toast((res && res.error) || 'Não foi possível enviar a mensagem.');
     } else if (idx !== -1) {
@@ -2100,6 +2274,7 @@ function sendSticker(st) {
   });
 }
 
+$('#btn-inbox').addEventListener('click', (e) => openInbox(e.currentTarget));
 $('#btn-saved').addEventListener('click', () => {
   if (!$('#search-panel').hidden && document.querySelector('#search-panel .lists-tabs')) closeListsPanel();
   else openListsPanel('saved');
@@ -2715,6 +2890,8 @@ function openServerMenu(anchor) {
     { label: '😺  Emojis, figurinhas e sons', hidden: !can(P.MANAGE_EMOJIS), onClick: () => openServerSettings('emojis') },
     { label: '📊  Estatísticas', hidden: !(can(P.MANAGE_SERVER) || can(P.VIEW_AUDIT_LOG)), onClick: () => openServerSettings('stats') },
     { label: '📜  Registro de auditoria', hidden: !can(P.VIEW_AUDIT_LOG), onClick: () => openServerSettings('audit') },
+    { label: '🛎️  Notificações do servidor', onClick: () => notifyDialog({ serverId: d.server.id, title: `🛎️ Notificações de ${d.server.name}` }) },
+    { label: '🔗  Webhooks', hidden: !can(P.MANAGE_CHANNELS), onClick: () => openServerSettings('webhooks') },
     { label: `🚩  Denúncias`, hidden: !can(P.MANAGE_MESSAGES), onClick: () => openReportsPanel(d.server.id) },
     { label: '📖  Rever regras e interesses', hidden: !d.onboarding, onClick: () => openOnboarding({ review: true }) },
     { label: '👋  Primeiros passos (regras e interesses)', hidden: !can(P.MANAGE_SERVER), onClick: () => openServerSettings('onboarding') },
@@ -2845,6 +3022,9 @@ function editChannelDialog(channel) {
   const announceBox = channel.kind === 'text' && can(P.MANAGE_CHANNELS) ? h('input', { type: 'checkbox', class: 'switch', checked: !!channel.announce }) : null;
   const waitBox = channel.kind === 'voice' && can(P.MANAGE_CHANNELS) ? h('input', { type: 'checkbox', class: 'switch', checked: !!channel.waitingRoom }) : null;
   const clipsBox = channel.kind === 'text' && can(P.MANAGE_CHANNELS) ? h('input', { type: 'checkbox', class: 'switch', id: 'edit-clips-box', checked: !!channel.isClips }) : null;
+  const slowSel = channel.kind === 'text' && can(P.MANAGE_CHANNELS) ? h('select', { class: 'select', id: 'edit-slowmode' },
+    [[0, 'Desligado'], [5, '5 segundos'], [10, '10 segundos'], [15, '15 segundos'], [30, '30 segundos'], [60, '1 minuto'], [120, '2 minutos'], [300, '5 minutos'], [600, '10 minutos'], [900, '15 minutos'], [1800, '30 minutos'], [3600, '1 hora'], [7200, '2 horas'], [21600, '6 horas']]
+      .map(([v, l]) => h('option', { value: String(v), selected: (channel.slowmode || 0) === v }, l))) : null;
   if (topicBox) topicBox.value = channel.topic || '';
   openDialog({
     title: thread ? 'Editar thread' : 'Editar canal',
@@ -2852,6 +3032,7 @@ function editChannelDialog(channel) {
       topicBox ? h('label', { class: 'field' }, 'Descrição / regras do fórum', topicBox) : null,
       announceBox ? h('label', { class: 'switch-row' },
         h('span', { class: 'kind-text' }, h('strong', {}, '📢 Canal de anúncios'), h('span', { class: 'muted small' }, 'Só a moderação escreve; os outros reagem e comentam em threads.')), announceBox) : null,
+      slowSel ? h('label', { class: 'field' }, '🐢 Modo lento (cada pessoa espera entre uma mensagem e outra)', slowSel) : null,
       clipsBox ? h('label', { class: 'switch-row' },
         h('span', { class: 'kind-text' }, h('strong', {}, '🎬 Canal de clipes'), h('span', { class: 'muted small' }, 'Os clipes (últimos ~30 s de uma tela compartilhada) são postados aqui.')), clipsBox) : null,
       opts ? opts.el : null,
@@ -2880,7 +3061,7 @@ function editChannelDialog(channel) {
         onClick: async () => {
           const name = input2.value.trim();
           if (!name) throw new Error('Dê um nome ao canal.');
-          await api(`/channels/${channel.id}`, { method: 'PATCH', body: { name, ...(opts ? opts.values() : {}), ...(stageBox ? { stage: stageBox.checked } : {}), ...(topicBox ? { topic: topicBox.value } : {}), ...(announceBox ? { announce: announceBox.checked } : {}), ...(waitBox ? { waitingRoom: waitBox.checked } : {}), ...(clipsBox ? { isClips: clipsBox.checked } : {}) } });
+          await api(`/channels/${channel.id}`, { method: 'PATCH', body: { name, ...(opts ? opts.values() : {}), ...(stageBox ? { stage: stageBox.checked } : {}), ...(topicBox ? { topic: topicBox.value } : {}), ...(announceBox ? { announce: announceBox.checked } : {}), ...(waitBox ? { waitingRoom: waitBox.checked } : {}), ...(clipsBox ? { isClips: clipsBox.checked } : {}), ...(slowSel ? { slowmode: Number(slowSel.value) } : {}) } });
         },
       },
     ],

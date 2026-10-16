@@ -62,10 +62,12 @@ async function authenticate(value) {
   const token = raw.startsWith('Bearer ') ? raw.slice(7) : raw;
   const t = token && verifyToken(token);
   if (!t) return null;
-  const { rows } = await db.query('SELECT token_version FROM users WHERE id = $1 AND NOT is_bot AND blocked_at IS NULL', [t.userId]);
+  const { rows } = await db.query('SELECT token_version, email_required, email_verified_at FROM users WHERE id = $1 AND NOT is_bot AND blocked_at IS NULL', [t.userId]);
   if (!rows[0] || Number(rows[0].token_version) !== t.ver) return null;
-  return { userId: t.userId, isBot: false };
+  return { userId: t.userId, isBot: false, emailPending: !!rows[0].email_required && !rows[0].email_verified_at };
 }
+
+const EMAIL_PENDING_OK = /^\/me\/email(\/|$)/;
 
 // Middleware do Express: exige login (pessoa ou bot).
 function requireAuth(req, res, next) {
@@ -74,6 +76,10 @@ function requireAuth(req, res, next) {
       if (!who) return res.status(401).json({ error: 'Faça login para continuar.' });
       req.userId = who.userId;
       req.isBot = who.isBot;
+      // Conta nova que ainda não confirmou o e-mail: só pode ver o próprio perfil e confirmar.
+      if (who.emailPending && !EMAIL_PENDING_OK.test(req.path) && !(req.method === 'GET' && req.path === '/me')) {
+        return res.status(403).json({ error: 'Confirme o seu e-mail para continuar.', code: 'email_unverified' });
+      }
       next();
     })
     .catch(next);

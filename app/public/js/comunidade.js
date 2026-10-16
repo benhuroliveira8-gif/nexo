@@ -142,7 +142,7 @@ export function renderOnboardingSettings(rerender) {
         h('option', { value: '' }, 'Sem cargo'),
         assignable.map((r) => h('option', { value: String(r.id), selected: x.roleId === r.id }, `Dá o cargo: ${r.name}`))),
       h('button', { class: 'icon-btn small', title: 'Tirar', onclick: () => { list.splice(i, 1); drawRows(); } }, '✕'))),
-    list.length < 20 ? h('button', { class: 'btn small', id: 'ob-add', onclick: () => { list.push({ emoji: '', label: '', roleId: null }); drawRows(); } }, '➕ Adicionar interesse') : null);
+    ...(list.length < 20 ? [h('button', { class: 'btn small', id: 'ob-add', onclick: () => { list.push({ emoji: '', label: '', roleId: null }); drawRows(); } }, '➕ Adicionar interesse')] : []));
     drawRows();
     page.replaceChildren(
       h('h2', {}, 'Primeiros passos'),
@@ -184,7 +184,7 @@ export function renderOnboardingSettings(rerender) {
 
 const DISAPPEAR_LABEL = { 0: 'Desligado', 86400: '24 horas', 604800: '7 dias' };
 
-export function disappearButton(dm) {
+export function disappearMenu(anchor, dm) {
   const on = dm.disappearingSeconds || 0;
   const set = async (seconds) => {
     try {
@@ -193,16 +193,22 @@ export function disappearButton(dm) {
       toast(seconds ? `⏳ As novas mensagens somem ${DISAPPEAR_LABEL[seconds]} depois de enviadas.` : 'Mensagens temporárias desligadas.');
     } catch (err) { toast(err.message); }
   };
+  openMenu(anchor, [
+    { label: `${on === 0 ? '● ' : ''}Desligado (ficam para sempre)`, onClick: () => set(0) },
+    { label: `${on === 86400 ? '● ' : ''}⏳ Somem depois de 24 horas`, onClick: () => set(86400) },
+    { label: `${on === 604800 ? '● ' : ''}⏳ Somem depois de 7 dias`, onClick: () => set(604800) },
+  ], { align: 'end', className: 'popover-menu' });
+}
+
+// Aparece no cabeçalho só quando está ligado (para mudar: o mesmo botão ou o menu ⋯).
+export function disappearButton(dm) {
+  const on = dm.disappearingSeconds || 0;
+  if (!on) return null;
   return h('button', {
-    class: `icon-btn disappear-btn${on ? ' on' : ''}`,
-    id: 'btn-disappear',
-    title: on ? `Mensagens temporárias: somem depois de ${DISAPPEAR_LABEL[on]}` : 'Mensagens temporárias (somem sozinhas)',
-    onclick: (e) => openMenu(e.currentTarget, [
-      { label: `${on === 0 ? '● ' : ''}Desligado (ficam para sempre)`, onClick: () => set(0) },
-      { label: `${on === 86400 ? '● ' : ''}⏳ Somem depois de 24 horas`, onClick: () => set(86400) },
-      { label: `${on === 604800 ? '● ' : ''}⏳ Somem depois de 7 dias`, onClick: () => set(604800) },
-    ], { align: 'end', className: 'popover-menu' }),
-  }, '⏳', on ? h('span', { class: 'disappear-label' }, on === 86400 ? '24h' : '7d') : null);
+    class: 'icon-btn disappear-btn on', id: 'btn-disappear',
+    title: `Mensagens temporárias: somem depois de ${DISAPPEAR_LABEL[on]}`,
+    onclick: (e) => disappearMenu(e.currentTarget, dm),
+  }, '⏳', h('span', { class: 'disappear-label' }, on === 86400 ? '24h' : '7d'));
 }
 
 function leftLabel(ms) {
@@ -262,6 +268,8 @@ function newFolderDialog(serverId) {
 function serverMenu(anchor, s) {
   const inFolder = folders.find((f) => f.serverIds.includes(s.id));
   openMenu(anchor, [
+    { label: '🛎️  Notificações…', onClick: () => import('./avisos.js').then(({ notifyDialog }) => notifyDialog({ serverId: s.id, title: `🛎️ Notificações de ${s.name}` })) },
+    { separator: true },
     ...folders.filter((f) => f !== inFolder).map((f) => ({
       label: `📁  Mover para "${f.name}"`,
       onClick: () => saveFolders(without(folders, s.id).map((x) => (x.id === f.id ? { ...x, serverIds: [...x.serverIds, s.id] } : x))),
@@ -293,18 +301,18 @@ function onContext(el, fn) {
 }
 
 // Monta os botões da barra da esquerda (servidores soltos e pastas).
-export function railNodes({ servers, view, badge, select }) {
+export function railNodes({ servers, view, badge, select, muted = () => false }) {
   const byId = new Map(servers.map((s) => [s.id, s]));
   const placed = new Set();
   const folderOf = new Map();
   folders.forEach((f) => f.serverIds.forEach((id) => { if (byId.has(id)) folderOf.set(id, f); }));
   const serverBtn = (s, inFolder) => {
     const btn = h('button', {
-      class: `rail-btn${s.id === view ? ' active' : ''}${s.unread ? ' unread' : ''}${s.iconUrl ? ' has-icon' : ''}${inFolder ? ' in-folder' : ''}`,
+      class: `rail-btn${s.id === view ? ' active' : ''}${s.unread && !muted(s.id) ? ' unread' : ''}${s.iconUrl ? ' has-icon' : ''}${inFolder ? ' in-folder' : ''}${muted(s.id) ? ' muted' : ''}`,
       title: s.name,
       dataset: { serverId: String(s.id) },
       onclick: () => select(s.id),
-    }, serverIcon(s), h('span', { class: 'badge-slot' }, badge(s.mentions) || ''));
+    }, serverIcon(s), h('span', { class: 'badge-slot' }, badge(muted(s.id) ? 0 : s.mentions) || ''));
     onContext(btn, (el) => serverMenu(el, s));
     return btn;
   };

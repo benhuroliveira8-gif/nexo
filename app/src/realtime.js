@@ -41,6 +41,7 @@ module.exports = function setupRealtime(io) {
       // Pessoas mandam o token de login; bots mandam "Bot <token do bot>".
       const who = await auth.authenticate(socket.handshake.auth && socket.handshake.auth.token);
       if (!who) return next(new Error('unauthorized'));
+      if (who.emailPending) return next(new Error('email_unverified'));
       const { rows } = await db.query('SELECT id, username, display_name, is_bot, avatar_id, status, status_text FROM users WHERE id = $1', [who.userId]);
       if (!rows[0]) return next(new Error('unauthorized'));
       socket.data.user = S.user(rows[0]);

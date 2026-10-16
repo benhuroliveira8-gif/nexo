@@ -1320,3 +1320,87 @@ export function renderStage(el, { channel, serverId, serverName, others, members
       h('button', { class: 'round-btn big danger', title: 'Sair da voz', onclick: () => leaveVoice() }, '📞')),
   ].filter(Boolean));
 }
+
+// ---------------------------------------------------------------- Vídeo flutuante
+// Você está numa chamada com alguém compartilhando a tela e foi olhar outro canal:
+// a transmissão continua num quadradinho que dá para arrastar (ou ir para o PiP do sistema).
+let floatBox = null; // { el, video, track, sid }
+const floatClosed = new Set(); // transmissões que a pessoa fechou (até a próxima)
+
+function floatPos() {
+  try { return JSON.parse(storage('nexo.floatPos') || 'null'); } catch { return null; }
+}
+function placeFloat(el, pos) {
+  const w = el.offsetWidth || 320; const hgt = el.offsetHeight || 200;
+  const x = Math.min(Math.max(8, pos ? pos.x : window.innerWidth - w - 24), window.innerWidth - w - 8);
+  const y = Math.min(Math.max(8, pos ? pos.y : window.innerHeight - hgt - 96), window.innerHeight - hgt - 8);
+  el.style.left = `${x}px`; el.style.top = `${y}px`;
+}
+
+function removeFloat() {
+  if (!floatBox) return;
+  try { floatBox.track.detach(floatBox.video); } catch { /* */ }
+  if (document.pictureInPictureElement === floatBox.video) document.exitPictureInPicture().catch(() => {});
+  floatBox.el.remove();
+  floatBox = null;
+}
+
+// Chamado sempre que a tela muda. stageVisible = a tela da chamada já está aparecendo.
+export function syncFloatingScreen({ stageVisible, onOpen }) {
+  const room = vs.room;
+  if (!room || stageVisible || !window.LivekitClient) return removeFloat();
+  const { Track } = LK();
+  // A primeira tela compartilhada (dos outros) que você está assistindo.
+  let pick = null;
+  for (const p of room.remoteParticipants.values()) {
+    if (unwatched.has(p.identity)) continue;
+    const pub = p.getTrackPublication(Track.Source.ScreenShare);
+    if (pub && pub.track && !pub.isMuted && !floatClosed.has(pub.track.sid)) { pick = { p, track: pub.track }; break; }
+  }
+  // Transmissões que acabaram saem da lista de "fechadas".
+  for (const sid of [...floatClosed]) {
+    const live = [...room.remoteParticipants.values()].some((p) => { const pub = p.getTrackPublication(Track.Source.ScreenShare); return pub && pub.track && pub.track.sid === sid; });
+    if (!live) floatClosed.delete(sid);
+  }
+  if (!pick) return removeFloat();
+  if (floatBox && floatBox.sid === pick.track.sid) { floatBox.open = onOpen; return; }
+  removeFloat();
+  const video = pick.track.attach();
+  video.muted = true; video.playsInline = true; video.autoplay = true;
+  const uid = participantUserId(pick.p);
+  const name = pick.p.name || pick.p.identity;
+  const box = { sid: pick.track.sid, track: pick.track, video, open: onOpen };
+  const pipBtn = document.pictureInPictureEnabled
+    ? h('button', { type: 'button', class: 'fv-btn', title: 'Janela do sistema (fica por cima de tudo)', onclick: (e) => { e.stopPropagation(); video.requestPictureInPicture().catch(() => toast('Não deu para abrir a janela flutuante.')); } }, '⧉')
+    : null;
+  const el = h('div', { class: 'float-video', id: 'float-video', role: 'region', 'aria-label': 'Tela compartilhada (flutuante)', dataset: { userId: String(uid || '') } },
+    video,
+    h('div', { class: 'fv-bar' },
+      h('span', { class: 'fv-name truncate' }, `🖥️ ${name}`),
+      pipBtn,
+      h('button', { type: 'button', class: 'fv-btn fv-open', title: 'Voltar para a chamada', onclick: (e) => { e.stopPropagation(); box.open(); } }, '⤢'),
+      h('button', { type: 'button', class: 'fv-btn fv-close', title: 'Fechar (volta na próxima transmissão)', onclick: (e) => { e.stopPropagation(); floatClosed.add(box.sid); removeFloat(); } }, '✕')));
+  box.el = el;
+  // Arrastar (mouse ou dedo); duplo clique volta para a chamada.
+  let drag = null;
+  el.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('button')) return;
+    drag = { dx: e.clientX - el.offsetLeft, dy: e.clientY - el.offsetTop, moved: false };
+    el.setPointerCapture(e.pointerId);
+  });
+  el.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    drag.moved = true;
+    placeFloat(el, { x: e.clientX - drag.dx, y: e.clientY - drag.dy });
+  });
+  el.addEventListener('pointerup', () => {
+    if (drag && drag.moved) storage('nexo.floatPos', JSON.stringify({ x: el.offsetLeft, y: el.offsetTop }));
+    drag = null;
+  });
+  el.addEventListener('dblclick', () => box.open());
+  document.body.append(el);
+  placeFloat(el, floatPos());
+  video.play().catch(() => {});
+  floatBox = box;
+}
+window.addEventListener('resize', () => { if (floatBox) placeFloat(floatBox.el, { x: floatBox.el.offsetLeft, y: floatBox.el.offsetTop }); });

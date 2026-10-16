@@ -50,6 +50,12 @@ services:
       WHISPER_URL: ${WHISPER_URL:-}
       # Onde o painel de saúde procura os backups (só leitura).
       BACKUP_DIR: /backups
+      # E-mail (opcional): confirmação no cadastro e "esqueci a senha" por e-mail. Veja docs/email.md.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
     # Dá tempo de avisar todo mundo antes de desligar numa atualização.
     stop_grace_period: 15s
     volumes:

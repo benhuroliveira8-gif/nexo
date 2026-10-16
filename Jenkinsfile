@@ -1,5 +1,25 @@
 // Pipeline do Nexo: a cada mudança no GitHub, o Jenkins
 // baixa o código, gera a imagem, atualiza o app e confere se ele subiu.
+
+// Aviso num canal do Nexo (opcional): crie um webhook no Nexo e guarde o link no
+// Jenkins como credencial "Secret text" com o ID nexo-webhook. Sem ela, nada acontece.
+def avisarNoNexo(String texto) {
+  try {
+    withCredentials([string(credentialsId: 'nexo-webhook', variable: 'HOOK')]) {
+      withEnv(["MSG=${texto} (build #${env.BUILD_NUMBER})"]) {
+        sh '''
+          caminho="/${HOOK#*://*/}"
+          corpo=$(printf '{"content":"%s"}' "$MSG")
+          docker compose exec -T app wget -qO- --header="Content-Type: application/json" \
+            --post-data="$corpo" "http://localhost:3000$caminho" >/dev/null 2>&1 || echo "Não deu para avisar no Nexo."
+        '''
+      }
+    }
+  } catch (err) {
+    echo 'Aviso no Nexo desligado (credencial nexo-webhook não existe).'
+  }
+}
+
 pipeline {
   agent any
 
@@ -70,7 +90,13 @@ pipeline {
   }
 
   post {
-    always {
+    success {
+      script { avisarNoNexo('✅ Deploy do Nexo feito: versão nova no ar.') }
+    }
+    failure {
+      script { avisarNoNexo('❌ O deploy do Nexo falhou. Veja o Jenkins (job nexo).') }
+    }
+    cleanup {
       sh 'rm -f .env'
       // Remove imagens antigas que ficaram sem uso, para não lotar o disco.
       sh 'docker image prune -f >/dev/null || true'
